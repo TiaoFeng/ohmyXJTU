@@ -9,6 +9,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
 
 use chrono::{Local, NaiveDate};
+use zeroize::Zeroizing;
 
 use crate::auth::{AccountType, LoginDriver, LoginReply};
 use crate::config::{AccessPolicy, Config};
@@ -49,6 +50,13 @@ pub enum Job {
     VerifyMfaCode(String),
     /// 重新開始登入（登入失敗後重試）。
     RetryLogin,
+    /// 以重新輸入的帳號密碼重試登入，成功後才寫入保險庫。
+    RetryWithAccount {
+        /// 使用者重新輸入的帳號密碼。
+        credentials: Credentials,
+        /// 加密口令（用於登入成功後更新保險庫）。
+        passphrase: String,
+    },
     /// 載入課表（含本週考勤）。
     LoadSchedule,
     /// 載入待處理作業。
@@ -98,6 +106,7 @@ impl Job {
             Self::SubmitCaptcha(_) | Self::RefreshCaptcha => "验证码".to_owned(),
             Self::SendMfaCode | Self::VerifyMfaCode(_) => "短信验证".to_owned(),
             Self::RetryLogin => "登录".to_owned(),
+            Self::RetryWithAccount { .. } => "账户设置".to_owned(),
             Self::LoadSchedule => "课表".to_owned(),
             Self::LoadHomework => "作业".to_owned(),
             Self::LoadFlow { .. } => "考勤流水".to_owned(),
@@ -167,6 +176,14 @@ struct LoginFlow {
     retry: Option<Job>,
 }
 
+/// 等待登入成功後才寫入保險庫的憑證。
+struct PendingVault {
+    /// 加密口令（寫入後隨即丟棄）。
+    passphrase: Zeroizing<String>,
+    /// 使用者重新輸入的帳號密碼。
+    credentials: Credentials,
+}
+
 /// 背景工作執行緒。
 struct Worker {
     jobs: Receiver<Job>,
@@ -177,6 +194,7 @@ struct Worker {
     credentials: Option<Credentials>,
     flow: Option<LoginFlow>,
     retry: Option<Job>,
+    pending_vault: Option<PendingVault>,
 }
 
 /// 啟動背景工作執行緒，回傳（任務送出端, 事件接收端）。
@@ -193,6 +211,7 @@ pub fn spawn(config: Config, vault: Vault) -> AppResult<(Sender<Job>, Receiver<E
         credentials: None,
         flow: None,
         retry: None,
+        pending_vault: None,
     };
 
     thread::Builder::new()
@@ -207,10 +226,15 @@ impl Worker {
     fn run(&mut self) {
         while let Ok(job) = self.jobs.recv() {
             let shutdown = matches!(job, Job::Shutdown);
+            let what = job.label();
             match self.dispatch(job) {
                 Ok(()) => {}
                 Err(err) => self.emit(Event::Failed {
-                    what: "操作".to_owned(),
+                    what: if what.is_empty() {
+                        "操作".to_owned()
+                    } else {
+                        what
+                    },
                     message: err.to_string(),
                 }),
             }
@@ -232,6 +256,10 @@ impl Worker {
             Job::SendMfaCode => self.send_mfa_code(),
             Job::VerifyMfaCode(code) => self.verify_mfa_code(&code),
             Job::RetryLogin => self.retry_login(),
+            Job::RetryWithAccount {
+                credentials,
+                passphrase,
+            } => self.retry_with_account(&passphrase, credentials),
             Job::ChangeAccount {
                 passphrase,
                 credentials,
@@ -283,6 +311,7 @@ impl Worker {
         self.session = Some(session);
         self.credentials = Some(credentials);
         self.flow = None;
+        self.retry = None;
         Ok(())
     }
 
@@ -304,6 +333,8 @@ impl Worker {
             .clone()
             .ok_or_else(|| AppError::config("尚未解锁凭证"))?;
         self.emit(Event::LoginProgress(format!("正在登录{site}…")));
+        // 重新開始登入時丟棄上一個（多半已失敗的）流程。
+        self.flow = None;
 
         let stage = self.session_mut()?.next_login_step(site)?;
         self.drive(stage, site, credentials, retry)
@@ -335,6 +366,8 @@ impl Worker {
             LoginReply::Success => self.complete_flow(),
             LoginReply::Fail { message } => {
                 self.flow = None;
+                // 憑證被拒：丟棄待存憑證，不覆蓋保險庫中的舊憑證。
+                self.pending_vault = None;
                 self.emit(Event::LoginFailed(message));
                 Ok(())
             }
@@ -371,11 +404,25 @@ impl Worker {
     }
 
     fn finish_login(&mut self, _site: SiteKind, retry: Option<Job>) -> AppResult<()> {
+        // 登入成功後才更新保險庫，失敗的憑證不會覆蓋舊憑證。
+        self.commit_pending_vault();
         self.emit(Event::LoginSucceeded);
         let job = retry.or(self.retry.take());
         match job {
             Some(job) => self.dispatch(job),
             None => Ok(()),
+        }
+    }
+
+    /// 把等待中的憑證寫入保險庫；寫入失敗不影響已完成的登入。
+    fn commit_pending_vault(&mut self) {
+        let Some(pending) = self.pending_vault.take() else {
+            return;
+        };
+
+        match self.vault.store(&pending.passphrase, &pending.credentials) {
+            Ok(()) => self.emit(Event::AccountUpdated),
+            Err(err) => self.emit(Event::Notice(format!("登录成功，但凭据保存失败：{err}"))),
         }
     }
 
@@ -406,6 +453,20 @@ impl Worker {
     }
 
     fn retry_login(&mut self) -> AppResult<()> {
+        self.begin_login(SiteKind::Attendance, None)
+    }
+
+    /// 以使用者重新輸入的憑證重試登入；先驗證口令，登入成功後才寫入保險庫。
+    fn retry_with_account(&mut self, passphrase: &str, credentials: Credentials) -> AppResult<()> {
+        // 口令錯誤時回報 [`AppError::WrongPassphrase`]，舊憑證不受影響。
+        self.vault.load(passphrase)?;
+
+        self.session_mut()?.set_credentials(credentials.clone());
+        self.credentials = Some(credentials.clone());
+        self.pending_vault = Some(PendingVault {
+            passphrase: Zeroizing::new(passphrase.to_owned()),
+            credentials,
+        });
         self.begin_login(SiteKind::Attendance, None)
     }
 
@@ -454,10 +515,10 @@ impl Worker {
                 let Some(site) = site else {
                     return Err(err);
                 };
-                // 登入態失效：記下任務，重新登入後自動重試。
+                // 登入態失效：記下任務，重新登入後自動重試。登入本身失敗時任務仍
+                // 留在 `self.retry`，使用者重試成功後會自動續跑。
                 self.retry = Some(job);
-                let retry = self.retry.take();
-                self.begin_login(site, retry)
+                self.begin_login(site, None)
             }
             Err(err) => Err(err),
         }
@@ -641,3 +702,7 @@ fn parse_date(value: &str) -> AppResult<NaiveDate> {
     NaiveDate::parse_from_str(value.trim(), "%Y-%m-%d")
         .map_err(|err| AppError::protocol(format!("学期开始日期无法解析（{value}）：{err}")))
 }
+
+#[cfg(test)]
+#[path = "tests/worker_test.rs"]
+mod worker_test;

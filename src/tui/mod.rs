@@ -121,7 +121,7 @@ fn apply_event(app: &mut App, event: Event) {
             })));
         }
         Event::LoginFailed(message) => {
-            app.set_screen(Screen::Login(Box::new(LoginScreen::Failed { message })));
+            set_login_error(app, message);
         }
         Event::LoginSucceeded => {
             if !app.is_main() {
@@ -180,14 +180,27 @@ fn apply_event(app: &mut App, event: Event) {
             app.fail_loading(&message);
             let text = format!("{what}失败：{message}");
             // 登入過程中失敗（例如網路不通）也要離開「正在登录…」畫面，
-            // 否則使用者按 enter 即可重試。
-            if matches!(app.screen, Screen::Login(_)) {
-                app.set_screen(Screen::Login(Box::new(LoginScreen::Failed {
-                    message: text.clone(),
-                })));
-            }
+            // 否則使用者按 enter 即可重試；憑證表單則就地顯示錯誤。
+            set_login_error(app, text.clone());
             app.set_message(text);
         }
+    }
+}
+
+/// 顯示登入錯誤：憑證表單就地顯示，其餘登入畫面回到失敗畫面。
+fn set_login_error(app: &mut App, message: String) {
+    let mut next = None;
+    if let Screen::Login(screen) = &mut app.screen {
+        match screen.as_mut() {
+            LoginScreen::Credentials { form, .. } => {
+                form.busy = false;
+                form.error = Some(message);
+            }
+            _ => next = Some(Screen::Login(Box::new(LoginScreen::Failed { message }))),
+        }
+    }
+    if let Some(screen) = next {
+        app.set_screen(screen);
     }
 }
 

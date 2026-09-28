@@ -6,7 +6,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::config::AccessPolicy;
 use crate::task::Job;
-use crate::tui::app::{App, FormState, NavItem, Page, ScheduleData, Screen};
+use crate::tui::app::{App, FormKind, FormState, LoginScreen, NavItem, Page, ScheduleData, Screen};
 
 use super::handle_key;
 
@@ -331,4 +331,109 @@ fn quitting_sets_flag() {
     app.set_screen(Screen::Main);
     press(&mut app, &jobs, KeyCode::Char('q'));
     assert!(app.quit);
+}
+
+/// 登入失敗畫面。
+fn failed_app(message: &str) -> App {
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Login(Box::new(LoginScreen::Failed {
+        message: message.to_owned(),
+    })));
+    app
+}
+
+/// 目前登入憑證表單（測試輔助）。
+fn credentials_form(app: &App) -> &FormState {
+    let Screen::Login(screen) = &app.screen else {
+        panic!("应停留在登录画面");
+    };
+    let LoginScreen::Credentials { form, .. } = screen.as_ref() else {
+        panic!("应处于凭证表单");
+    };
+    form
+}
+
+#[test]
+fn failed_screen_retries_with_saved_credentials_or_quits() {
+    let (jobs, rx) = channel();
+    let mut app = failed_app("登录失败：用户名或密码错误");
+
+    press(&mut app, &jobs, KeyCode::Enter);
+    assert!(matches!(rx.try_recv(), Ok(Job::RetryLogin)));
+    assert!(
+        matches!(app.screen, Screen::Login(_)),
+        "重試時應顯示進度畫面"
+    );
+
+    press(&mut app, &jobs, KeyCode::Char('q'));
+    assert!(app.quit);
+}
+
+#[test]
+fn failed_screen_opens_credentials_form() {
+    let (jobs, _rx) = channel();
+    let mut app = failed_app("登录失败：用户名或密码错误");
+
+    press(&mut app, &jobs, KeyCode::Char('e'));
+
+    let form = credentials_form(&app);
+    assert_eq!(form.kind, FormKind::LoginRetry);
+    assert!(
+        form.fields.iter().all(|field| field.value.is_empty()),
+        "重新输入时字段必须为空"
+    );
+    assert!(!form.fields[0].value.is_masked(), "账号不必遮蔽");
+    assert!(form.fields[1].value.is_masked(), "密码必须遮蔽");
+    assert!(form.fields[2].value.is_masked(), "加密口令必须遮蔽");
+
+    // esc 回到失敗畫面，並保留原本的錯誤訊息。
+    press(&mut app, &jobs, KeyCode::Esc);
+    match &app.screen {
+        Screen::Login(screen) => match screen.as_ref() {
+            LoginScreen::Failed { message } => {
+                assert_eq!(message, "登录失败：用户名或密码错误");
+            }
+            other => panic!("应回到失败画面，实际为 {other:?}"),
+        },
+        _ => panic!("应停留在登录画面"),
+    }
+}
+
+#[test]
+fn credentials_form_validates_before_sending() {
+    let (jobs, rx) = channel();
+    let mut app = failed_app("登录失败");
+    press(&mut app, &jobs, KeyCode::Char('e'));
+
+    // 全部為空時不送出任務，錯誤就地顯示。
+    press(&mut app, &jobs, KeyCode::Enter);
+    assert!(rx.try_recv().is_err(), "字段为空时不应送出任务");
+    assert!(credentials_form(&app).error.is_some());
+    assert!(!credentials_form(&app).busy);
+
+    // 依序填入帳號 / 密碼 / 加密口令。
+    type_text(&mut app, &jobs, "3120000001");
+    press(&mut app, &jobs, KeyCode::Tab);
+    type_text(&mut app, &jobs, "pw-12345");
+    press(&mut app, &jobs, KeyCode::Tab);
+    type_text(&mut app, &jobs, "secret123");
+    press(&mut app, &jobs, KeyCode::Enter);
+
+    match rx.try_recv() {
+        Ok(Job::RetryWithAccount {
+            credentials,
+            passphrase,
+        }) => {
+            assert_eq!(credentials.username, "3120000001");
+            assert_eq!(credentials.password, "pw-12345");
+            assert_eq!(passphrase, "secret123");
+        }
+        other => panic!("应为凭证重输任务，实际为 {other:?}"),
+    }
+
+    // 送出後留在表單上等待事件（busy 期間不接受輸入）。
+    assert!(credentials_form(&app).busy);
+    assert!(credentials_form(&app).error.is_none());
+    type_text(&mut app, &jobs, "x");
+    assert_eq!(credentials_form(&app).fields[0].value.value(), "3120000001");
 }

@@ -237,6 +237,8 @@ pub enum FormKind {
     Setup,
     /// 解鎖保險庫。
     Unlock,
+    /// 登入失敗後重新輸入帳號密碼。
+    LoginRetry,
     /// 修改帳號。
     ChangeAccount,
     /// 修改加密口令。
@@ -296,6 +298,20 @@ impl FormState {
                 label: "加密口令",
                 value: InputLine::new().masked(true),
             }],
+        )
+    }
+
+    /// 登入失敗後重新輸入帳號密碼（密碼與口令皆遮蔽，欄位一律留空）。
+    pub fn login_retry() -> Self {
+        Self::new(
+            FormKind::LoginRetry,
+            [("账号", false), ("密码", true), ("加密口令", true)]
+                .into_iter()
+                .map(|(label, masked)| FormField {
+                    label,
+                    value: InputLine::new().masked(masked),
+                })
+                .collect(),
         )
     }
 
@@ -410,6 +426,13 @@ pub enum LoginScreen {
     /// 登入失敗。
     Failed {
         /// 錯誤訊息。
+        message: String,
+    },
+    /// 重新輸入帳號密碼（登入失敗後的可恢復入口）。
+    Credentials {
+        /// 表單（帳號、密碼、加密口令）。
+        form: FormState,
+        /// 上一次的失敗訊息。
         message: String,
     },
 }

@@ -17,6 +17,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 form,
                 "首次使用：设置加密口令与账号",
                 "tab 切换字段 · enter 保存并登录 · ^u 清空当前字段 · ^c 退出",
+                None,
             );
         }
         Screen::Unlock(form) => {
@@ -25,6 +26,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 form,
                 "解锁凭证",
                 "enter 解锁 · ^c 退出（凭证以加密方式保存在本地，不会明文存储密码）",
+                None,
             );
         }
         Screen::Login(screen) => crate::tui::ui::draw_login(frame, screen),
@@ -38,6 +40,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 form,
                 title,
                 "tab 切换字段 · enter 保存（需先验证原口令）· esc 返回",
+                None,
             );
         }
         Screen::Main | Screen::Settings(_) => main_view::draw(frame, app),

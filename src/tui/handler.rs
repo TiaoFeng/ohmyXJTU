@@ -19,6 +19,9 @@ const MIN_PASSPHRASE_LEN: usize = 6;
 enum LoginAction {
     Quit,
     Retry,
+    EditAccount,
+    BackToFailed,
+    SubmitCredentials,
     SubmitCaptcha(String),
     RefreshCaptcha,
     SendMfaCode,
@@ -130,6 +133,21 @@ fn build_job(kind: FormKind, values: &FormValues) -> Result<Job, String> {
                 passphrase: values.passphrase.clone(),
             })
         }
+        FormKind::LoginRetry => {
+            if values.username.trim().is_empty() {
+                return Err("账号不能为空".to_owned());
+            }
+            if values.password.is_empty() {
+                return Err("密码不能为空".to_owned());
+            }
+            if values.passphrase.is_empty() {
+                return Err("请输入加密口令".to_owned());
+            }
+            Ok(Job::RetryWithAccount {
+                credentials: Credentials::new(values.username.trim(), values.password.clone()),
+                passphrase: values.passphrase.clone(),
+            })
+        }
         FormKind::ChangeAccount => {
             if values.passphrase.is_empty() {
                 return Err("请输入原加密口令".to_owned());
@@ -232,6 +250,12 @@ impl FormValues {
                 passphrase: at(0),
                 ..Self::default()
             },
+            FormKind::LoginRetry => Self {
+                username: at(0),
+                password: at(1),
+                passphrase: at(2),
+                ..Self::default()
+            },
             FormKind::ChangeAccount => Self {
                 passphrase: at(0),
                 username: at(1),
@@ -252,6 +276,10 @@ impl FormValues {
 fn form_mut(app: &mut App) -> Option<&mut FormState> {
     match &mut app.screen {
         Screen::Setup(form) | Screen::Unlock(form) | Screen::SettingsForm(form) => Some(form),
+        Screen::Login(screen) => match screen.as_mut() {
+            LoginScreen::Credentials { form, .. } => Some(form),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -270,9 +298,26 @@ fn handle_login(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
             }
             LoginScreen::Failed { .. } => match key.code {
                 KeyCode::Enter => action = Some(LoginAction::Retry),
+                KeyCode::Char('e') => action = Some(LoginAction::EditAccount),
                 KeyCode::Char('q') => action = Some(LoginAction::Quit),
                 _ => {}
             },
+            LoginScreen::Credentials { form, .. } => {
+                if form.busy {
+                    return;
+                }
+                match key.code {
+                    KeyCode::Esc => action = Some(LoginAction::BackToFailed),
+                    KeyCode::Enter => action = Some(LoginAction::SubmitCredentials),
+                    KeyCode::Tab | KeyCode::Down => form.focus_next(),
+                    KeyCode::BackTab | KeyCode::Up => form.focus_previous(),
+                    _ => {
+                        if let Some(field) = form.focused_mut() {
+                            edit_line(&mut field.value, key);
+                        }
+                    }
+                }
+            }
             LoginScreen::Captcha { input, .. } => match key.code {
                 KeyCode::Enter => {
                     let code = input.value().trim().to_owned();
@@ -310,6 +355,12 @@ fn handle_login(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
             })));
             let _ = jobs.send(Job::RetryLogin);
         }
+        Some(LoginAction::EditAccount) => open_credentials_form(app),
+        Some(LoginAction::BackToFailed) => {
+            let message = login_message(app);
+            app.set_screen(Screen::Login(Box::new(LoginScreen::Failed { message })));
+        }
+        Some(LoginAction::SubmitCredentials) => submit_login_credentials(app, jobs),
         Some(LoginAction::SubmitCaptcha(code)) => {
             let _ = jobs.send(Job::SubmitCaptcha(code));
         }
@@ -324,6 +375,51 @@ fn handle_login(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
         }
         None => {}
     }
+}
+
+/// 目前登入畫面的失敗訊息（供回復上一層或帶入表單）。
+fn login_message(app: &App) -> String {
+    match &app.screen {
+        Screen::Login(screen) => match screen.as_ref() {
+            LoginScreen::Failed { message } | LoginScreen::Credentials { message, .. } => {
+                message.clone()
+            }
+            _ => String::new(),
+        },
+        _ => String::new(),
+    }
+}
+
+/// 開啟「重新輸入账号密码」表單，並帶上原本的失敗訊息。
+fn open_credentials_form(app: &mut App) {
+    let message = login_message(app);
+    app.set_screen(Screen::Login(Box::new(LoginScreen::Credentials {
+        form: FormState::login_retry(),
+        message,
+    })));
+}
+
+/// 送出重新輸入的憑證；驗證失敗時把訊息寫回表單，不送出任務。
+fn submit_login_credentials(app: &mut App, jobs: &Sender<Job>) {
+    let job = {
+        let Some(form) = form_mut(app) else {
+            return;
+        };
+        let values = FormValues::from_form(form);
+        match build_job(form.kind, &values) {
+            Ok(job) => {
+                form.busy = true;
+                form.error = None;
+                job
+            }
+            Err(message) => {
+                form.error = Some(message);
+                return;
+            }
+        }
+    };
+
+    let _ = jobs.send(job);
 }
 
 // ── 帳戶設定 ─────────────────────────────────────────

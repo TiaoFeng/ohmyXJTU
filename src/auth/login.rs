@@ -14,6 +14,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use ::rsa::RsaPublicKey;
 use serde_json::json;
 use url::Url;
 
@@ -66,7 +67,8 @@ pub struct LoginDriver {
     visitor_id: String,
     mfa_enabled: bool,
     fail_count: u32,
-    rsa_public_key: Option<String>,
+    /// 已解析的伺服器公鑰（快取；解析成功才會寫入）。
+    rsa_public_key: Option<RsaPublicKey>,
     has_login: bool,
     account_type: AccountType,
     choose_account_response: Option<HttpResponse>,
@@ -146,8 +148,9 @@ impl LoginDriver {
         self.username = Some(credentials.username.clone());
         // 已具備登入態時不需要提交帳密，也就不需要抓取公鑰。
         if self.already_authenticated.is_none() {
-            let pem = self.public_key()?;
-            self.encrypted_password = Some(rsa::encrypt_password(&credentials.password, &pem)?);
+            let public_key = self.public_key()?;
+            self.encrypted_password =
+                Some(rsa::encrypt_password(&credentials.password, &public_key)?);
         }
         self.captcha_code.clear();
         self.advance()
@@ -487,7 +490,8 @@ impl LoginDriver {
             .ok_or_else(|| AppError::protocol("缺少短信验证会话，请先获取验证码"))
     }
 
-    fn public_key(&mut self) -> AppResult<String> {
+    /// 取得公鑰；只有解析成功才會寫入快取，避免把錯誤正文當成公鑰。
+    fn public_key(&mut self) -> AppResult<RsaPublicKey> {
         if let Some(key) = self.rsa_public_key.clone() {
             return Ok(key);
         }
@@ -496,7 +500,7 @@ impl LoginDriver {
             .send(HttpRequest::get(rsa::PUBLIC_KEY_URL).header("Referer", self.post_url.clone()))?;
         response.error_for_status()?;
 
-        let key = response.text();
+        let key = rsa::parse_public_key(&response.text())?;
         self.rsa_public_key = Some(key.clone());
         Ok(key)
     }

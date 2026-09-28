@@ -97,6 +97,15 @@ fn public_key_response() -> HttpResponse {
     page(rsa::PUBLIC_KEY_URL, &test_key().pem)
 }
 
+/// 把 PEM 內文壓成單行（真實端點不保證 64 欄換行）。
+fn single_line_pem(pem: &str) -> String {
+    let body: String = pem
+        .lines()
+        .filter(|line| !line.starts_with("-----"))
+        .collect();
+    format!("-----BEGIN PUBLIC KEY-----\n{body}\n-----END PUBLIC KEY-----\n")
+}
+
 #[test]
 fn logs_in_and_submits_expected_form_fields() {
     let client = Arc::new(FakeClient::with_responder(|request| {
@@ -416,4 +425,65 @@ fn reports_protocol_error_when_login_page_is_unexpected() {
         .start(&credentials(), AccountType::Undergraduate)
         .unwrap_err();
     assert!(matches!(err, AppError::Protocol(_)), "实际错误：{err}");
+}
+
+#[test]
+fn logs_in_with_non_canonical_public_key_layout() {
+    let public_key = single_line_pem(&test_key().pem);
+    let client = Arc::new(FakeClient::with_responder(move |request| {
+        match request.url.as_str() {
+            LOGIN_URL => Ok(page(POST_URL, &login_page(false, "e1s1"))),
+            rsa::PUBLIC_KEY_URL => Ok(page(rsa::PUBLIC_KEY_URL, &public_key)),
+            _ => Ok(page(TARGET_URL, TARGET_PAGE)),
+        }
+    }));
+
+    let mut driver = driver(&client);
+    let reply = driver
+        .start(&credentials(), AccountType::Undergraduate)
+        .expect("单行公钥也应能登录");
+    assert_eq!(reply, LoginReply::Success);
+
+    // 密碼仍必須以伺服器公鑰加密後提交。
+    let post = login_posts(&client).pop().expect("登录提交");
+    let password = post.form_field("password").expect("密码字段");
+    let raw = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        &password["__RSA__".len()..],
+    )
+    .expect("base64 解码");
+    let decrypted = test_key().private.decrypt(Pkcs1v15Encrypt, &raw).unwrap();
+    assert_eq!(String::from_utf8(decrypted).unwrap(), "secret-password");
+}
+
+#[test]
+fn refetches_public_key_instead_of_caching_a_bad_body() {
+    let fetches = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&fetches);
+    let client = Arc::new(FakeClient::with_responder(move |request| {
+        match request.url.as_str() {
+            LOGIN_URL => Ok(page(POST_URL, &login_page(false, "e1s1"))),
+            rsa::PUBLIC_KEY_URL => {
+                // 第一次回傳 HTML（例如被登入頁面欄截），第二次才是真正的公鑰。
+                if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Ok(page(rsa::PUBLIC_KEY_URL, "<html>登录门户</html>"))
+                } else {
+                    Ok(public_key_response())
+                }
+            }
+            _ => Ok(page(TARGET_URL, TARGET_PAGE)),
+        }
+    }));
+
+    let mut driver = driver(&client);
+    let err = driver
+        .start(&credentials(), AccountType::Undergraduate)
+        .expect_err("公钥响应不是 PEM 时应报错");
+    assert!(matches!(err, AppError::Protocol(_)), "实际错误：{err}");
+
+    let reply = driver
+        .start(&credentials(), AccountType::Undergraduate)
+        .expect("重新取公钥后应能登录");
+    assert_eq!(reply, LoginReply::Success);
+    assert_eq!(fetches.load(Ordering::SeqCst), 2, "错误正文不得被缓存");
 }

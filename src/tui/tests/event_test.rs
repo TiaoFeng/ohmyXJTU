@@ -6,7 +6,7 @@ use crate::config::AccessPolicy;
 use crate::domain::homework::{HomeworkInput, HomeworkState, aggregate};
 use crate::sites::lms::LmsCourse;
 use crate::task::Event;
-use crate::tui::app::{App, FlowData, LoginScreen, Page, ScheduleData, Screen};
+use crate::tui::app::{App, FlowData, FormState, LoginScreen, Page, ScheduleData, Screen};
 
 use super::apply_event;
 
@@ -219,4 +219,79 @@ fn notice_event_only_sets_message() {
         Some("已跳过 2 项无法解析的思源学堂数据")
     );
     assert!(app.homework.is_idle());
+}
+
+/// 帶著已輸入內容的憑證表單。
+fn credentials_app(typed: &str) -> App {
+    let mut app = app();
+    app.set_screen(Screen::Login(Box::new(LoginScreen::Credentials {
+        form: FormState::login_retry(),
+        message: "登录失败：用户名或密码错误".to_owned(),
+    })));
+    if let Screen::Login(screen) = &mut app.screen
+        && let LoginScreen::Credentials { form, .. } = screen.as_mut()
+    {
+        form.busy = true;
+        form.fields[0].value.set(typed);
+    }
+    app
+}
+
+#[test]
+fn login_failed_stays_on_credentials_form() {
+    let mut app = credentials_app("3120000001");
+
+    apply_event(
+        &mut app,
+        Event::LoginFailed("登录失败：用户名或密码错误".to_owned()),
+    );
+
+    let Screen::Login(screen) = &app.screen else {
+        panic!("应停留在登录画面");
+    };
+    match screen.as_ref() {
+        LoginScreen::Credentials { form, .. } => {
+            assert_eq!(
+                form.error.as_deref(),
+                Some("登录失败：用户名或密码错误"),
+                "帳密被拒時應就地表單顯示"
+            );
+            assert!(!form.busy, "失敗後應恢復可輸入");
+            assert_eq!(
+                form.fields[0].value.value(),
+                "3120000001",
+                "失敗後應保留已輸入的帳號"
+            );
+        }
+        other => panic!("应停留在凭证表单，实际为 {other:?}"),
+    }
+}
+
+#[test]
+fn task_failure_stays_on_credentials_form() {
+    let mut app = credentials_app("3120000001");
+
+    apply_event(
+        &mut app,
+        Event::Failed {
+            what: "账户设置".to_owned(),
+            message: "口令错误或凭证文件已损坏".to_owned(),
+        },
+    );
+
+    let Screen::Login(screen) = &app.screen else {
+        panic!("应停留在登录画面");
+    };
+    match screen.as_ref() {
+        LoginScreen::Credentials { form, .. } => {
+            assert_eq!(
+                form.error.as_deref(),
+                Some("账户设置失败：口令错误或凭证文件已损坏")
+            );
+            assert!(!form.busy);
+            assert_eq!(form.fields[0].value.value(), "3120000001");
+        }
+        other => panic!("应停留在凭证表单，实际为 {other:?}"),
+    }
+    assert!(app.message_text().is_some(), "狀態列仍應顯示錯誤");
 }

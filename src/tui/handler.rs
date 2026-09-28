@@ -1,0 +1,542 @@
+//! 按鍵處理：把終端事件轉成狀態變更與背景任務。
+
+use std::sync::mpsc::Sender;
+
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+use crate::config::AccessPolicy;
+use crate::credentials::Credentials;
+use crate::task::Job;
+use crate::tui::app::{
+    App, FormKind, FormState, LmsLevel, LoginScreen, NavItem, Screen, SettingsState,
+};
+use crate::tui::text::InputLine;
+
+/// 加密口令的最短長度。
+const MIN_PASSPHRASE_LEN: usize = 6;
+
+/// 登入畫面的動作。
+enum LoginAction {
+    Quit,
+    Retry,
+    SubmitCaptcha(String),
+    RefreshCaptcha,
+    SendMfaCode,
+    VerifyMfaCode(String),
+}
+
+/// 處理單一按鍵事件。
+pub fn handle_key(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        match key.code {
+            KeyCode::Char('c') => {
+                app.quit = true;
+                return;
+            }
+            KeyCode::Char('p') => {
+                toggle_settings(app);
+                return;
+            }
+            KeyCode::Char('u') => {
+                if let Some(form) = form_mut(app)
+                    && let Some(field) = form.focused_mut()
+                {
+                    field.value.clear();
+                }
+                return;
+            }
+            _ => {}
+        }
+    }
+
+    match app.screen {
+        Screen::Setup(_) | Screen::Unlock(_) | Screen::SettingsForm(_) => {
+            handle_form(app, key, jobs);
+        }
+        Screen::Login(_) => handle_login(app, key, jobs),
+        Screen::Settings(_) => handle_settings(app, key, jobs),
+        Screen::Main => handle_main(app, key, jobs),
+    }
+}
+
+/// `Ctrl+P`：開啟或關閉帳戶設定。
+fn toggle_settings(app: &mut App) {
+    match app.screen {
+        Screen::Settings(_) => app.set_screen(Screen::Main),
+        Screen::Main => app.set_screen(Screen::Settings(SettingsState::default())),
+        _ => {}
+    }
+}
+
+// ── 表單 ─────────────────────────────────────────────
+
+fn handle_form(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
+    let kind = form_mut(app).map(|form| form.kind);
+
+    match key.code {
+        KeyCode::Esc => {
+            if matches!(
+                kind,
+                Some(FormKind::ChangeAccount | FormKind::ChangePassphrase)
+            ) {
+                app.set_screen(Screen::Settings(SettingsState::default()));
+            }
+        }
+        KeyCode::Enter | KeyCode::Char('\n') => submit_form(app, jobs),
+        _ => {
+            let Some(form) = form_mut(app) else {
+                return;
+            };
+            if form.busy {
+                return;
+            }
+            match key.code {
+                KeyCode::Tab | KeyCode::Down => form.focus_next(),
+                KeyCode::BackTab | KeyCode::Up => form.focus_previous(),
+                _ => {
+                    if let Some(field) = form.focused_mut() {
+                        edit_line(&mut field.value, key);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// 將表單內容轉為任務；驗證失敗時回傳訊息。
+fn build_job(kind: FormKind, values: &FormValues) -> Result<Job, String> {
+    match kind {
+        FormKind::Setup => {
+            validate_passphrase(&values.passphrase, &values.passphrase_confirm)?;
+            if values.username.trim().is_empty() {
+                return Err("账号不能为空".to_owned());
+            }
+            if values.password.is_empty() {
+                return Err("密码不能为空".to_owned());
+            }
+            if values.password != values.password_confirm {
+                return Err("两次输入的密码不一致".to_owned());
+            }
+            Ok(Job::CreateVault {
+                passphrase: values.passphrase.clone(),
+                credentials: Credentials::new(values.username.trim(), values.password.clone()),
+            })
+        }
+        FormKind::Unlock => {
+            if values.passphrase.is_empty() {
+                return Err("请输入加密口令".to_owned());
+            }
+            Ok(Job::Unlock {
+                passphrase: values.passphrase.clone(),
+            })
+        }
+        FormKind::ChangeAccount => {
+            if values.passphrase.is_empty() {
+                return Err("请输入原加密口令".to_owned());
+            }
+            if values.username.trim().is_empty() {
+                return Err("新账号不能为空".to_owned());
+            }
+            if values.password.is_empty() {
+                return Err("新密码不能为空".to_owned());
+            }
+            if values.password != values.password_confirm {
+                return Err("两次输入的密码不一致".to_owned());
+            }
+            Ok(Job::ChangeAccount {
+                passphrase: values.passphrase.clone(),
+                credentials: Credentials::new(values.username.trim(), values.password.clone()),
+            })
+        }
+        FormKind::ChangePassphrase => {
+            if values.passphrase.is_empty() {
+                return Err("请输入原加密口令".to_owned());
+            }
+            validate_passphrase(&values.password, &values.password_confirm)?;
+            Ok(Job::ChangePassphrase {
+                old: values.passphrase.clone(),
+                new: values.password.clone(),
+            })
+        }
+    }
+}
+
+fn validate_passphrase(passphrase: &str, confirm: &str) -> Result<(), String> {
+    if passphrase.chars().count() < MIN_PASSPHRASE_LEN {
+        return Err(format!("加密口令至少需要 {MIN_PASSPHRASE_LEN} 个字符"));
+    }
+    if passphrase != confirm {
+        return Err("两次输入的加密口令不一致".to_owned());
+    }
+    Ok(())
+}
+
+fn submit_form(app: &mut App, jobs: &Sender<Job>) {
+    let job = {
+        let Some(form) = form_mut(app) else {
+            return;
+        };
+        let values = FormValues::from_form(form);
+        match build_job(form.kind, &values) {
+            Ok(job) => job,
+            Err(message) => {
+                form.error = Some(message);
+                return;
+            }
+        }
+    };
+
+    match app.screen {
+        Screen::Setup(_) | Screen::Unlock(_) => {
+            app.set_screen(Screen::Login(Box::new(LoginScreen::Progress {
+                note: "正在处理凭证…".to_owned(),
+            })));
+        }
+        Screen::SettingsForm(_) => {
+            if let Some(form) = form_mut(app) {
+                form.busy = true;
+                form.error = None;
+            }
+        }
+        _ => {}
+    }
+    let _ = jobs.send(job);
+}
+
+/// 表單各欄位的值（依表單種類對應位置）。
+#[derive(Debug, Default)]
+struct FormValues {
+    passphrase: String,
+    passphrase_confirm: String,
+    username: String,
+    password: String,
+    password_confirm: String,
+}
+
+impl FormValues {
+    fn from_form(form: &FormState) -> Self {
+        let at = |index: usize| {
+            form.fields
+                .get(index)
+                .map_or_else(String::new, |field| field.value.value().to_owned())
+        };
+        match form.kind {
+            FormKind::Setup => Self {
+                passphrase: at(0),
+                passphrase_confirm: at(1),
+                username: at(2),
+                password: at(3),
+                password_confirm: at(4),
+            },
+            FormKind::Unlock => Self {
+                passphrase: at(0),
+                ..Self::default()
+            },
+            FormKind::ChangeAccount => Self {
+                passphrase: at(0),
+                username: at(1),
+                password: at(2),
+                password_confirm: at(3),
+                ..Self::default()
+            },
+            FormKind::ChangePassphrase => Self {
+                passphrase: at(0),
+                password: at(1),
+                password_confirm: at(2),
+                ..Self::default()
+            },
+        }
+    }
+}
+
+fn form_mut(app: &mut App) -> Option<&mut FormState> {
+    match &mut app.screen {
+        Screen::Setup(form) | Screen::Unlock(form) | Screen::SettingsForm(form) => Some(form),
+        _ => None,
+    }
+}
+
+// ── 登入 ─────────────────────────────────────────────
+
+fn handle_login(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
+    let mut action: Option<LoginAction> = None;
+
+    if let Screen::Login(screen) = &mut app.screen {
+        match screen.as_mut() {
+            LoginScreen::Progress { .. } => {
+                if key.code == KeyCode::Char('q') {
+                    action = Some(LoginAction::Quit);
+                }
+            }
+            LoginScreen::Failed { .. } => match key.code {
+                KeyCode::Enter => action = Some(LoginAction::Retry),
+                KeyCode::Char('q') => action = Some(LoginAction::Quit),
+                _ => {}
+            },
+            LoginScreen::Captcha { input, .. } => match key.code {
+                KeyCode::Enter => {
+                    let code = input.value().trim().to_owned();
+                    if !code.is_empty() {
+                        input.clear();
+                        action = Some(LoginAction::SubmitCaptcha(code));
+                    }
+                }
+                KeyCode::Char('r') if input.is_empty() => {
+                    action = Some(LoginAction::RefreshCaptcha);
+                }
+                KeyCode::Char('q') if input.is_empty() => action = Some(LoginAction::Quit),
+                _ => edit_line(input, key),
+            },
+            LoginScreen::Mfa { input, .. } => match key.code {
+                KeyCode::Enter => {
+                    let code = input.value().trim().to_owned();
+                    if !code.is_empty() {
+                        input.clear();
+                        action = Some(LoginAction::VerifyMfaCode(code));
+                    }
+                }
+                KeyCode::Char('s') if input.is_empty() => action = Some(LoginAction::SendMfaCode),
+                KeyCode::Char('q') if input.is_empty() => action = Some(LoginAction::Quit),
+                _ => edit_line(input, key),
+            },
+        }
+    }
+
+    match action {
+        Some(LoginAction::Quit) => app.quit = true,
+        Some(LoginAction::Retry) => {
+            app.set_screen(Screen::Login(Box::new(LoginScreen::Progress {
+                note: "正在重试登录…".to_owned(),
+            })));
+            let _ = jobs.send(Job::RetryLogin);
+        }
+        Some(LoginAction::SubmitCaptcha(code)) => {
+            let _ = jobs.send(Job::SubmitCaptcha(code));
+        }
+        Some(LoginAction::RefreshCaptcha) => {
+            let _ = jobs.send(Job::RefreshCaptcha);
+        }
+        Some(LoginAction::SendMfaCode) => {
+            let _ = jobs.send(Job::SendMfaCode);
+        }
+        Some(LoginAction::VerifyMfaCode(code)) => {
+            let _ = jobs.send(Job::VerifyMfaCode(code));
+        }
+        None => {}
+    }
+}
+
+// ── 帳戶設定 ─────────────────────────────────────────
+
+fn handle_settings(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
+    let Screen::Settings(mut state) = app.screen else {
+        return;
+    };
+
+    match key.code {
+        KeyCode::Esc => app.set_screen(Screen::Main),
+        KeyCode::Up | KeyCode::Char('k') => {
+            state.previous();
+            app.set_screen(Screen::Settings(state));
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            state.next();
+            app.set_screen(Screen::Settings(state));
+        }
+        KeyCode::Left | KeyCode::Char('h') | KeyCode::Right | KeyCode::Char('l') => {
+            if state.index == 2 {
+                cycle_access_policy(app, jobs);
+            }
+        }
+        KeyCode::Enter => match state.index {
+            0 => app.set_screen(Screen::SettingsForm(FormState::change_account())),
+            1 => app.set_screen(Screen::SettingsForm(FormState::change_passphrase())),
+            // 訪問模式：enter 與左右鍵都切換到下一種模式。
+            _ => cycle_access_policy(app, jobs),
+        },
+        _ => {}
+    }
+}
+
+// ── 主畫面 ───────────────────────────────────────────
+
+/// 依序循環切換訪問模式（自动 → 直连 → WebVPN → 自动）。
+fn cycle_access_policy(app: &mut App, jobs: &Sender<Job>) {
+    let next = match app.access_policy {
+        AccessPolicy::Auto => AccessPolicy::Direct,
+        AccessPolicy::Direct => AccessPolicy::WebVpn,
+        AccessPolicy::WebVpn => AccessPolicy::Auto,
+    };
+    let _ = jobs.send(Job::SetAccessPolicy(next));
+}
+
+fn handle_main(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
+    match key.code {
+        KeyCode::Char('q') => app.quit = true,
+        KeyCode::Left | KeyCode::Char('h') => {
+            app.nav_previous();
+            ensure_page(app, jobs);
+        }
+        KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab => {
+            app.nav_next();
+            ensure_page(app, jobs);
+        }
+        KeyCode::BackTab => {
+            app.nav_previous();
+            ensure_page(app, jobs);
+        }
+        KeyCode::Up | KeyCode::Char('k') => app.select_previous(),
+        KeyCode::Down | KeyCode::Char('j') => app.select_next(),
+        KeyCode::Enter => activate(app, jobs),
+        KeyCode::Esc => escape(app),
+        KeyCode::Char('r') => {
+            let nav = app.nav;
+            request(app, jobs, nav);
+        }
+        KeyCode::Char('n') => change_flow_page(app, jobs, 1),
+        KeyCode::Char('p') => change_flow_page(app, jobs, -1),
+        _ => {}
+    }
+}
+
+/// 首次進入尚未載入的頁面時自動查詢。
+fn ensure_page(app: &mut App, jobs: &Sender<Job>) {
+    let needs_load = match app.nav {
+        NavItem::Schedule => app.schedule.is_idle(),
+        NavItem::Homework => app.homework.is_idle(),
+        NavItem::Attendance => app.attendance.is_idle(),
+        NavItem::Lms => app.lms.courses.is_idle(),
+    };
+    if needs_load {
+        request(app, jobs, app.nav);
+    }
+}
+
+/// 重新查詢指定頁面。
+pub fn request(app: &mut App, jobs: &Sender<Job>, nav: NavItem) {
+    match nav {
+        NavItem::Schedule => {
+            app.schedule.start_loading("正在加载课表与考勤记录…");
+            let _ = jobs.send(Job::LoadSchedule);
+        }
+        NavItem::Homework => {
+            app.homework
+                .start_loading("正在汇总作业（需要逐门课程查询）…");
+            let _ = jobs.send(Job::LoadHomework);
+        }
+        NavItem::Attendance => {
+            let page = app.attendance.ready().map_or(1, |data| data.page);
+            app.attendance.start_loading("正在加载考勤流水…");
+            let _ = jobs.send(Job::LoadFlow { page });
+        }
+        NavItem::Lms => {
+            app.lms.courses.start_loading("正在加载课程…");
+            app.lms.level = LmsLevel::Courses;
+            let _ = jobs.send(Job::LoadCourses);
+        }
+    }
+}
+
+fn activate(app: &mut App, jobs: &Sender<Job>) {
+    match app.nav {
+        NavItem::Schedule => app.schedule_detail = !app.schedule_detail,
+        NavItem::Homework => app.homework_detail = !app.homework_detail,
+        NavItem::Attendance => app.flow_detail = !app.flow_detail,
+        NavItem::Lms => match app.lms.level {
+            LmsLevel::Courses => {
+                let selected = app.page_selection();
+                let Some(course_id) = app
+                    .lms
+                    .courses
+                    .ready()
+                    .and_then(|courses| courses.get(selected))
+                    .map(|course| course.id.clone())
+                else {
+                    return;
+                };
+                app.lms.course_index = selected;
+                app.lms.activities.start_loading("正在加载课程活动…");
+                app.lms.level = LmsLevel::Activities;
+                app.activity_state.select(Some(0));
+                let _ = jobs.send(Job::LoadActivities { course_id });
+            }
+            LmsLevel::Activities => {
+                let selected = app.page_selection();
+                let Some(activity_id) = app
+                    .lms
+                    .activities
+                    .ready()
+                    .and_then(|activities| activities.get(selected))
+                    .map(|activity| activity.id.clone())
+                else {
+                    return;
+                };
+                app.lms.activity_index = selected;
+                app.lms.detail.start_loading("正在加载活动详情与提交记录…");
+                app.lms.level = LmsLevel::Detail;
+                let _ = jobs.send(Job::LoadActivityDetail { activity_id });
+            }
+            LmsLevel::Detail => {}
+        },
+    }
+}
+
+fn escape(app: &mut App) {
+    match app.nav {
+        NavItem::Lms => match app.lms.level {
+            LmsLevel::Detail => app.lms.level = LmsLevel::Activities,
+            LmsLevel::Activities => app.lms.level = LmsLevel::Courses,
+            LmsLevel::Courses => {}
+        },
+        NavItem::Schedule => app.schedule_detail = false,
+        NavItem::Homework => app.homework_detail = false,
+        NavItem::Attendance => app.flow_detail = false,
+    }
+}
+
+fn change_flow_page(app: &mut App, jobs: &Sender<Job>, delta: i32) {
+    if app.nav != NavItem::Attendance {
+        return;
+    }
+    let (page, total_pages) = match app.attendance.ready() {
+        Some(data) => (data.page, data.total_pages),
+        None => return,
+    };
+    let target = i32::try_from(page).unwrap_or(1) + delta;
+    if target < 1 || target > i32::try_from(total_pages).unwrap_or(1) {
+        return;
+    }
+
+    let target = u32::try_from(target).unwrap_or(1);
+    app.attendance
+        .start_loading(format!("正在加载第 {target} 页…"));
+    let _ = jobs.send(Job::LoadFlow { page: target });
+}
+
+/// 單行輸入的共用編輯邏輯。
+fn edit_line(line: &mut InputLine, key: KeyEvent) {
+    match key.code {
+        KeyCode::Backspace => {
+            line.backspace();
+        }
+        KeyCode::Delete => {
+            line.delete();
+        }
+        KeyCode::Left => {
+            line.move_left();
+        }
+        KeyCode::Right => {
+            line.move_right();
+        }
+        KeyCode::Home => line.move_home(),
+        KeyCode::End => line.move_end(),
+        KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::ALT) => {
+            line.insert(character);
+        }
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+#[path = "tests/handler_test.rs"]
+mod handler_test;

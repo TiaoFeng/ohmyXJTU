@@ -2,6 +2,8 @@
 //!
 //! 設定檔不含任何機密資訊；帳號與密碼存放於加密的憑證檔。
 
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 
 use crate::error::{AppError, AppResult};
@@ -47,6 +49,12 @@ pub struct Config {
     pub visitor_id: String,
     /// 校內系統訪問策略。
     pub access_policy: AccessPolicy,
+    /// 使用者記住的學期（`YYYY-YYYY+1-T`）；無法由考勤系統判定時作為預設。
+    #[serde(default)]
+    pub homework_term: Option<String>,
+    /// 設定檔路徑覆寫（測試用；正式執行為 `None`，寫入預設位置）。
+    #[serde(skip)]
+    pub save_path: Option<PathBuf>,
 }
 
 impl Default for Config {
@@ -54,6 +62,8 @@ impl Default for Config {
         Self {
             visitor_id: "0".repeat(VISITOR_ID_LEN),
             access_policy: AccessPolicy::default(),
+            homework_term: None,
+            save_path: None,
         }
     }
 }
@@ -73,6 +83,8 @@ impl Config {
             }
             Err(err) => return Err(err),
         };
+        // 後續寫入沿用同一個路徑。
+        config.save_path = Some(path);
 
         // 裝置標識必須是 32 位十六進位，否則重新產生。
         let normalized = config.visitor_id.trim().to_ascii_lowercase();
@@ -97,12 +109,17 @@ impl Config {
         Ok(Self {
             visitor_id: random::hex(VISITOR_ID_LEN / 2)?,
             access_policy: AccessPolicy::default(),
+            homework_term: None,
+            save_path: None,
         })
     }
 
     /// 覆寫設定檔。
     pub fn save(&self) -> AppResult<()> {
-        let path = io::config_path()?;
+        let path = match &self.save_path {
+            Some(path) => path.clone(),
+            None => io::config_path()?,
+        };
         let bytes = serde_json::to_vec_pretty(self)
             .map_err(|err| AppError::config(format!("配置序列化失败：{err}")))?;
         io::write_private_atomic(&path, &bytes)

@@ -17,40 +17,46 @@ fn input(title: &str, end_time: Option<&str>, submission_count: Option<usize>) -
         end_time: end_time.map(str::to_owned),
         submit_by_group: false,
         submission_count,
+        note: None,
     }
 }
 
 #[test]
-fn skips_submitted_homework() {
-    assert_eq!(judge(Some(1), Some("2026-09-30 23:59:59"), now()), None);
-    assert_eq!(judge(Some(3), None, now()), None);
+fn completed_homework_is_included_as_completed() {
+    assert_eq!(
+        judge(Some(1), Some("2026-09-30 23:59:59"), now()),
+        HomeworkState::Completed
+    );
+    assert_eq!(judge(Some(3), None, now()), HomeworkState::Completed);
+    assert_eq!(HomeworkState::Completed.group(), HomeworkGroup::Completed);
+    assert_eq!(HomeworkState::Completed.label(), "已完成");
 }
 
 #[test]
 fn marks_overdue_only_when_deadline_passed() {
     assert_eq!(
         judge(Some(0), Some("2026-09-27T23:59:00+08:00"), now()),
-        Some(HomeworkState::Overdue)
+        HomeworkState::Overdue
     );
     assert_eq!(
         judge(Some(0), Some("2026-09-30T23:59:00+08:00"), now()),
-        Some(HomeworkState::Pending)
+        HomeworkState::Pending
     );
     // 沒有截止時間時不標逾期。
-    assert_eq!(judge(Some(0), None, now()), Some(HomeworkState::Pending));
+    assert_eq!(judge(Some(0), None, now()), HomeworkState::Pending);
     // 無法確認提交狀態時標「待核实」，且不受截止時間影響。
     assert_eq!(
         judge(None, Some("2026-09-01T00:00:00+08:00"), now()),
-        Some(HomeworkState::Unknown)
+        HomeworkState::Unknown
     );
 }
 
 #[test]
-fn aggregates_and_sorts_by_deadline() {
+fn aggregates_by_group_and_deadline() {
     let items = vec![
         input("无截止时间", None, Some(0)),
         input("已提交", Some("2026-09-30T23:59:00+08:00"), Some(2)),
-        input("逾期作业", "2026-09-26T23:59:00+08:00".into(), Some(0)),
+        input("逾期作业", Some("2026-09-26T23:59:00+08:00"), Some(0)),
         input("即将到期", Some("2026-09-29T23:59:00+08:00"), Some(0)),
         input("待核实作业", Some("2026-09-30T23:59:00+08:00"), None),
     ];
@@ -59,12 +65,59 @@ fn aggregates_and_sorts_by_deadline() {
     let titles: Vec<&str> = result.iter().map(|item| item.title.as_str()).collect();
     assert_eq!(
         titles,
-        vec!["逾期作业", "即将到期", "待核实作业", "无截止时间"],
-        "应依截止时间排序，无截止时间者最后"
+        vec!["逾期作业", "即将到期", "无截止时间", "已提交", "待核实作业"],
+        "未完成在前（截止时间升序、无截止最后），其次已完成，最后待核实"
     );
     assert!(result[0].is_overdue());
-    assert_eq!(result[2].state, HomeworkState::Unknown);
-    assert_eq!(result[2].state.label(), "待核实");
+    assert_eq!(result[2].state, HomeworkState::Pending);
+    assert_eq!(result[3].state, HomeworkState::Completed);
+    assert_eq!(result[4].state, HomeworkState::Unknown);
+    assert_eq!(result[4].state.label(), "待核实");
+}
+
+#[test]
+fn ties_break_by_course_title_and_activity() {
+    let mut first = input("同名作业", Some("2026-09-30T23:59:00+08:00"), Some(0));
+    first.course_name = "编译原理".to_owned();
+    let mut second = input("同名作业", Some("2026-09-30T23:59:00+08:00"), Some(0));
+    second.course_name = "操作系统".to_owned();
+    let result = aggregate(&[second, first], now());
+    let courses: Vec<&str> = result
+        .iter()
+        .map(|item| item.course_name.as_str())
+        .collect();
+    assert_eq!(
+        courses,
+        vec!["操作系统", "编译原理"],
+        "同截止时间按课程稳定排序"
+    );
+
+    let items = vec![
+        input("B 作业", Some("2026-09-30T23:59:00+08:00"), Some(0)),
+        input("A 作业", Some("2026-09-30T23:59:00+08:00"), Some(0)),
+    ];
+    let result = aggregate(&items, now());
+    let titles: Vec<&str> = result.iter().map(|item| item.title.as_str()).collect();
+    assert_eq!(titles, vec!["A 作业", "B 作业"], "再按标题稳定排序");
+}
+
+#[test]
+fn carries_unknown_reason_note() {
+    let mut item = input("待核实作业", None, None);
+    item.note = Some("会话已过期".to_owned());
+    let result = aggregate(&[item], now());
+    assert_eq!(result[0].note.as_deref(), Some("会话已过期"));
+}
+
+#[test]
+fn groups_cycle_in_display_order() {
+    assert_eq!(HomeworkGroup::Unfinished.next(), HomeworkGroup::Completed);
+    assert_eq!(HomeworkGroup::Completed.next(), HomeworkGroup::Unknown);
+    assert_eq!(HomeworkGroup::Unknown.next(), HomeworkGroup::Unfinished);
+    assert_eq!(HomeworkGroup::Unknown.previous(), HomeworkGroup::Completed);
+    assert_eq!(HomeworkGroup::Unfinished.index(), 0);
+    assert_eq!(HomeworkState::Overdue.group(), HomeworkGroup::Unfinished);
+    assert_eq!(HomeworkGroup::ALL.len(), 3);
 }
 
 #[test]

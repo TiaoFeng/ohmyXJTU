@@ -71,18 +71,31 @@ fn selection_is_safe_on_empty_pages() {
 }
 
 #[test]
-fn marks_loading_pages_as_failed() {
+fn fail_target_marks_only_the_target_page() {
     let mut app = App::new(AccessPolicy::Auto);
     app.schedule.start_loading("正在加载…");
     app.lms.detail.start_loading("正在加载…");
-    app.homework = Page::Ready(Vec::new());
 
-    app.fail_loading("网络超时");
+    app.fail_target(FailedTarget::Schedule, "网络超时");
 
-    assert!(matches!(app.schedule, Page::Failed(ref message) if message == "网络超时"));
-    assert!(matches!(app.lms.detail, Page::Failed(_)));
-    // 已載入的頁面不受影響。
-    assert!(app.homework.ready().is_some());
+    assert!(
+        matches!(&app.schedule, Page::Failed { message, .. } if message == "网络超时"),
+        "目标页面应标记为失败"
+    );
+    assert!(app.lms.detail.is_loading(), "其他页面不受影响");
+}
+
+#[test]
+fn refreshing_keeps_stale_data() {
+    let mut app = app_with_schedule(2);
+    app.schedule.start_loading("正在刷新…");
+    assert_eq!(app.page_len(), 2, "刷新中仍显示旧资料");
+    assert!(app.schedule.is_loading());
+    assert_eq!(app.schedule.note(), Some("正在刷新…"));
+
+    app.schedule.fail("网络超时");
+    assert_eq!(app.page_len(), 2, "失败后仍保留旧资料");
+    assert!(app.schedule.ready().is_some());
 }
 
 #[test]

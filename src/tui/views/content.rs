@@ -7,10 +7,10 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{ListItem, Paragraph, Wrap};
 
-use crate::domain::homework::{HomeworkItem, parse_time};
+use crate::domain::homework::{HomeworkGroup, HomeworkItem, parse_time};
 use crate::sites::attendance::FlowRecord;
 use crate::sites::lms::LmsCourse;
-use crate::tui::app::{ActivityDetailView, App, LessonEntry, LmsLevel, NavItem};
+use crate::tui::app::{ActivityDetailView, App, HomeworkData, LessonEntry, LmsLevel, NavItem};
 use crate::tui::theme::THEME;
 use crate::tui::views::main_view::render_list;
 
@@ -29,7 +29,14 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
 fn schedule(frame: &mut Frame, area: Rect, app: &mut App) {
     let title = app.schedule.ready().map_or_else(
         || "课表".to_owned(),
-        |data| format!("课表 · {} · 第 {} 周", data.semester, data.week),
+        |data| {
+            format!(
+                "课表 · {} · 第 {} 周{}",
+                data.semester,
+                data.week,
+                title_suffix(app.updated_at.schedule.as_ref(), app.schedule.is_loading())
+            )
+        },
     );
 
     match app.schedule.ready() {
@@ -121,39 +128,99 @@ fn lesson_lines(lesson: &LessonEntry) -> Vec<Line<'static>> {
 // ── 作業 ─────────────────────────────────────────────
 
 fn homework(frame: &mut Frame, area: Rect, app: &mut App) {
-    let title = app.homework.ready().map_or_else(
-        || "作业".to_owned(),
-        |items| format!("作业 · 待处理 {} 项", items.len()),
+    // 標題：學期與各組計數。
+    let title = match app.homework.ready() {
+        Some(data) => {
+            let term = data.term_label.as_deref().unwrap_or("未确定学期");
+            format!(
+                "作业 · {term} · 未完成 {} / 已完成 {} / 待核实 {}",
+                data.group_count(HomeworkGroup::Unfinished),
+                data.group_count(HomeworkGroup::Completed),
+                data.group_count(HomeworkGroup::Unknown),
+            )
+        }
+        None => "作业".to_owned(),
+    };
+
+    let Some(data) = app.homework.ready() else {
+        empty(
+            frame,
+            area,
+            &title,
+            app.homework.note(),
+            app.homework.is_loading(),
+        );
+        return;
+    };
+
+    // 分組標籤列＋載入狀態。
+    let header = homework_tabs(data, app.homework_group, app.homework.is_loading());
+    let [header_area, body_area] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(3)]).areas(area);
+    frame.render_widget(
+        Paragraph::new(header).style(THEME.base_style()),
+        header_area,
     );
 
-    match app.homework.ready() {
-        None => {
+    let (list_area, detail_area) = split_detail(body_area, app.homework_detail);
+    let (items, detail) = {
+        let data = app.homework.ready().expect("已确认存在作业数据");
+        if data.group_count(app.homework_group) == 0 {
             empty(
                 frame,
-                area,
+                body_area,
                 &title,
-                app.homework.note(),
-                app.homework.is_loading(),
+                Some(match app.homework_group {
+                    HomeworkGroup::Unfinished => "没有未完成的作业",
+                    HomeworkGroup::Completed => "没有已完成的作业",
+                    HomeworkGroup::Unknown => "没有待核实的作业",
+                }),
+                false,
             );
+            return;
         }
-        Some(items) if items.is_empty() => {
-            empty(frame, area, &title, Some("没有待提交的作业"), false);
-        }
-        Some(_) => {
-            let (list_area, detail_area) = split_detail(area, app.homework_detail);
-            let (items, detail) = {
-                let data = app.homework.ready().expect("已确认存在作业数据");
-                let index = app.page_selection().min(data.len() - 1);
-                let items = data.iter().map(homework_item).collect::<Vec<_>>();
-                let detail = app.homework_detail.then(|| homework_lines(&data[index]));
-                (items, detail)
-            };
-            render_list(frame, list_area, &title, items, &mut app.homework_state);
-            if let (Some(area), Some(lines)) = (detail_area, detail) {
-                detail_panel(frame, area, "作业详情", lines);
-            }
-        }
+        let visible = data.group_items(app.homework_group);
+        let index = app.page_selection().min(visible.len() - 1);
+        let items = visible
+            .iter()
+            .map(|item| homework_item(item))
+            .collect::<Vec<_>>();
+        let detail = app.homework_detail.then(|| homework_lines(visible[index]));
+        (items, detail)
+    };
+    render_list(frame, list_area, &title, items, &mut app.homework_state);
+    if let (Some(area), Some(lines)) = (detail_area, detail) {
+        detail_panel(frame, area, "作业详情", lines);
     }
+}
+
+/// 作業分組標籤列。
+fn homework_tabs(data: &HomeworkData, group: HomeworkGroup, loading: bool) -> Line<'static> {
+    let mut spans = Vec::new();
+    for candidate in HomeworkGroup::ALL {
+        let text = format!(" {} {} ", candidate.label(), data.group_count(candidate));
+        let style = if candidate == group {
+            THEME.highlight_style()
+        } else {
+            THEME.muted_style()
+        };
+        spans.push(Span::styled(text, style));
+    }
+    if let Some((done, total)) = data.progress {
+        spans.push(Span::styled(
+            format!("  加载中 {done}/{total} 门课程"),
+            THEME.accent_style(),
+        ));
+    } else if loading {
+        spans.push(Span::styled("  正在更新…", THEME.accent_style()));
+    }
+    if data.courses_skipped > 0 {
+        spans.push(Span::styled(
+            format!("  （{} 门课程缺少学期信息，未纳入）", data.courses_skipped),
+            THEME.muted_style(),
+        ));
+    }
+    Line::from(spans)
 }
 
 fn homework_item(item: &HomeworkItem) -> ListItem<'static> {
@@ -179,7 +246,7 @@ fn homework_item(item: &HomeworkItem) -> ListItem<'static> {
 }
 
 fn homework_lines(item: &HomeworkItem) -> Vec<Line<'static>> {
-    vec![
+    let mut lines = vec![
         Line::from(Span::styled(
             item.title.clone(),
             Style::default().fg(THEME.text).add_modifier(Modifier::BOLD),
@@ -204,7 +271,14 @@ fn homework_lines(item: &HomeworkItem) -> Vec<Line<'static>> {
                 THEME.muted_style(),
             ),
         ]),
-    ]
+    ];
+    if let Some(note) = &item.note {
+        lines.push(Line::from(Span::styled(
+            format!("说明：{note}"),
+            THEME.muted_style(),
+        )));
+    }
+    lines
 }
 
 // ── 考勤流水 ─────────────────────────────────────────
@@ -214,8 +288,14 @@ fn flow(frame: &mut Frame, area: Rect, app: &mut App) {
         || "考勤流水".to_owned(),
         |data| {
             format!(
-                "考勤流水 · 第 {}/{} 页（共 {} 条）",
-                data.page, data.total_pages, data.total
+                "考勤流水 · 第 {}/{} 页（共 {} 条）{}",
+                data.page,
+                data.total_pages,
+                data.total,
+                title_suffix(
+                    app.updated_at.attendance.as_ref(),
+                    app.attendance.is_loading()
+                )
             )
         },
     );
@@ -311,7 +391,13 @@ fn lms(frame: &mut Frame, area: Rect, app: &mut App) {
         LmsLevel::Courses => {
             let title = app.lms.courses.ready().map_or_else(
                 || "思源学堂".to_owned(),
-                |courses| format!("思源学堂 · 课程 {} 门", courses.len()),
+                |courses| {
+                    format!(
+                        "思源学堂 · 课程 {} 门{}",
+                        courses.len(),
+                        title_suffix(app.updated_at.lms.as_ref(), app.lms.courses.is_loading())
+                    )
+                },
             );
             match app.lms.courses.ready() {
                 None => empty(
@@ -340,7 +426,10 @@ fn lms(frame: &mut Frame, area: Rect, app: &mut App) {
                 .ready()
                 .and_then(|courses| courses.get(app.lms.course_index))
                 .map_or_else(String::new, |course| course.name.clone());
-            let title = format!("{course_name} · 活动");
+            let title = format!(
+                "{course_name} · 活动{}",
+                title_suffix(app.updated_at.lms.as_ref(), app.lms.activities.is_loading())
+            );
 
             match app.lms.activities.ready() {
                 None => empty(
@@ -576,4 +665,17 @@ fn truncate(value: &str, max_chars: usize) -> String {
     } else {
         truncated
     }
+}
+
+/// 標題後綴：更新時間與載入狀態。
+fn title_suffix(updated: Option<&String>, loading: bool) -> String {
+    let mut suffix = String::new();
+    if let Some(at) = updated {
+        suffix.push_str(" · 更新于 ");
+        suffix.push_str(at);
+    }
+    if loading {
+        suffix.push_str(" · 更新中…");
+    }
+    suffix
 }

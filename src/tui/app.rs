@@ -7,10 +7,12 @@ use chrono::NaiveDate;
 use ratatui::widgets::ListState;
 
 use crate::config::AccessPolicy;
-use crate::domain::homework::HomeworkItem;
+use crate::domain::homework::{HomeworkGroup, HomeworkItem};
+use crate::domain::semester::TermCode;
 use crate::session::AccessMode;
 use crate::sites::attendance::{AttendanceStatus, FlowRecord};
 use crate::sites::lms::{LmsActivity, LmsCourse, LmsSubmission};
+use crate::task::FailedTarget;
 use crate::tui::text::InputLine;
 
 /// 訊息保留時間。
@@ -79,15 +81,22 @@ pub enum Page<T> {
     /// 尚未載入。
     #[default]
     Idle,
-    /// 載入中。
+    /// 載入中（可保留舊資料供繼續顯示）。
     Loading {
         /// 進度說明。
         note: String,
+        /// 上一次成功載入的資料。
+        stale: Option<T>,
     },
     /// 已載入。
     Ready(T),
-    /// 載入失敗。
-    Failed(String),
+    /// 載入失敗（可保留舊資料供繼續顯示）。
+    Failed {
+        /// 錯誤訊息。
+        message: String,
+        /// 上一次成功載入的資料。
+        stale: Option<T>,
+    },
 }
 
 impl<T> Page<T> {
@@ -101,39 +110,57 @@ impl<T> Page<T> {
         matches!(self, Self::Loading { .. })
     }
 
-    /// 已載入的資料。
+    /// 目前可顯示的資料（含刷新中或失敗後保留的舊資料）。
     pub fn ready(&self) -> Option<&T> {
         match self {
             Self::Ready(value) => Some(value),
-            _ => None,
+            Self::Loading { stale, .. } | Self::Failed { stale, .. } => stale.as_ref(),
+            Self::Idle => None,
         }
     }
 
-    /// 已載入的資料（可變）。
+    /// 目前可顯示的資料（可變）。
     pub fn ready_mut(&mut self) -> Option<&mut T> {
         match self {
             Self::Ready(value) => Some(value),
-            _ => None,
+            Self::Loading { stale, .. } | Self::Failed { stale, .. } => stale.as_mut(),
+            Self::Idle => None,
         }
     }
 
     /// 載入中或失敗的說明文字。
     pub fn note(&self) -> Option<&str> {
         match self {
-            Self::Loading { note } => Some(note),
-            Self::Failed(message) => Some(message),
+            Self::Loading { note, .. } => Some(note),
+            Self::Failed { message, .. } => Some(message),
             _ => None,
         }
     }
 
-    /// 進入載入中狀態。
+    /// 進入載入中狀態（保留既有資料供繼續顯示）。
     pub fn start_loading(&mut self, note: impl Into<String>) {
-        *self = Self::Loading { note: note.into() };
+        let stale = match std::mem::take(self) {
+            Self::Ready(value) => Some(value),
+            Self::Loading { stale, .. } | Self::Failed { stale, .. } => stale,
+            Self::Idle => None,
+        };
+        *self = Self::Loading {
+            note: note.into(),
+            stale,
+        };
     }
 
-    /// 進入失敗狀態。
+    /// 進入失敗狀態（保留既有資料供繼續顯示）。
     pub fn fail(&mut self, message: impl Into<String>) {
-        *self = Self::Failed(message.into());
+        let stale = match std::mem::take(self) {
+            Self::Ready(value) => Some(value),
+            Self::Loading { stale, .. } | Self::Failed { stale, .. } => stale,
+            Self::Idle => None,
+        };
+        *self = Self::Failed {
+            message: message.into(),
+            stale,
+        };
     }
 }
 
@@ -228,6 +255,103 @@ pub struct LmsState {
     pub activity_index: usize,
     /// 目前層級。
     pub level: LmsLevel,
+}
+
+/// 作業頁資料。
+#[derive(Debug, Clone, Default)]
+pub struct HomeworkData {
+    /// 學期標籤。
+    pub term_label: Option<String>,
+    /// 學期判定來源標籤。
+    pub term_source: Option<&'static str>,
+    /// 納入查詢的課程數。
+    pub courses_included: usize,
+    /// 缺少學期資訊而未納入的課程數。
+    pub courses_skipped: usize,
+    /// 可選學期（供選擇器使用）。
+    pub term_options: Vec<TermCode>,
+    /// 全部作業（已依分組與截止時間排序）。
+    pub items: Vec<HomeworkItem>,
+    /// 載入進度（完成, 總數）；`None` 表示載入完成。
+    pub progress: Option<(usize, usize)>,
+}
+
+impl HomeworkData {
+    /// 指定分組的作業（保持排序）。
+    pub fn group_items(&self, group: HomeworkGroup) -> Vec<&HomeworkItem> {
+        self.items
+            .iter()
+            .filter(|item| item.state.group() == group)
+            .collect()
+    }
+
+    /// 指定分組的項目數。
+    pub fn group_count(&self, group: HomeworkGroup) -> usize {
+        self.items
+            .iter()
+            .filter(|item| item.state.group() == group)
+            .count()
+    }
+}
+
+/// 學期選擇器狀態。
+#[derive(Debug, Default)]
+pub struct TermPickerState {
+    /// 可選學期（由新到舊）。
+    pub options: Vec<TermCode>,
+    /// 目前選取索引。
+    pub index: usize,
+    /// 依日期推算的建議學期（僅作預選）。
+    pub suggestion: Option<TermCode>,
+    /// 需要手動選擇的原因。
+    pub reason: String,
+}
+
+impl TermPickerState {
+    /// 建立選擇器（套用建議預選）。
+    pub fn new(options: Vec<TermCode>, suggestion: Option<TermCode>, reason: String) -> Self {
+        let index = suggestion
+            .and_then(|suggestion| options.iter().position(|option| *option == suggestion))
+            .unwrap_or(0);
+        Self {
+            options,
+            index,
+            suggestion,
+            reason,
+        }
+    }
+
+    /// 選取下一個。
+    pub fn next(&mut self) {
+        if !self.options.is_empty() {
+            self.index = (self.index + 1) % self.options.len();
+        }
+    }
+
+    /// 選取上一個。
+    pub fn previous(&mut self) {
+        if !self.options.is_empty() {
+            self.index = (self.index + self.options.len() - 1) % self.options.len();
+        }
+    }
+
+    /// 目前選取的學期。
+    pub fn selected(&self) -> Option<TermCode> {
+        self.options.get(self.index).copied()
+    }
+}
+
+/// 各頁最近一次成功載入的時間（顯示用）。
+#[derive(Debug, Clone, Default)]
+pub struct UpdatedAt {
+    /// 課表。
+    pub schedule: Option<String>,
+    /// 作業。
+    pub homework: Option<String>,
+    /// 考勤流水。
+    pub attendance: Option<String>,
+    /// 思源學堂。
+    pub lms: Option<String>,
 }
 
 /// 表單種類。
@@ -450,11 +574,26 @@ impl Default for LoginScreen {
 pub struct SettingsState {
     /// 目前選取的項目。
     pub index: usize,
+    /// 訪問模式的草稿值（開啟設定時以已生效值初始化）。
+    pub draft: Option<AccessPolicy>,
+    /// 訪問模式是否正在保存。
+    pub saving: bool,
 }
 
 impl SettingsState {
     /// 設定項目數量。
     pub const COUNT: usize = 3;
+    /// 訪問模式項目的索引。
+    pub const POLICY_INDEX: usize = 2;
+
+    /// 開啟設定彈窗。
+    pub fn open(policy: AccessPolicy) -> Self {
+        Self {
+            index: 0,
+            draft: Some(policy),
+            saving: false,
+        }
+    }
 
     /// 項目標籤。
     pub fn label(index: usize) -> &'static str {
@@ -474,6 +613,28 @@ impl SettingsState {
     pub fn previous(&mut self) {
         self.index = (self.index + Self::COUNT - 1) % Self::COUNT;
     }
+
+    /// 目前顯示的訪問模式（草稿優先）。
+    pub fn policy(&self, current: AccessPolicy) -> AccessPolicy {
+        self.draft.unwrap_or(current)
+    }
+
+    /// 循環調整訪問模式草稿（`delta` 為 +1／-1）。
+    pub fn cycle_policy(&mut self, current: AccessPolicy, delta: i32) {
+        let all = AccessPolicy::ALL;
+        let position = all
+            .iter()
+            .position(|policy| *policy == self.policy(current))
+            .unwrap_or(0);
+        let len = i32::try_from(all.len()).unwrap_or(1);
+        let next = (i32::try_from(position).unwrap_or(0) + delta).rem_euclid(len);
+        self.draft = Some(all[usize::try_from(next).unwrap_or(0)]);
+    }
+
+    /// 草稿與已生效值是否不同。
+    pub fn policy_dirty(&self, current: AccessPolicy) -> bool {
+        self.policy(current) != current
+    }
 }
 
 /// 畫面。
@@ -491,6 +652,8 @@ pub enum Screen {
     Settings(SettingsState),
     /// 設定中的表單。
     SettingsForm(FormState),
+    /// 學期選擇器。
+    TermPicker(TermPickerState),
 }
 
 /// 應用程式狀態。
@@ -503,7 +666,11 @@ pub struct App {
     /// 課表頁。
     pub schedule: Page<ScheduleData>,
     /// 作業頁。
-    pub homework: Page<Vec<HomeworkItem>>,
+    pub homework: Page<HomeworkData>,
+    /// 作業頁目前分組。
+    pub homework_group: HomeworkGroup,
+    /// 最近一次得知的可選學期（供學期選擇器）。
+    pub term_options: Vec<TermCode>,
     /// 考勤流水頁。
     pub attendance: Page<FlowData>,
     /// 思源學堂頁。
@@ -536,6 +703,8 @@ pub struct App {
     pub homework_detail: bool,
     /// 流水是否展開詳情。
     pub flow_detail: bool,
+    /// 各頁最近一次成功載入的時間（顯示用）。
+    pub updated_at: UpdatedAt,
 }
 
 impl App {
@@ -546,6 +715,8 @@ impl App {
             nav: NavItem::Schedule,
             schedule: Page::Idle,
             homework: Page::Idle,
+            homework_group: HomeworkGroup::Unfinished,
+            term_options: Vec::new(),
             attendance: Page::Idle,
             lms: LmsState::default(),
             access_policy,
@@ -562,6 +733,7 @@ impl App {
             schedule_detail: false,
             homework_detail: false,
             flow_detail: false,
+            updated_at: UpdatedAt::default(),
         }
     }
 
@@ -569,7 +741,10 @@ impl App {
     pub fn page_len(&self) -> usize {
         match self.nav {
             NavItem::Schedule => self.schedule.ready().map_or(0, |data| data.lessons.len()),
-            NavItem::Homework => self.homework.ready().map_or(0, Vec::len),
+            NavItem::Homework => self
+                .homework
+                .ready()
+                .map_or(0, |data| data.group_count(self.homework_group)),
             NavItem::Attendance => self.attendance.ready().map_or(0, |data| data.records.len()),
             NavItem::Lms => match self.lms.level {
                 LmsLevel::Courses => self.lms.courses.ready().map_or(0, Vec::len),
@@ -626,25 +801,16 @@ impl App {
         }
     }
 
-    /// 將仍在載入中的頁面標記為失敗。
-    pub fn fail_loading(&mut self, message: &str) {
-        if self.schedule.is_loading() {
-            self.schedule.fail(message);
-        }
-        if self.homework.is_loading() {
-            self.homework.fail(message);
-        }
-        if self.attendance.is_loading() {
-            self.attendance.fail(message);
-        }
-        if self.lms.courses.is_loading() {
-            self.lms.courses.fail(message);
-        }
-        if self.lms.activities.is_loading() {
-            self.lms.activities.fail(message);
-        }
-        if self.lms.detail.is_loading() {
-            self.lms.detail.fail(message);
+    /// 將指定位置標記為失敗（錯誤只影響對應頁面）。
+    pub fn fail_target(&mut self, target: FailedTarget, message: &str) {
+        match target {
+            FailedTarget::Schedule => self.schedule.fail(message),
+            FailedTarget::Homework => self.homework.fail(message),
+            FailedTarget::Flow => self.attendance.fail(message),
+            FailedTarget::Courses => self.lms.courses.fail(message),
+            FailedTarget::Activities => self.lms.activities.fail(message),
+            FailedTarget::ActivityDetail => self.lms.detail.fail(message),
+            FailedTarget::Login | FailedTarget::Settings => {}
         }
     }
 

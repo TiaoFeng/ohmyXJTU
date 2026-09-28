@@ -90,6 +90,7 @@ impl Theme {
             "迟到" => self.yellow,
             "缺勤" | "逾期" => self.red,
             "请假" => self.blue,
+            "已完成" => self.green,
             "待考勤" | "待提交" => self.accent,
             "不考勤" => self.muted,
             _ => self.yellow,

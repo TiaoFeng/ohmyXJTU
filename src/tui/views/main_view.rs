@@ -8,7 +8,7 @@ use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 
 use crate::tui::app::{App, LmsLevel, NavItem, Screen};
 use crate::tui::theme::THEME;
-use crate::tui::views::{content, settings};
+use crate::tui::views::{content, settings, term_picker};
 
 /// 側邊欄寬度。
 const SIDEBAR_WIDTH: u16 = 22;
@@ -30,6 +30,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     if let Screen::Settings(state) = &app.screen {
         settings::draw(frame, app, *state);
+    }
+    if let Screen::TermPicker(state) = &app.screen {
+        term_picker::draw(frame, state);
     }
 }
 
@@ -90,13 +93,21 @@ fn hints(app: &App) -> String {
 
     match app.nav {
         NavItem::Attendance => text.push_str("  n/p 翻页"),
+        NavItem::Homework => {
+            text.push_str("  [ ] 分组  s 学期");
+            if app.homework_detail {
+                text.push_str("  enter 收起详情");
+            } else {
+                text.push_str("  enter 查看详情");
+            }
+        }
         NavItem::Lms => match app.lms.level {
             LmsLevel::Courses => text.push_str("  enter 进入课程"),
             LmsLevel::Activities => text.push_str("  enter 查看详情  esc 返回课程"),
             LmsLevel::Detail => text.push_str("  esc 返回活动"),
         },
         _ => {
-            if app.schedule_detail || app.homework_detail {
+            if app.schedule_detail {
                 text.push_str("  enter 收起详情");
             } else {
                 text.push_str("  enter 查看详情");

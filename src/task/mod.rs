@@ -2,4 +2,4 @@
 
 pub mod worker;
 
-pub use worker::{Event, Job, spawn};
+pub use worker::{Event, FailedTarget, HomeworkUpdate, Job, spawn};

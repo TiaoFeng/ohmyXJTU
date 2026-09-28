@@ -7,12 +7,69 @@ use thiserror::Error;
 /// 應用程式統一的結果型別。
 pub type AppResult<T> = Result<T, AppError>;
 
+/// 網路錯誤的類別。
+///
+/// 由 HTTP 層依錯誤鏈分類，供介面顯示與路由決策使用：只有
+/// [`NetworkKind::is_connection_level`] 為真（例如逾時、DNS 或連線失敗）
+/// 才代表「這條路由實際連不上」，可以有限回退到另一條路徑。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetworkKind {
+    /// 網域名稱解析失敗。
+    Dns,
+    /// 無法建立連線（連線被拒、網路不可達等）。
+    Connect,
+    /// TLS 握手或憑證驗證失敗。
+    Tls,
+    /// 請求或回應逾時。
+    Timeout,
+    /// HTTP 回應標頭解析失敗。
+    HttpParse,
+    /// 重定向相關錯誤。
+    Redirect,
+    /// 其他網路錯誤。
+    Other,
+}
+
+impl NetworkKind {
+    /// 簡體中文標籤（用於錯誤訊息）。
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Dns => "域名解析失败",
+            Self::Connect => "连接失败",
+            Self::Tls => "TLS 握手失败",
+            Self::Timeout => "请求超时",
+            Self::HttpParse => "响应头解析失败",
+            Self::Redirect => "重定向失败",
+            Self::Other => "其他错误",
+        }
+    }
+
+    /// 是否屬於「連線層」錯誤。
+    ///
+    /// 協定格式錯誤（如 [`Self::HttpParse`]）不算：它代表伺服器有回應，
+    /// 只是本地解析器無法接受，換一條路由未必有幫助。
+    pub fn is_connection_level(self) -> bool {
+        matches!(self, Self::Dns | Self::Connect | Self::Tls | Self::Timeout)
+    }
+}
+
+impl std::fmt::Display for NetworkKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.label())
+    }
+}
+
 /// 所有可預期錯誤的集合。
 #[derive(Debug, Error)]
 pub enum AppError {
     /// 網路連線失敗、逾時或無法讀取回應。
-    #[error("网络连接失败：{0}")]
-    Network(String),
+    #[error("网络连接失败（{kind}）：{detail}")]
+    Network {
+        /// 錯誤類別。
+        kind: NetworkKind,
+        /// 去識別化的錯誤鏈摘要（不含 URL 與查詢參數）。
+        detail: String,
+    },
 
     /// 伺服器回應了非預期的 HTTP 狀態碼。
     #[error("服务器返回异常状态码：{status}")]
@@ -56,9 +113,20 @@ pub enum AppError {
 }
 
 impl AppError {
-    /// 建立網路錯誤。
+    /// 建立網路錯誤（未分類）。
     pub fn network(message: impl Into<String>) -> Self {
-        Self::Network(message.into())
+        Self::Network {
+            kind: NetworkKind::Other,
+            detail: message.into(),
+        }
+    }
+
+    /// 建立帶類別的網路錯誤。
+    pub fn network_kind(kind: NetworkKind, detail: impl Into<String>) -> Self {
+        Self::Network {
+            kind,
+            detail: detail.into(),
+        }
     }
 
     /// 建立回應格式錯誤。

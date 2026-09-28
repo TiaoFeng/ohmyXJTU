@@ -87,6 +87,7 @@ where
     let config = Config {
         visitor_id: "0".repeat(32),
         access_policy: policy,
+        ..Config::default()
     };
     let mut manager = SessionManager::with_clients(
         &config,
@@ -261,4 +262,114 @@ fn send_without_login_reports_expired_session() {
         )
         .unwrap_err();
     assert!(matches!(err, AppError::SessionExpired), "实际错误：{err}");
+}
+
+#[test]
+fn auto_policy_skips_probe_for_site_without_webvpn_fallback() {
+    let (mut manager, direct, _) = manager_with(AccessPolicy::Auto, |request| {
+        assert_ne!(
+            request.url, CAMPUS_PROBE_URL,
+            "思源学堂校外直连，探测校园网没有意义"
+        );
+        ok_response()
+    });
+
+    assert_eq!(
+        manager.resolve_access_mode(SiteKind::Lms).unwrap(),
+        AccessMode::Direct
+    );
+    assert!(direct.requests().is_empty(), "不应发出任何探测请求");
+}
+
+#[test]
+fn probe_treats_under_500_status_as_reachable() {
+    let (mut manager, _, _) = manager_with(AccessPolicy::Auto, |request| {
+        if request.url == CAMPUS_PROBE_URL {
+            // 網路層可達即視為校內；403/404 也一樣。
+            Ok(HttpResponse::new(403, request.url.clone(), b"".as_slice()))
+        } else {
+            ok_response()
+        }
+    });
+
+    assert_eq!(
+        manager.resolve_access_mode(SiteKind::Attendance).unwrap(),
+        AccessMode::Direct
+    );
+}
+
+#[test]
+fn fallback_to_webvpn_switches_once_under_auto() {
+    let (mut manager, _, _) = manager_with(AccessPolicy::Auto, |_| ok_response());
+    assert_eq!(
+        manager.resolve_access_mode(SiteKind::Attendance).unwrap(),
+        AccessMode::Direct,
+        "校內探測成功時先走直連"
+    );
+    manager.mark_logged_in(SiteKind::Attendance, AccessMode::Direct, Vec::new());
+
+    assert!(
+        manager.fallback_to_webvpn(SiteKind::Attendance),
+        "Auto 下直连失败应允许回退"
+    );
+    assert!(
+        manager.access_mode(SiteKind::Attendance).is_none(),
+        "回退後旧的直连登入态必须失效，重新登入"
+    );
+    assert_eq!(
+        manager.resolve_access_mode(SiteKind::Attendance).unwrap(),
+        AccessMode::WebVpn,
+        "回退後该站应解析为 WebVPN"
+    );
+    assert!(
+        !manager.fallback_to_webvpn(SiteKind::Attendance),
+        "已在 WebVPN 时不得再次回退"
+    );
+}
+
+#[test]
+fn fallback_to_webvpn_respects_forced_policies_and_site_capability() {
+    // 強制直連：即使失敗也不得擅自改道。
+    let (mut manager, _, _) = manager_with(AccessPolicy::Direct, |_| ok_response());
+    assert_eq!(
+        manager.resolve_access_mode(SiteKind::Attendance).unwrap(),
+        AccessMode::Direct
+    );
+    assert!(!manager.fallback_to_webvpn(SiteKind::Attendance));
+
+    // 強制 WebVPN：本來就走 WebVPN，無需回退。
+    let (mut manager, _, _) = manager_with(AccessPolicy::WebVpn, |_| ok_response());
+    assert_eq!(
+        manager.resolve_access_mode(SiteKind::Attendance).unwrap(),
+        AccessMode::WebVpn
+    );
+    assert!(!manager.fallback_to_webvpn(SiteKind::Attendance));
+
+    // Auto 但站點設定為校外直連（思源学堂）時沒有回退目標。
+    let (mut manager, _, _) = manager_with(AccessPolicy::Auto, |_| ok_response());
+    assert_eq!(
+        manager.resolve_access_mode(SiteKind::Lms).unwrap(),
+        AccessMode::Direct
+    );
+    assert!(!manager.fallback_to_webvpn(SiteKind::Lms));
+}
+
+#[test]
+fn send_wraps_network_errors_with_site_and_mode() {
+    let (mut manager, _, _) = manager_with(AccessPolicy::Direct, |_| {
+        Err(AppError::network("connection refused"))
+    });
+    manager.mark_logged_in(SiteKind::Attendance, AccessMode::Direct, Vec::new());
+
+    let err = manager
+        .send(
+            SiteKind::Attendance,
+            HttpRequest::get("https://bk-kq.xjtu.edu.cn/sa/student/home"),
+        )
+        .unwrap_err();
+
+    let text = err.to_string();
+    assert!(text.contains("考勤系统"), "訊息：{text}");
+    assert!(text.contains("直连"), "訊息：{text}");
+    assert!(text.contains("connection refused"), "訊息：{text}");
 }

@@ -6,7 +6,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::config::AccessPolicy;
 use crate::task::Job;
-use crate::tui::app::{App, FormKind, FormState, LoginScreen, NavItem, Page, ScheduleData, Screen};
+use crate::tui::app::{
+    App, FormKind, FormState, LoginScreen, NavItem, Page, ScheduleData, Screen, SettingsState,
+};
 
 use super::handle_key;
 
@@ -157,14 +159,14 @@ fn changing_page_requests_data() {
 
     press(&mut app, &jobs, KeyCode::Right);
     assert_eq!(app.nav, NavItem::Homework);
-    assert!(matches!(rx.try_recv(), Ok(Job::LoadHomework)));
+    assert!(matches!(rx.try_recv(), Ok(Job::LoadHomework { .. })));
     assert!(app.homework.is_loading());
 
     press(&mut app, &jobs, KeyCode::Right);
     assert!(matches!(rx.try_recv(), Ok(Job::LoadFlow { page: 1 })));
 
     press(&mut app, &jobs, KeyCode::Right);
-    assert!(matches!(rx.try_recv(), Ok(Job::LoadCourses)));
+    assert!(matches!(rx.try_recv(), Ok(Job::LoadCourses { .. })));
 }
 
 #[test]
@@ -241,34 +243,72 @@ fn control_p_opens_and_closes_settings() {
 }
 
 #[test]
-fn access_policy_can_be_changed_from_settings() {
+fn settings_policy_draft_updates_locally_without_tasks() {
     let (jobs, rx) = channel();
     let mut app = App::new(AccessPolicy::Auto);
-    app.set_screen(Screen::Settings(crate::tui::app::SettingsState {
-        index: 2,
-    }));
+    app.set_screen(Screen::Settings(SettingsState::open(AccessPolicy::Auto)));
+    // 選到「訪問模式」。
+    press(&mut app, &jobs, KeyCode::Down);
+    press(&mut app, &jobs, KeyCode::Down);
 
+    // 右鍵：草稿即時變為 Direct，不送任務。
     press(&mut app, &jobs, KeyCode::Right);
+    let Screen::Settings(state) = app.screen else {
+        panic!("应停留在设定弹窗");
+    };
+    assert_eq!(state.policy(app.access_policy), AccessPolicy::Direct);
+    assert!(rx.try_recv().is_err(), "调整草稿不应送出任务");
+
+    // 左鍵回到 Auto。
+    press(&mut app, &jobs, KeyCode::Left);
+    let Screen::Settings(state) = app.screen else {
+        panic!("应停留在设定弹窗");
+    };
+    assert_eq!(state.policy(app.access_policy), AccessPolicy::Auto);
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn settings_policy_enter_submits_once_then_locks() {
+    let (jobs, rx) = channel();
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Settings(SettingsState::open(AccessPolicy::Auto)));
+    press(&mut app, &jobs, KeyCode::Down);
+    press(&mut app, &jobs, KeyCode::Down);
+    press(&mut app, &jobs, KeyCode::Right);
+    press(&mut app, &jobs, KeyCode::Enter);
+
     assert!(matches!(
         rx.try_recv(),
         Ok(Job::SetAccessPolicy(AccessPolicy::Direct))
     ));
 
-    // enter 亦能循環切換訪問模式。
+    // 保存中：重複 enter 不重送。
     press(&mut app, &jobs, KeyCode::Enter);
-    assert!(matches!(
-        rx.try_recv(),
-        Ok(Job::SetAccessPolicy(AccessPolicy::Direct))
-    ));
+    assert!(rx.try_recv().is_err(), "保存中不应重复提交");
+
+    // esc 關閉且不送任務。
+    press(&mut app, &jobs, KeyCode::Esc);
+    assert!(matches!(app.screen, Screen::Main));
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn settings_policy_enter_without_changes_sends_nothing() {
+    let (jobs, rx) = channel();
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Settings(SettingsState::open(AccessPolicy::Auto)));
+    press(&mut app, &jobs, KeyCode::Down);
+    press(&mut app, &jobs, KeyCode::Down);
+    press(&mut app, &jobs, KeyCode::Enter);
+    assert!(rx.try_recv().is_err(), "未变更时不应送出任务");
 }
 
 #[test]
 fn settings_opens_account_forms() {
     let (jobs, _rx) = channel();
     let mut app = App::new(AccessPolicy::Auto);
-    app.set_screen(Screen::Settings(crate::tui::app::SettingsState {
-        index: 0,
-    }));
+    app.set_screen(Screen::Settings(SettingsState::open(AccessPolicy::Auto)));
 
     press(&mut app, &jobs, KeyCode::Enter);
     assert!(matches!(app.screen, Screen::SettingsForm(_)));
@@ -397,6 +437,63 @@ fn failed_screen_opens_credentials_form() {
         },
         _ => panic!("应停留在登录画面"),
     }
+}
+
+#[test]
+fn bracket_keys_switch_homework_group_only_on_homework_page() {
+    let (jobs, _rx) = channel();
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Homework;
+
+    use crate::domain::homework::HomeworkGroup;
+    press(&mut app, &jobs, KeyCode::Char(']'));
+    assert_eq!(app.homework_group, HomeworkGroup::Completed);
+    press(&mut app, &jobs, KeyCode::Char(']'));
+    assert_eq!(app.homework_group, HomeworkGroup::Unknown);
+    press(&mut app, &jobs, KeyCode::Char('['));
+    assert_eq!(app.homework_group, HomeworkGroup::Completed);
+
+    // 非作業頁不生效。
+    app.nav = NavItem::Schedule;
+    press(&mut app, &jobs, KeyCode::Char(']'));
+    assert_eq!(app.homework_group, HomeworkGroup::Completed);
+}
+
+#[test]
+fn s_key_opens_term_picker_and_submits_choice() {
+    let (jobs, rx) = channel();
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Homework;
+
+    // 尚未得知任何学期：提示而不开弹窗。
+    press(&mut app, &jobs, KeyCode::Char('s'));
+    assert!(matches!(app.screen, Screen::Main));
+    assert!(rx.try_recv().is_err());
+
+    use crate::domain::semester::TermCode;
+    app.term_options = vec![
+        TermCode::parse("2026-2027-2").expect("学期"),
+        TermCode::parse("2026-2027-1").expect("学期"),
+    ];
+    press(&mut app, &jobs, KeyCode::Char('s'));
+    assert!(matches!(app.screen, Screen::TermPicker(_)));
+
+    // 上下選擇後 enter 送出 SetHomeworkTerm。
+    press(&mut app, &jobs, KeyCode::Down);
+    press(&mut app, &jobs, KeyCode::Enter);
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(Job::SetHomeworkTerm { term }) if term == "2026-2027-1"
+    ));
+    assert!(matches!(app.screen, Screen::Main));
+
+    // esc 取消不送任務。
+    press(&mut app, &jobs, KeyCode::Char('s'));
+    press(&mut app, &jobs, KeyCode::Esc);
+    assert!(rx.try_recv().is_err());
+    assert!(matches!(app.screen, Screen::Main));
 }
 
 #[test]

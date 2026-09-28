@@ -4,11 +4,11 @@ use std::sync::mpsc::Sender;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::config::AccessPolicy;
 use crate::credentials::Credentials;
 use crate::task::Job;
 use crate::tui::app::{
     App, FormKind, FormState, LmsLevel, LoginScreen, NavItem, Screen, SettingsState,
+    TermPickerState,
 };
 use crate::tui::text::InputLine;
 
@@ -58,6 +58,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
         }
         Screen::Login(_) => handle_login(app, key, jobs),
         Screen::Settings(_) => handle_settings(app, key, jobs),
+        Screen::TermPicker(_) => handle_term_picker(app, key, jobs),
         Screen::Main => handle_main(app, key, jobs),
     }
 }
@@ -65,8 +66,8 @@ pub fn handle_key(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
 /// `Ctrl+P`：開啟或關閉帳戶設定。
 fn toggle_settings(app: &mut App) {
     match app.screen {
-        Screen::Settings(_) => app.set_screen(Screen::Main),
-        Screen::Main => app.set_screen(Screen::Settings(SettingsState::default())),
+        Screen::Settings(_) | Screen::TermPicker(_) => app.set_screen(Screen::Main),
+        Screen::Main => app.set_screen(Screen::Settings(SettingsState::open(app.access_policy))),
         _ => {}
     }
 }
@@ -82,7 +83,7 @@ fn handle_form(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
                 kind,
                 Some(FormKind::ChangeAccount | FormKind::ChangePassphrase)
             ) {
-                app.set_screen(Screen::Settings(SettingsState::default()));
+                app.set_screen(Screen::Settings(SettingsState::open(app.access_policy)));
             }
         }
         KeyCode::Enter | KeyCode::Char('\n') => submit_form(app, jobs),
@@ -439,16 +440,33 @@ fn handle_settings(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
             state.next();
             app.set_screen(Screen::Settings(state));
         }
-        KeyCode::Left | KeyCode::Char('h') | KeyCode::Right | KeyCode::Char('l') => {
-            if state.index == 2 {
-                cycle_access_policy(app, jobs);
+        // 左鍵上一個、右鍵下一個；只調整草稿，不立即送出。
+        KeyCode::Left | KeyCode::Char('h') => {
+            if state.index == SettingsState::POLICY_INDEX {
+                state.cycle_policy(app.access_policy, -1);
+                app.set_screen(Screen::Settings(state));
+            }
+        }
+        KeyCode::Right | KeyCode::Char('l') => {
+            if state.index == SettingsState::POLICY_INDEX {
+                state.cycle_policy(app.access_policy, 1);
+                app.set_screen(Screen::Settings(state));
             }
         }
         KeyCode::Enter => match state.index {
             0 => app.set_screen(Screen::SettingsForm(FormState::change_account())),
             1 => app.set_screen(Screen::SettingsForm(FormState::change_passphrase())),
-            // 訪問模式：enter 與左右鍵都切換到下一種模式。
-            _ => cycle_access_policy(app, jobs),
+            // 訪問模式：enter 提交草稿；未變更或保存中則不送任務。
+            _ => {
+                if !state.saving && state.policy_dirty(app.access_policy) {
+                    let draft = state.policy(app.access_policy);
+                    state.saving = true;
+                    app.set_screen(Screen::Settings(state));
+                    let _ = jobs.send(Job::SetAccessPolicy(draft));
+                } else {
+                    app.set_screen(Screen::Settings(state));
+                }
+            }
         },
         _ => {}
     }
@@ -456,14 +474,27 @@ fn handle_settings(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
 
 // ── 主畫面 ───────────────────────────────────────────
 
-/// 依序循環切換訪問模式（自动 → 直连 → WebVPN → 自动）。
-fn cycle_access_policy(app: &mut App, jobs: &Sender<Job>) {
-    let next = match app.access_policy {
-        AccessPolicy::Auto => AccessPolicy::Direct,
-        AccessPolicy::Direct => AccessPolicy::WebVpn,
-        AccessPolicy::WebVpn => AccessPolicy::Auto,
+/// 學期選擇器（作業頁）：上下選擇、enter 確認、esc 取消。
+fn handle_term_picker(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
+    let Screen::TermPicker(state) = &mut app.screen else {
+        return;
     };
-    let _ = jobs.send(Job::SetAccessPolicy(next));
+
+    match key.code {
+        KeyCode::Esc => app.set_screen(Screen::Main),
+        KeyCode::Up | KeyCode::Char('k') => state.previous(),
+        KeyCode::Down | KeyCode::Char('j') => state.next(),
+        KeyCode::Enter => {
+            let selected = state.selected();
+            if let Some(term) = selected {
+                let _ = jobs.send(Job::SetHomeworkTerm {
+                    term: term.to_string(),
+                });
+            }
+            app.set_screen(Screen::Main);
+        }
+        _ => {}
+    }
 }
 
 fn handle_main(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
@@ -486,17 +517,52 @@ fn handle_main(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
         KeyCode::Enter => activate(app, jobs),
         KeyCode::Esc => escape(app),
         KeyCode::Char('r') => {
+            // 手動刷新：略過快取重新查詢。
             let nav = app.nav;
-            request(app, jobs, nav);
+            request(app, jobs, nav, true);
         }
+        KeyCode::Char('[') => change_homework_group(app, -1),
+        KeyCode::Char(']') => change_homework_group(app, 1),
+        KeyCode::Char('s') => open_term_picker(app),
         KeyCode::Char('n') => change_flow_page(app, jobs, 1),
         KeyCode::Char('p') => change_flow_page(app, jobs, -1),
         _ => {}
     }
 }
 
+/// 切換作業分組（`[`／`]`）。
+fn change_homework_group(app: &mut App, delta: i32) {
+    if app.nav != NavItem::Homework {
+        return;
+    }
+    app.homework_group = if delta < 0 {
+        app.homework_group.previous()
+    } else {
+        app.homework_group.next()
+    };
+    // 切換分組後重設選取，避免索引越界。
+    app.set_selection(0);
+}
+
+/// 開啟學期選擇器（作業頁按 `s`）。
+fn open_term_picker(app: &mut App) {
+    if app.nav != NavItem::Homework {
+        return;
+    }
+    if app.term_options.is_empty() {
+        app.set_message("尚无可选学期：请先加载一次作业列表");
+        return;
+    }
+    let state = TermPickerState::new(
+        app.term_options.clone(),
+        None,
+        "选择要查看的学期".to_owned(),
+    );
+    app.set_screen(Screen::TermPicker(state));
+}
+
 /// 首次進入尚未載入的頁面時自動查詢。
-fn ensure_page(app: &mut App, jobs: &Sender<Job>) {
+pub(crate) fn ensure_page(app: &mut App, jobs: &Sender<Job>) {
     let needs_load = match app.nav {
         NavItem::Schedule => app.schedule.is_idle(),
         NavItem::Homework => app.homework.is_idle(),
@@ -504,12 +570,12 @@ fn ensure_page(app: &mut App, jobs: &Sender<Job>) {
         NavItem::Lms => app.lms.courses.is_idle(),
     };
     if needs_load {
-        request(app, jobs, app.nav);
+        request(app, jobs, app.nav, false);
     }
 }
 
-/// 重新查詢指定頁面。
-pub fn request(app: &mut App, jobs: &Sender<Job>, nav: NavItem) {
+/// 重新查詢指定頁面；`force` 為真時略過快取（使用者按 `r`）。
+pub fn request(app: &mut App, jobs: &Sender<Job>, nav: NavItem, force: bool) {
     match nav {
         NavItem::Schedule => {
             app.schedule.start_loading("正在加载课表与考勤记录…");
@@ -518,7 +584,7 @@ pub fn request(app: &mut App, jobs: &Sender<Job>, nav: NavItem) {
         NavItem::Homework => {
             app.homework
                 .start_loading("正在汇总作业（需要逐门课程查询）…");
-            let _ = jobs.send(Job::LoadHomework);
+            let _ = jobs.send(Job::LoadHomework { force });
         }
         NavItem::Attendance => {
             let page = app.attendance.ready().map_or(1, |data| data.page);
@@ -528,7 +594,7 @@ pub fn request(app: &mut App, jobs: &Sender<Job>, nav: NavItem) {
         NavItem::Lms => {
             app.lms.courses.start_loading("正在加载课程…");
             app.lms.level = LmsLevel::Courses;
-            let _ = jobs.send(Job::LoadCourses);
+            let _ = jobs.send(Job::LoadCourses { force });
         }
     }
 }
@@ -554,7 +620,10 @@ fn activate(app: &mut App, jobs: &Sender<Job>) {
                 app.lms.activities.start_loading("正在加载课程活动…");
                 app.lms.level = LmsLevel::Activities;
                 app.activity_state.select(Some(0));
-                let _ = jobs.send(Job::LoadActivities { course_id });
+                let _ = jobs.send(Job::LoadActivities {
+                    course_id,
+                    force: false,
+                });
             }
             LmsLevel::Activities => {
                 let selected = app.page_selection();

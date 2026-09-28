@@ -64,7 +64,7 @@ pub struct SessionManager {
     direct: Backend,
     webvpn: Backend,
     probe: Option<(bool, Instant)>,
-    resolved: Option<(SiteKind, AccessMode)>,
+    resolved: HashMap<SiteKind, AccessMode>,
     pending: Option<(SiteKind, PendingStage)>,
     sites: HashMap<SiteKind, SiteState>,
     credentials: Option<Credentials>,
@@ -112,7 +112,7 @@ impl SessionManager {
         mode: AccessMode,
         headers: Vec<(String, String)>,
     ) {
-        self.resolved = Some((site, mode));
+        self.resolved.insert(site, mode);
         self.store_site(
             site,
             mode,
@@ -134,7 +134,7 @@ impl SessionManager {
             direct,
             webvpn,
             probe: None,
-            resolved: None,
+            resolved: HashMap::new(),
             pending: None,
             sites: HashMap::new(),
             credentials: None,
@@ -166,7 +166,7 @@ impl SessionManager {
         if self.policy != policy {
             self.policy = policy;
             self.probe = None;
-            self.resolved = None;
+            self.resolved.clear();
             self.webvpn.logged_in = false;
             self.sites.clear();
         }
@@ -209,28 +209,54 @@ impl SessionManager {
     /// 解析站點的訪問方式。
     pub fn resolve_access_mode(&mut self, site: SiteKind) -> AppResult<AccessMode> {
         let policy = self.policy_for(site)?;
-        if let Some((resolved_site, mode)) = self.resolved
-            && resolved_site == site
-        {
-            return Ok(mode);
+        if let Some(mode) = self.resolved.get(&site) {
+            return Ok(*mode);
         }
 
+        let webvpn_when_off_campus = policy.supports_webvpn && policy.use_webvpn_when_off_campus;
         let mode = match self.policy {
             AccessPolicy::Direct => AccessMode::Direct,
             AccessPolicy::WebVpn if policy.supports_webvpn => AccessMode::WebVpn,
             AccessPolicy::WebVpn => AccessMode::Direct,
+            // 只有探測結果真的會改變路由時才做校園網探測（目前僅考勤系統）；
+            // 思源學堂校外一律直連，探測沒有意義、只會白白多一次請求。
             AccessPolicy::Auto => {
-                if self.probe_campus_network() {
-                    AccessMode::Direct
-                } else if policy.supports_webvpn && policy.use_webvpn_when_off_campus {
+                if webvpn_when_off_campus && !self.probe_campus_network() {
                     AccessMode::WebVpn
                 } else {
                     AccessMode::Direct
                 }
             }
         };
-        self.resolved = Some((site, mode));
+        self.resolved.insert(site, mode);
         Ok(mode)
+    }
+
+    /// 直連失敗後的有限回退：改用 WebVPN 並要求重新登入該站。
+    ///
+    /// 僅在使用者策略為 [`AccessPolicy::Auto`]、站點支援 WebVPN、允許校外走
+    /// WebVPN，且該站目前解析為直連時生效（回傳 `true`，呼叫方據此重試一次
+    /// 並重新登入）；強制模式與已在 WebVPN 的情況一律回傳 `false`，因此同一
+    /// 條任務最多只會回退一次。
+    pub fn fallback_to_webvpn(&mut self, site: SiteKind) -> bool {
+        if self.policy != AccessPolicy::Auto {
+            return false;
+        }
+        let Ok(policy) = self.policy_for(site) else {
+            return false;
+        };
+        if !(policy.supports_webvpn && policy.use_webvpn_when_off_campus) {
+            return false;
+        }
+        if self.resolved.get(&site) != Some(&AccessMode::Direct) {
+            return false;
+        }
+
+        // 直連已證明不可用：校正探測快取並記下該站改走 WebVPN。
+        self.probe = Some((false, Instant::now()));
+        self.resolved.insert(site, AccessMode::WebVpn);
+        self.invalidate(site);
+        true
     }
 
     /// 取得登入流程的下一步。
@@ -312,7 +338,9 @@ impl SessionManager {
         }
 
         let client = self.backend(mode).client.clone();
-        let response = client.send(request)?;
+        let response = client
+            .send(request)
+            .map_err(|err| with_site_context(err, site, mode))?;
         if is_auth_failure(&response) {
             self.invalidate(site);
             return Err(AppError::SessionExpired);
@@ -390,6 +418,17 @@ impl SessionManager {
             .find(|adapter| adapter.kind() == site)
             .map(|adapter| adapter.policy())
             .ok_or_else(|| unknown_site(site))
+    }
+}
+
+/// 為網路錯誤補上「站點（訪問方式）」上下文，方便使用者定位失敗發生在哪裡。
+fn with_site_context(err: AppError, site: SiteKind, mode: AccessMode) -> AppError {
+    match err {
+        AppError::Network { kind, detail } => AppError::network_kind(
+            kind,
+            format!("{}（{}）：{detail}", site.label(), mode.label()),
+        ),
+        other => other,
     }
 }
 

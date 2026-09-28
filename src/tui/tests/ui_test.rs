@@ -8,7 +8,12 @@ use std::path::PathBuf;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
-use crate::tui::app::{FormState, LoginScreen};
+use crate::config::AccessPolicy;
+use crate::domain::homework::{HomeworkGroup, HomeworkInput, aggregate};
+use crate::domain::semester::TermCode;
+use crate::tui::app::{
+    App, FormState, HomeworkData, LoginScreen, NavItem, Page, Screen, TermPickerState,
+};
 use crate::tui::text::{InputLine, MASK_CHAR};
 
 use super::*;
@@ -251,4 +256,112 @@ fn draws_mfa_input_and_placeholder_while_empty() {
         "「短信验证码」顯示寬度 10，需補 4 欄"
     );
     assert_eq!(backend.cursor_position().x, LOGIN_INNER_X + 16);
+}
+
+/// 作業頁測試用的輸入。
+fn homework_input(title: &str, end_time: &str, submitted: usize) -> HomeworkInput {
+    HomeworkInput {
+        course_id: "1".to_owned(),
+        course_name: "编译原理".to_owned(),
+        activity_id: format!("a-{title}"),
+        title: title.to_owned(),
+        end_time: Some(end_time.to_owned()),
+        submit_by_group: false,
+        submission_count: Some(submitted),
+        note: None,
+    }
+}
+
+#[test]
+fn draws_homework_groups_and_switches_them() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00+08:00").expect("固定时间");
+    let items = aggregate(
+        &[
+            homework_input("待办作业", "2026-10-01 23:59:59", 0),
+            homework_input("完成作业", "2026-09-01 23:59:59", 2),
+        ],
+        now,
+    );
+
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Homework;
+    app.homework = Page::Ready(HomeworkData {
+        term_label: Some("2026-2027 学年 第 1 学期".to_owned()),
+        term_source: Some("考勤系统"),
+        courses_included: 2,
+        courses_skipped: 1,
+        term_options: Vec::new(),
+        items,
+        progress: Some((1, 2)),
+    });
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(
+        text.contains("2026-2027 学年 第 1 学期"),
+        "标题应显示学期：\n{text}"
+    );
+    assert!(text.contains("未完成 1"), "标题应显示分组计数：\n{text}");
+    assert!(text.contains("已完成 1"), "标题应显示分组计数：\n{text}");
+    assert!(
+        text.contains("加载中 1/2 门课程"),
+        "應顯示載入進度：\n{text}"
+    );
+    assert!(
+        text.contains("1 门课程缺少学期信息"),
+        "應提示未納入課程：\n{text}"
+    );
+    assert!(
+        text.contains("待办作业"),
+        "預設分組應顯示未完成作業：\n{text}"
+    );
+    assert!(
+        !text.contains("完成作业"),
+        "已完成作業不應出現在未完成分組：\n{text}"
+    );
+
+    // 切換到「已完成」分組。
+    app.homework_group = HomeworkGroup::Completed;
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(
+        text.contains("完成作业"),
+        "已完成分組應顯示已完成作業：\n{text}"
+    );
+    assert!(
+        !text.contains("待办作业"),
+        "未完成作業不應出現在已完成分組：\n{text}"
+    );
+}
+
+#[test]
+fn draws_term_picker_popup() {
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.set_screen(Screen::TermPicker(TermPickerState::new(
+        vec![
+            TermCode::parse("2026-2027-1").expect("学期"),
+            TermCode::parse("2025-2026-2").expect("学期"),
+        ],
+        Some(TermCode::parse("2026-2027-1").expect("学期")),
+        "考勤系统不可用，且没有记住的学期".to_owned(),
+    )));
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(text.contains("选择学期"), "應顯示標題：\n{text}");
+    assert!(text.contains("考勤系统不可用"), "應顯示原因：\n{text}");
+    assert!(
+        text.contains("2026-2027 学年 第 1 学期"),
+        "應列出學期：\n{text}"
+    );
+    assert!(text.contains("（建议）"), "應標示建議學期：\n{text}");
+    assert!(text.contains("enter 确定"), "應顯示操作提示：\n{text}");
 }

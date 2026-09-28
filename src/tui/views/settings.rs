@@ -34,8 +34,14 @@ pub fn draw(frame: &mut Frame, app: &App, state: SettingsState) {
             style,
         )];
         if index == 2 {
+            let policy = state.policy(app.access_policy);
+            let value = if state.saving {
+                format!("  < {} > 保存中…", policy.label())
+            } else {
+                format!("  < {} >", policy.label())
+            };
             line.push(Span::styled(
-                format!("  < {} >", app.access_policy.label()),
+                value,
                 if selected {
                     THEME.highlight_style()
                 } else {
@@ -52,7 +58,7 @@ pub fn draw(frame: &mut Frame, app: &App, state: SettingsState) {
     );
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            "↑/↓ 选择 · enter 确定 · ←/→ 切换访问模式 · esc 关闭",
+            "↑/↓ 选择 · ←/→ 调整访问模式 · enter 确认 · esc 关闭",
             THEME.muted_style().add_modifier(Modifier::DIM),
         )))
         .style(THEME.surface_style()),

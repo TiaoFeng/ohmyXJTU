@@ -3,6 +3,7 @@
 pub mod content;
 pub mod main_view;
 pub mod settings;
+pub mod term_picker;
 
 use ratatui::Frame;
 
@@ -43,6 +44,6 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 None,
             );
         }
-        Screen::Main | Screen::Settings(_) => main_view::draw(frame, app),
+        Screen::Main | Screen::Settings(_) | Screen::TermPicker(_) => main_view::draw(frame, app),
     }
 }

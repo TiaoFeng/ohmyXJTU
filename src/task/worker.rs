@@ -3,10 +3,21 @@
 //! 所有網路請求都在這裡執行，介面只透過 [`Job`] 下指令、透過 [`Event`] 收結果。
 //! 登入流程由 [`LoginDriver`] 驅動：需要驗證碼或簡訊驗證時回報事件，
 //! 使用者輸入後再繼續；登入態失效時會自動重新登入並重試原本的任務。
+//!
+//! 調度原則：
+//!
+//! - 控制任務（登入、設定、憑證）優先於資料任務；資料任務以「步進」執行，
+//!   每一步之間先處理排隊中的控制任務，避免長查詢阻塞設定操作。
+//! - 重複的資料查詢會被合併；帳號或訪問模式變更後，進行中的資料任務立即
+//!   中止且不再回報舊結果。
+//! - 解鎖憑證後不預先登入任何站點：頁面需要時才按站點惰性登入，
+//!   因此考勤系統故障不會拖垮思源學堂。
 
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use chrono::{Local, NaiveDate};
 use zeroize::Zeroizing;
@@ -15,6 +26,7 @@ use crate::auth::{AccountType, LoginDriver, LoginReply};
 use crate::config::{AccessPolicy, Config};
 use crate::credentials::{Credentials, Vault};
 use crate::domain::homework::{HomeworkInput, HomeworkItem};
+use crate::domain::semester::{self, TermCode, TermResolution, TermSource};
 use crate::domain::{attendance_match, homework, schedule};
 use crate::error::{AppError, AppResult};
 use crate::session::{LoginStage, SessionManager, SiteKind};
@@ -24,6 +36,9 @@ use crate::tui::app::{ActivityDetailView, FlowData, LessonEntry, ScheduleData};
 
 /// 考勤流水分頁大小。
 const FLOW_PAGE_SIZE: u32 = 20;
+
+/// 思源學堂課程／活動快取的有效時間。
+const LMS_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 
 /// 介面送到背景的任務。
 #[derive(Debug, Clone)]
@@ -59,24 +74,37 @@ pub enum Job {
     },
     /// 載入課表（含本週考勤）。
     LoadSchedule,
-    /// 載入待處理作業。
-    LoadHomework,
+    /// 載入作業彙總。
+    LoadHomework {
+        /// 是否略過快取強制重新查詢。
+        force: bool,
+    },
     /// 載入考勤流水。
     LoadFlow {
         /// 頁碼。
         page: u32,
     },
     /// 載入思源學堂課程。
-    LoadCourses,
+    LoadCourses {
+        /// 是否略過快取強制重新查詢。
+        force: bool,
+    },
     /// 載入課程活動。
     LoadActivities {
         /// 課程識別碼。
         course_id: String,
+        /// 是否略過快取強制重新查詢。
+        force: bool,
     },
     /// 載入活動詳情。
     LoadActivityDetail {
         /// 活動識別碼。
         activity_id: String,
+    },
+    /// 記住使用者選擇的學期，並重新載入作業。
+    SetHomeworkTerm {
+        /// 學期代碼（`YYYY-YYYY+1-T`）。
+        term: String,
     },
     /// 修改帳號。
     ChangeAccount {
@@ -102,28 +130,70 @@ impl Job {
     /// 任務說明（用於錯誤訊息）。
     pub fn label(&self) -> String {
         match self {
-            Self::CreateVault { .. } | Self::Unlock { .. } => "账户设置".to_owned(),
+            Self::CreateVault { .. } => "创建凭证".to_owned(),
+            Self::Unlock { .. } => "解锁凭证".to_owned(),
             Self::SubmitCaptcha(_) | Self::RefreshCaptcha => "验证码".to_owned(),
             Self::SendMfaCode | Self::VerifyMfaCode(_) => "短信验证".to_owned(),
             Self::RetryLogin => "登录".to_owned(),
-            Self::RetryWithAccount { .. } => "账户设置".to_owned(),
+            Self::RetryWithAccount { .. } => "重新输入账户".to_owned(),
             Self::LoadSchedule => "课表".to_owned(),
-            Self::LoadHomework => "作业".to_owned(),
+            Self::LoadHomework { .. } => "作业".to_owned(),
             Self::LoadFlow { .. } => "考勤流水".to_owned(),
-            Self::LoadCourses | Self::LoadActivities { .. } | Self::LoadActivityDetail { .. } => {
-                "思源学堂".to_owned()
-            }
-            Self::ChangeAccount { .. } | Self::ChangePassphrase { .. } => "账户设置".to_owned(),
+            Self::LoadCourses { .. }
+            | Self::LoadActivities { .. }
+            | Self::LoadActivityDetail { .. } => "思源学堂".to_owned(),
+            Self::SetHomeworkTerm { .. } => "学期选择".to_owned(),
+            Self::ChangeAccount { .. } => "修改账号".to_owned(),
+            Self::ChangePassphrase { .. } => "修改口令".to_owned(),
             Self::SetAccessPolicy(_) => "访问模式".to_owned(),
             Self::Shutdown => String::new(),
         }
     }
+
+    /// 是否為控制任務（登入、設定、憑證）；其餘為資料載入任務。
+    pub fn is_control(&self) -> bool {
+        !matches!(
+            self,
+            Self::LoadSchedule
+                | Self::LoadHomework { .. }
+                | Self::LoadFlow { .. }
+                | Self::LoadCourses { .. }
+                | Self::LoadActivities { .. }
+                | Self::LoadActivityDetail { .. }
+        )
+    }
+
+    /// 資料任務的合併鍵；同鍵的排隊請求視為重複而合併。
+    fn data_key(&self) -> Option<DataKey> {
+        match self {
+            Self::LoadSchedule => Some(DataKey::Schedule),
+            Self::LoadHomework { .. } => Some(DataKey::Homework),
+            Self::LoadFlow { page } => Some(DataKey::Flow(*page)),
+            Self::LoadCourses { .. } => Some(DataKey::Courses),
+            Self::LoadActivities { course_id, .. } => Some(DataKey::Activities(course_id.clone())),
+            Self::LoadActivityDetail { activity_id } => {
+                Some(DataKey::ActivityDetail(activity_id.clone()))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// 資料任務的合併鍵。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DataKey {
+    Schedule,
+    Homework,
+    Flow(u32),
+    Courses,
+    Activities(String),
+    ActivityDetail(String),
 }
 
 /// 背景回報的事件。
 #[derive(Debug)]
 pub enum Event {
-    /// 保險庫已建立或解鎖，可以開始登入。
+    /// 保險庫已建立或解鎖；介面可直接進入主畫面並觸發頁面載入。
     VaultReady,
     /// 登入進度。
     LoginProgress(String),
@@ -142,8 +212,17 @@ pub enum Event {
     LoginSucceeded,
     /// 課表資料。
     Schedule(Box<ScheduleData>),
-    /// 作業資料。
-    Homework(Vec<HomeworkItem>),
+    /// 作業載入更新（部分結果或最終結果）。
+    Homework(HomeworkUpdate),
+    /// 無法自動判定本學期，需要使用者選擇（附課程中出現的學期選項）。
+    HomeworkNeedsTerm {
+        /// 可選學期（由新到舊）。
+        options: Vec<TermCode>,
+        /// 依日期推算的建議學期（僅作預選）。
+        suggestion: Option<TermCode>,
+        /// 無法判定的原因。
+        reason: String,
+    },
     /// 考勤流水資料。
     Flow(Box<FlowData>),
     /// 課程列表。
@@ -166,7 +245,49 @@ pub enum Event {
         what: String,
         /// 錯誤訊息。
         message: String,
+        /// 失敗所屬的介面位置。
+        target: FailedTarget,
     },
+}
+
+/// 錯誤所屬的介面位置（供介面只標記受影響的頁面）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailedTarget {
+    /// 課表頁。
+    Schedule,
+    /// 作業頁。
+    Homework,
+    /// 考勤流水頁。
+    Flow,
+    /// 思源學堂課程列表。
+    Courses,
+    /// 思源學堂活動列表。
+    Activities,
+    /// 思源學堂活動詳情。
+    ActivityDetail,
+    /// 登入流程（驗證碼、簡訊、重試）。
+    Login,
+    /// 帳戶設定與憑證操作。
+    Settings,
+}
+
+/// 作業頁的一次載入更新（部分結果或最終結果）。
+#[derive(Debug)]
+pub struct HomeworkUpdate {
+    /// 學期標籤（無法判定學期時為 `None`）。
+    pub term_label: Option<String>,
+    /// 學期判定來源（無法判定學期時為 `None`）。
+    pub term_source: Option<TermSource>,
+    /// 納入查詢的課程數。
+    pub courses_included: usize,
+    /// 因缺少學期資訊而未納入查詢的課程數。
+    pub courses_skipped: usize,
+    /// 可選學期（由新到舊；供介面顯示選擇器）。
+    pub term_options: Vec<TermCode>,
+    /// 目前已彙總的作業。
+    pub items: Vec<HomeworkItem>,
+    /// 載入進度（已完成課程數, 課程總數）；`None` 表示已載入完成。
+    pub progress: Option<(usize, usize)>,
 }
 
 /// 進行中的登入流程。
@@ -195,6 +316,126 @@ struct Worker {
     flow: Option<LoginFlow>,
     retry: Option<Job>,
     pending_vault: Option<PendingVault>,
+    /// 待執行的資料任務（依序、已去重）。
+    pending_data: VecDeque<Job>,
+    /// 資料任務代際：帳號或訪問模式變更時遞增，進行中的任務自動中止。
+    generation: u64,
+    /// 思源學堂課程／活動快取。
+    cache: LmsCache,
+}
+
+/// 作業載入的步進階段。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HomeworkStage {
+    /// 載入目前課程的作業活動。
+    Activities,
+    /// 載入目前活動的提交摘要。
+    Submission,
+    /// 切換到下一門課程。
+    AdvanceCourse,
+    /// 全部完成。
+    Done,
+}
+
+/// 作業載入的步進狀態。
+struct HomeworkRunner {
+    /// 目標學期。
+    term: TermCode,
+    /// 學期判定來源。
+    term_source: TermSource,
+    /// 納入查詢的課程。
+    courses: Vec<LmsCourse>,
+    /// 缺少學期資訊而未納入的課程數。
+    skipped_terms: usize,
+    /// 可選學期（供介面顯示選擇器）。
+    term_options: Vec<TermCode>,
+    /// 下一門課程的索引。
+    course_index: usize,
+    /// 目前課程的作業活動。
+    activities: Vec<LmsActivity>,
+    /// 下一個活動的索引。
+    activity_index: usize,
+    /// 已彙總的輸入。
+    inputs: Vec<HomeworkInput>,
+    /// 目前階段。
+    stage: HomeworkStage,
+    /// 是否略過快取。
+    force: bool,
+}
+
+impl HomeworkRunner {
+    /// 目前課程。
+    fn current_course(&self) -> Option<&LmsCourse> {
+        self.courses.get(self.course_index)
+    }
+
+    /// 目前的載入更新（完成時 `progress` 為 `None`）。
+    fn update(&self) -> HomeworkUpdate {
+        let now = Local::now().fixed_offset();
+        let progress = if matches!(self.stage, HomeworkStage::Done) {
+            None
+        } else {
+            Some((
+                self.course_index.min(self.courses.len()),
+                self.courses.len(),
+            ))
+        };
+        HomeworkUpdate {
+            term_label: Some(self.term.label()),
+            term_source: Some(self.term_source),
+            courses_included: self.courses.len(),
+            courses_skipped: self.skipped_terms,
+            term_options: self.term_options.clone(),
+            items: homework::aggregate(&self.inputs, now),
+            progress,
+        }
+    }
+}
+
+/// 思源學堂課程／活動快取（記憶體、有效期五分鐘）。
+#[derive(Default)]
+struct LmsCache {
+    courses: Option<(Vec<LmsCourse>, usize, Instant)>,
+    activities: HashMap<String, (Vec<LmsActivity>, usize, Instant)>,
+}
+
+impl LmsCache {
+    /// 清空快取（帳號或訪問模式變更時呼叫）。
+    fn clear(&mut self) {
+        self.courses = None;
+        self.activities.clear();
+    }
+
+    /// 取課程快取（有效期內且非強制刷新時）。
+    fn courses(&self, force: bool) -> Option<(Vec<LmsCourse>, usize)> {
+        if force {
+            return None;
+        }
+        let (courses, skipped, at) = self.courses.as_ref()?;
+        (at.elapsed() < LMS_CACHE_TTL).then(|| (courses.clone(), *skipped))
+    }
+
+    /// 寫入課程快取。
+    fn store_courses(&mut self, courses: &[LmsCourse], skipped: usize) {
+        self.courses = Some((courses.to_vec(), skipped, Instant::now()));
+    }
+
+    /// 取活動快取（有效期內且非強制刷新時）。
+    fn activities(&self, course_id: &str, force: bool) -> Option<(Vec<LmsActivity>, usize)> {
+        if force {
+            return None;
+        }
+        let (activities, skipped, at) = self.activities.get(course_id)?;
+        (at.elapsed() < LMS_CACHE_TTL).then(|| (activities.clone(), *skipped))
+    }
+
+    /// 寫入活動快取。
+    fn store_activities(&mut self, course_id: &str, activities: &[LmsActivity], skipped: usize) {
+        self.activities.insert(
+            course_id.to_owned(),
+            (activities.to_vec(), skipped, Instant::now()),
+        );
+    }
 }
 
 /// 啟動背景工作執行緒，回傳（任務送出端, 事件接收端）。
@@ -212,6 +453,9 @@ pub fn spawn(config: Config, vault: Vault) -> AppResult<(Sender<Job>, Receiver<E
         flow: None,
         retry: None,
         pending_vault: None,
+        pending_data: VecDeque::new(),
+        generation: 0,
+        cache: LmsCache::default(),
     };
 
     thread::Builder::new()
@@ -224,27 +468,91 @@ pub fn spawn(config: Config, vault: Vault) -> AppResult<(Sender<Job>, Receiver<E
 
 impl Worker {
     fn run(&mut self) {
-        while let Ok(job) = self.jobs.recv() {
-            let shutdown = matches!(job, Job::Shutdown);
-            let what = job.label();
-            match self.dispatch(job) {
-                Ok(()) => {}
-                Err(err) => self.emit(Event::Failed {
-                    what: if what.is_empty() {
-                        "操作".to_owned()
-                    } else {
-                        what
+        loop {
+            let job = if self.flow.is_none() {
+                match self.pending_data.pop_front() {
+                    Some(job) => job,
+                    None => match self.jobs.recv() {
+                        Ok(job) => job,
+                        // 介面已結束。
+                        Err(_) => return,
                     },
-                    message: err.to_string(),
-                }),
-            }
-            if shutdown {
-                return;
+                }
+            } else {
+                // 互動式登入進行中：只處理控制任務（例如驗證碼提交），
+                // 資料任務延後到登入完成後再跑。
+                match self.jobs.recv() {
+                    Ok(job) => job,
+                    Err(_) => return,
+                }
+            };
+
+            if job.is_control() {
+                if self.handle_control(job) {
+                    return;
+                }
+            } else if self.flow.is_some() {
+                // 登入尚未完成：排入待執行（略過重複的請求）。
+                let duplicate = job.data_key().is_some_and(|key| {
+                    self.pending_data
+                        .iter()
+                        .any(|queued| queued.data_key().as_ref() == Some(&key))
+                });
+                if !duplicate {
+                    self.pending_data.push_back(job);
+                }
+            } else {
+                self.run_data_job(job);
             }
         }
     }
 
+    /// 執行控制任務；回傳是否收到結束指令。
+    fn handle_control(&mut self, job: Job) -> bool {
+        let shutdown = matches!(job, Job::Shutdown);
+        let what = job.label();
+        let target = failed_target_of(&job);
+        if let Err(err) = self.dispatch_control(job) {
+            self.emit(Event::Failed {
+                what: if what.is_empty() {
+                    "操作".to_owned()
+                } else {
+                    what
+                },
+                message: err.to_string(),
+                target,
+            });
+        }
+        shutdown
+    }
+
+    /// 回報資料任務失敗。
+    fn emit_failed(&self, job: &Job, err: AppError) {
+        let what = job.label();
+        self.emit(Event::Failed {
+            what: if what.is_empty() {
+                "操作".to_owned()
+            } else {
+                what
+            },
+            message: err.to_string(),
+            target: failed_target_of(job),
+        });
+    }
+
+    /// 測試用：同步執行單一任務（與 [`Self::run`] 相同的路由）。
+    #[cfg(test)]
     fn dispatch(&mut self, job: Job) -> AppResult<()> {
+        if job.is_control() {
+            self.dispatch_control(job)
+        } else {
+            self.run_data_job(job);
+            Ok(())
+        }
+    }
+
+    /// 分派控制任務；資料任務不在這裡處理。
+    fn dispatch_control(&mut self, job: Job) -> AppResult<()> {
         match job {
             Job::CreateVault {
                 passphrase,
@@ -266,8 +574,15 @@ impl Worker {
             } => self.change_account(&passphrase, credentials),
             Job::ChangePassphrase { old, new } => self.change_passphrase(&old, &new),
             Job::SetAccessPolicy(policy) => self.set_access_policy(policy),
+            Job::SetHomeworkTerm { term } => self.set_homework_term(&term),
             Job::Shutdown => Ok(()),
-            data_job => self.load(data_job),
+            // 資料任務由 [`Self::run_data_job`] 負責。
+            Job::LoadSchedule
+            | Job::LoadHomework { .. }
+            | Job::LoadFlow { .. }
+            | Job::LoadCourses { .. }
+            | Job::LoadActivities { .. }
+            | Job::LoadActivityDetail { .. } => Ok(()),
         }
     }
 
@@ -276,15 +591,17 @@ impl Worker {
     fn create_vault(&mut self, passphrase: &str, credentials: Credentials) -> AppResult<()> {
         self.vault.store(passphrase, &credentials)?;
         self.start_session(credentials)?;
+        // 不預先登入任何站點：頁面載入需要時才按站點惰性登入。
         self.emit(Event::VaultReady);
-        self.begin_login(SiteKind::Attendance, None)
+        Ok(())
     }
 
     fn unlock(&mut self, passphrase: &str) -> AppResult<()> {
         let credentials = self.vault.load(passphrase)?;
         self.start_session(credentials)?;
+        // 不預先登入任何站點：頁面載入需要時才按站點惰性登入。
         self.emit(Event::VaultReady);
-        self.begin_login(SiteKind::Attendance, None)
+        Ok(())
     }
 
     fn change_account(&mut self, passphrase: &str, credentials: Credentials) -> AppResult<()> {
@@ -294,12 +611,24 @@ impl Worker {
         self.start_session(credentials)?;
         self.emit(Event::AccountUpdated);
         self.emit(Event::VaultReady);
-        self.begin_login(SiteKind::Attendance, None)
+        Ok(())
     }
 
     fn change_passphrase(&mut self, old: &str, new: &str) -> AppResult<()> {
         self.vault.change_passphrase(old, new)?;
         self.emit(Event::PassphraseUpdated);
+        Ok(())
+    }
+
+    /// 記住使用者選擇的學期，並立即重新載入作業。
+    fn set_homework_term(&mut self, term: &str) -> AppResult<()> {
+        let term = TermCode::parse(term)
+            .ok_or_else(|| AppError::protocol(format!("学期格式无法识别：{term}")))?;
+        self.config.homework_term = Some(term.to_string());
+        self.config.save()?;
+        self.emit(Event::Notice(format!("已记住学期 {}", term.label())));
+        self.pending_data
+            .push_back(Job::LoadHomework { force: true });
         Ok(())
     }
 
@@ -312,17 +641,31 @@ impl Worker {
         self.credentials = Some(credentials);
         self.flow = None;
         self.retry = None;
+        // 換帳號後舊任務與快取一律作廢，進行中的資料任務不再回報。
+        self.generation += 1;
+        self.pending_data.clear();
+        self.cache.clear();
         Ok(())
     }
 
     fn set_access_policy(&mut self, policy: AccessPolicy) -> AppResult<()> {
+        let previous = self.config.access_policy;
         self.config.access_policy = policy;
-        self.config.save()?;
+        if let Err(err) = self.config.save() {
+            // 寫入失敗：保留原設定，不變更已生效的策略。
+            self.config.access_policy = previous;
+            return Err(err);
+        }
+
         if let Some(session) = self.session.as_mut() {
             session.set_access_policy(policy);
         }
+        // 訪問方式變更：進行中的資料任務作廢，快取失效。
+        // 保存設定本身不觸發登入，後續登入由各頁面按需進行。
+        self.generation += 1;
+        self.cache.clear();
         self.emit(Event::AccessPolicyUpdated(policy));
-        self.begin_login(SiteKind::Attendance, None)
+        Ok(())
     }
 
     // ── 登入 ─────────────────────────────────────────────
@@ -407,11 +750,15 @@ impl Worker {
         // 登入成功後才更新保險庫，失敗的憑證不會覆蓋舊憑證。
         self.commit_pending_vault();
         self.emit(Event::LoginSucceeded);
-        let job = retry.or(self.retry.take());
-        match job {
-            Some(job) => self.dispatch(job),
-            None => Ok(()),
+        // 登入成功後續跑等待中的任務（可能是資料任務或控制任務）。
+        if let Some(job) = retry.or(self.retry.take()) {
+            if job.is_control() {
+                let _ = self.handle_control(job);
+            } else {
+                self.run_data_job(job);
+            }
         }
+        Ok(())
     }
 
     /// 把等待中的憑證寫入保險庫；寫入失敗不影響已完成的登入。
@@ -486,42 +833,119 @@ impl Worker {
 
     // ── 資料載入 ─────────────────────────────────────────
 
-    fn load(&mut self, job: Job) -> AppResult<()> {
-        let site = site_of(&job);
-        let result = match &job {
-            Job::LoadSchedule => self
-                .load_schedule()
-                .map(|data| Event::Schedule(Box::new(data))),
-            Job::LoadHomework => self.load_homework().map(Event::Homework),
-            Job::LoadFlow { page } => self
-                .load_flow(*page)
-                .map(|data| Event::Flow(Box::new(data))),
-            Job::LoadCourses => self.load_courses().map(Event::Courses),
-            Job::LoadActivities { course_id } => {
-                self.load_activities(course_id).map(Event::Activities)
+    /// 執行資料任務（作業以步進方式執行，其餘為單步）。
+    fn run_data_job(&mut self, job: Job) {
+        match job {
+            Job::LoadHomework { force } => self.run_homework_job(force),
+            other => self.run_single_job(other),
+        }
+    }
+
+    /// 執行單步資料任務。
+    fn run_single_job(&mut self, job: Job) {
+        let generation = self.generation;
+        // 先處理排隊中的控制任務，並合併與本任務重複的請求。
+        if !self.drain_channel(job.data_key()) {
+            return;
+        }
+        if generation != self.generation {
+            return;
+        }
+
+        match self.load_once(&job) {
+            Ok(Some(event)) => self.emit(event),
+            Ok(None) => {}
+            Err(err) => self.report_data_failure(job, generation, err),
+        }
+    }
+
+    /// 執行一次單步請求，回傳要回報的事件。
+    fn load_once(&mut self, job: &Job) -> AppResult<Option<Event>> {
+        let event = match job {
+            Job::LoadSchedule => Event::Schedule(Box::new(self.load_schedule()?)),
+            Job::LoadFlow { page } => Event::Flow(Box::new(self.load_flow(*page)?)),
+            Job::LoadCourses { force } => Event::Courses(self.load_courses(*force)?),
+            Job::LoadActivities { course_id, force } => {
+                Event::Activities(self.load_activities(course_id, *force)?)
             }
-            Job::LoadActivityDetail { activity_id } => self
-                .load_activity_detail(activity_id)
-                .map(|view| Event::ActivityDetail(Box::new(view))),
-            _ => return Ok(()),
+            Job::LoadActivityDetail { activity_id } => {
+                Event::ActivityDetail(Box::new(self.load_activity_detail(activity_id)?))
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(event))
+    }
+
+    /// 重新查詢資料前先排空通道：控制任務優先處理、重複的資料請求合併。
+    ///
+    /// `running` 為目前進行中的任務鍵；與它重複的排隊請求直接合併（例如
+    /// 長查詢期間重複按 `r`）。回傳 `false` 代表收到結束指令，呼叫端應立即停止。
+    fn drain_channel(&mut self, running: Option<DataKey>) -> bool {
+        loop {
+            match self.jobs.try_recv() {
+                Ok(Job::Shutdown) => return false,
+                Ok(job) if job.is_control() => {
+                    let _ = self.handle_control(job);
+                }
+                Ok(job) => {
+                    let Some(key) = job.data_key() else { continue };
+                    // 與進行中的任務重複：合併。
+                    if running.as_ref() == Some(&key) {
+                        continue;
+                    }
+                    // 已有相同任務在排隊：合併。
+                    if self
+                        .pending_data
+                        .iter()
+                        .any(|queued| queued.data_key().as_ref() == Some(&key))
+                    {
+                        continue;
+                    }
+                    self.pending_data.push_back(job);
+                }
+                Err(TryRecvError::Empty) => return true,
+                Err(TryRecvError::Disconnected) => return false,
+            }
+        }
+    }
+
+    /// 資料任務失敗的統一處理：有限回退 → 重新登入 → 回報錯誤。
+    fn report_data_failure(&mut self, job: Job, generation: u64, err: AppError) {
+        // 代際已變（帳號或訪問模式被切換）：舊任務的錯誤直接忽略。
+        if generation != self.generation {
+            return;
+        }
+        let Some(site) = site_of(&job) else {
+            self.emit_failed(&job, err);
+            return;
         };
 
-        match result {
-            Ok(event) => {
-                self.emit(event);
-                Ok(())
-            }
-            Err(err) if err.needs_relogin() => {
-                let Some(site) = site else {
-                    return Err(err);
-                };
-                // 登入態失效：記下任務，重新登入後自動重試。登入本身失敗時任務仍
-                // 留在 `self.retry`，使用者重試成功後會自動續跑。
-                self.retry = Some(job);
-                self.begin_login(site, None)
-            }
-            Err(err) => Err(err),
+        // 直連失敗：Auto 模式下允許改走 WebVPN 一次。
+        let switched = matches!(
+            &err,
+            AppError::Network { kind, .. } if kind.is_connection_level()
+        ) && self
+            .session
+            .as_mut()
+            .is_some_and(|session| session.fallback_to_webvpn(site));
+        if switched {
+            self.emit(Event::Notice(format!(
+                "直连不可用，已改用 WebVPN 重试：{site}"
+            )));
         }
+
+        if err.needs_relogin() || switched {
+            // 登入態失效（或剛切換路由）：記下任務，重新登入後自動重試。
+            self.retry = Some(job);
+            if let Err(login_err) = self.begin_login(site, None)
+                && let Some(job) = self.retry.take()
+            {
+                self.emit_failed(&job, login_err);
+            }
+            return;
+        }
+
+        self.emit_failed(&job, err);
     }
 
     fn load_schedule(&mut self) -> AppResult<ScheduleData> {
@@ -576,53 +1000,231 @@ impl Worker {
         })
     }
 
-    fn load_homework(&mut self) -> AppResult<Vec<HomeworkItem>> {
-        let session = self.session_mut()?;
-        let mut api = LmsApi::new(session);
+    /// 作業載入（步進執行：每門課程、每項作業之間先處理控制任務）。
+    fn run_homework_job(&mut self, force: bool) {
+        let generation = self.generation;
+        let job = Job::LoadHomework { force };
+        let running_key = job.data_key();
 
-        let (courses, mut skipped) = api.my_courses()?;
-        let mut inputs: Vec<HomeworkInput> = Vec::new();
+        let mut runner = match self.begin_homework(force) {
+            Ok(Some(runner)) => runner,
+            Ok(None) => return,
+            Err(err) => {
+                self.report_data_failure(job, generation, err);
+                return;
+            }
+        };
 
-        for course in &courses {
-            let (activities, skipped_activities) = api.course_activities(&course.id)?;
-            skipped += skipped_activities;
+        loop {
+            if !self.drain_channel(running_key.clone()) {
+                return;
+            }
+            if generation != self.generation {
+                self.emit(Event::Notice(
+                    "账号或访问模式已变更，已取消进行中的作业加载".to_owned(),
+                ));
+                return;
+            }
+            if matches!(runner.stage, HomeworkStage::Done) {
+                let update = runner.update();
+                self.emit(Event::Homework(update));
+                return;
+            }
+            if let Err(err) = self.homework_step(&mut runner) {
+                self.report_data_failure(job, generation, err);
+                return;
+            }
+        }
+    }
 
-            for activity in activities
-                .iter()
-                .filter(|activity| activity.kind() == ActivityKind::Homework)
-            {
-                // 取不到提交記錄時記為「無法確認」，不可誤判為未提交。
-                let submission_count = api
-                    .submissions(
-                        &activity.id,
-                        activity.submit_by_group.unwrap_or(false),
-                        activity.group_id.as_deref(),
-                    )
-                    .ok()
-                    .map(|list| list.count());
+    /// 準備作業載入：判定學期、過濾課程並回報首批進度。
+    fn begin_homework(&mut self, force: bool) -> AppResult<Option<HomeworkRunner>> {
+        let (courses, skipped_data) = self.lms_courses(force)?;
+        if skipped_data > 0 {
+            self.emit(Event::Notice(format!(
+                "已跳过 {skipped_data} 项无法解析的思源学堂数据"
+            )));
+        }
 
-                inputs.push(HomeworkInput {
-                    course_id: course.id.clone(),
-                    course_name: course.name.clone(),
-                    activity_id: activity.id.clone(),
-                    title: activity.display_title(),
-                    end_time: activity.end_time.clone(),
-                    submit_by_group: activity.submit_by_group.unwrap_or(false),
-                    submission_count,
+        // 沒有任何課程時無從（也無需）判定學期：直接回報空結果。
+        if courses.is_empty() {
+            self.emit(Event::Homework(HomeworkUpdate {
+                term_label: None,
+                term_source: None,
+                courses_included: 0,
+                courses_skipped: 0,
+                term_options: Vec::new(),
+                items: Vec::new(),
+                progress: None,
+            }));
+            return Ok(None);
+        }
+
+        let attendance_term = self.attendance_term();
+        let remembered = self
+            .config
+            .homework_term
+            .as_deref()
+            .and_then(TermCode::parse);
+        let today = Local::now().date_naive();
+
+        let (term, term_source) = match semester::resolve_term(attendance_term, remembered, today) {
+            TermResolution::Resolved { term, source } => (term, source),
+            TermResolution::NeedsChoice { suggestion } => {
+                self.emit(Event::HomeworkNeedsTerm {
+                    options: semester::course_terms(&courses),
+                    suggestion,
+                    reason: "无法自动判定当前学期：考勤系统不可用，且没有记住的学期。".to_owned(),
                 });
+                return Ok(None);
+            }
+        };
+
+        // 可選學期：課程中出現過的學期；若目前學期不在其中（例如沿用上次選擇），
+        // 也一併加入供切換。
+        let mut term_options = semester::course_terms(&courses);
+        if !term_options.contains(&term) {
+            term_options.push(term);
+            term_options.sort_unstable_by(|left, right| right.cmp(left));
+        }
+
+        let mut included: Vec<LmsCourse> = Vec::new();
+        let mut skipped_terms = 0_usize;
+        for course in courses {
+            match semester::course_term(&course) {
+                Some(code) if code == term => included.push(course),
+                // 其他學期的課程不參與本輪查詢。
+                Some(_) => {}
+                None => skipped_terms += 1,
             }
         }
 
-        let now = Local::now().fixed_offset();
-        let mut items = homework::aggregate(&inputs, now);
-        if skipped > 0 {
-            // 有項目因格式問題被跳過時提示使用者，但不影響已彙總的結果。
-            self.emit(Event::Notice(format!(
-                "已跳过 {skipped} 项无法解析的思源学堂数据"
-            )));
+        let stage = if included.is_empty() {
+            HomeworkStage::Done
+        } else {
+            HomeworkStage::Activities
+        };
+        let runner = HomeworkRunner {
+            term,
+            term_source,
+            courses: included,
+            skipped_terms,
+            term_options,
+            course_index: 0,
+            activities: Vec::new(),
+            activity_index: 0,
+            inputs: Vec::new(),
+            stage,
+            force,
+        };
+        let update = runner.update();
+        self.emit(Event::Homework(update));
+        Ok(Some(runner))
+    }
+
+    /// 推進一格作業載入。
+    fn homework_step(&mut self, runner: &mut HomeworkRunner) -> AppResult<()> {
+        match runner.stage {
+            HomeworkStage::Activities => {
+                let course_id = runner
+                    .current_course()
+                    .map(|course| course.id.clone())
+                    .ok_or_else(|| AppError::protocol("课程索引越界"))?;
+                let (activities, skipped) = self.lms_activities(&course_id, runner.force)?;
+                if skipped > 0 {
+                    self.emit(Event::Notice(format!(
+                        "已跳过 {skipped} 项无法解析的思源学堂数据"
+                    )));
+                }
+                runner.activities = activities
+                    .into_iter()
+                    .filter(|activity| activity.kind() == ActivityKind::Homework)
+                    .collect();
+                runner.activity_index = 0;
+                runner.stage = if runner.activities.is_empty() {
+                    HomeworkStage::AdvanceCourse
+                } else {
+                    HomeworkStage::Submission
+                };
+            }
+            HomeworkStage::Submission => {
+                let activity = runner
+                    .activities
+                    .get(runner.activity_index)
+                    .cloned()
+                    .ok_or_else(|| AppError::protocol("活动索引越界"))?;
+                let course = runner
+                    .current_course()
+                    .cloned()
+                    .ok_or_else(|| AppError::protocol("课程索引越界"))?;
+                let input = self.homework_input(&course, &activity)?;
+                runner.inputs.push(input);
+
+                runner.activity_index += 1;
+                if runner.activity_index >= runner.activities.len() {
+                    runner.stage = HomeworkStage::AdvanceCourse;
+                }
+                let update = runner.update();
+                self.emit(Event::Homework(update));
+            }
+            HomeworkStage::AdvanceCourse => {
+                runner.course_index += 1;
+                runner.activities.clear();
+                runner.activity_index = 0;
+                runner.stage = if runner.course_index >= runner.courses.len() {
+                    HomeworkStage::Done
+                } else {
+                    HomeworkStage::Activities
+                };
+                let update = runner.update();
+                self.emit(Event::Homework(update));
+            }
+            HomeworkStage::Done => {}
         }
-        items.shrink_to_fit();
-        Ok(items)
+        Ok(())
+    }
+
+    /// 取得單一作業的提交摘要（詳情先行確定小組，再抓提交記錄）。
+    fn homework_input(
+        &mut self,
+        course: &LmsCourse,
+        activity: &LmsActivity,
+    ) -> AppResult<HomeworkInput> {
+        let mut input = HomeworkInput {
+            course_id: course.id.clone(),
+            course_name: course.name.clone(),
+            activity_id: activity.id.clone(),
+            title: activity.display_title(),
+            end_time: activity.end_time.clone(),
+            submit_by_group: activity.submit_by_group.unwrap_or(false),
+            submission_count: None,
+            note: None,
+        };
+
+        let session = self.session_mut()?;
+        let mut api = LmsApi::new(session);
+        match api.submission_summary(&activity.id) {
+            Ok(summary) => {
+                input.submit_by_group = summary.submit_by_group;
+                input.submission_count = summary.count;
+                input.note = summary.note;
+            }
+            // 登入態失效與連線層錯誤向上傳播；其他單項失敗保留「待核实」。
+            Err(err) if !is_recoverable(&err) => return Err(err),
+            Err(err) => input.note = Some(err.to_string()),
+        }
+        Ok(input)
+    }
+
+    /// 嘗試由考勤系統取得當前學期；未登入或查詢失敗時回傳 `None`（不觸發登入）。
+    fn attendance_term(&mut self) -> Option<TermCode> {
+        let session = self.session.as_mut()?;
+        if !session.is_logged_in(SiteKind::Attendance) {
+            return None;
+        }
+        let mut api = AttendanceApi::new(session);
+        let semester = api.current_semester().ok()?;
+        TermCode::parse(&semester.term_name())
     }
 
     fn load_flow(&mut self, page: u32) -> AppResult<FlowData> {
@@ -638,18 +1240,44 @@ impl Worker {
         })
     }
 
-    fn load_courses(&mut self) -> AppResult<Vec<LmsCourse>> {
-        let session = self.session_mut()?;
-        let mut api = LmsApi::new(session);
-        let (courses, _) = api.my_courses()?;
+    fn load_courses(&mut self, force: bool) -> AppResult<Vec<LmsCourse>> {
+        let (courses, _) = self.lms_courses(force)?;
         Ok(courses)
     }
 
-    fn load_activities(&mut self, course_id: &str) -> AppResult<Vec<LmsActivity>> {
+    fn load_activities(&mut self, course_id: &str, force: bool) -> AppResult<Vec<LmsActivity>> {
+        let (activities, _) = self.lms_activities(course_id, force)?;
+        Ok(activities)
+    }
+
+    // ── 思源學堂快取 ─────────────────────────────────────
+
+    /// 課程清單（含被跳過的項目數）；有效期內重用快取。
+    fn lms_courses(&mut self, force: bool) -> AppResult<(Vec<LmsCourse>, usize)> {
+        if let Some(cached) = self.cache.courses(force) {
+            return Ok(cached);
+        }
         let session = self.session_mut()?;
         let mut api = LmsApi::new(session);
-        let (activities, _) = api.course_activities(course_id)?;
-        Ok(activities)
+        let (courses, skipped) = api.my_courses()?;
+        self.cache.store_courses(&courses, skipped);
+        Ok((courses, skipped))
+    }
+
+    /// 課程活動（含被跳過的項目數）；有效期內重用快取。
+    fn lms_activities(
+        &mut self,
+        course_id: &str,
+        force: bool,
+    ) -> AppResult<(Vec<LmsActivity>, usize)> {
+        if let Some(cached) = self.cache.activities(course_id, force) {
+            return Ok(cached);
+        }
+        let session = self.session_mut()?;
+        let mut api = LmsApi::new(session);
+        let (activities, skipped) = api.course_activities(course_id)?;
+        self.cache.store_activities(course_id, &activities, skipped);
+        Ok((activities, skipped))
     }
 
     fn load_activity_detail(&mut self, activity_id: &str) -> AppResult<ActivityDetailView> {
@@ -690,12 +1318,39 @@ impl Worker {
 fn site_of(job: &Job) -> Option<SiteKind> {
     match job {
         Job::LoadSchedule | Job::LoadFlow { .. } => Some(SiteKind::Attendance),
-        Job::LoadHomework
-        | Job::LoadCourses
+        Job::LoadHomework { .. }
+        | Job::LoadCourses { .. }
         | Job::LoadActivities { .. }
         | Job::LoadActivityDetail { .. } => Some(SiteKind::Lms),
         _ => None,
     }
+}
+
+/// 任務失敗時應由介面標記的位置。
+fn failed_target_of(job: &Job) -> FailedTarget {
+    match job {
+        Job::LoadSchedule => FailedTarget::Schedule,
+        Job::LoadHomework { .. } => FailedTarget::Homework,
+        Job::LoadFlow { .. } => FailedTarget::Flow,
+        Job::LoadCourses { .. } => FailedTarget::Courses,
+        Job::LoadActivities { .. } => FailedTarget::Activities,
+        Job::LoadActivityDetail { .. } => FailedTarget::ActivityDetail,
+        Job::SubmitCaptcha(_)
+        | Job::RefreshCaptcha
+        | Job::SendMfaCode
+        | Job::VerifyMfaCode(_)
+        | Job::RetryLogin
+        | Job::RetryWithAccount { .. } => FailedTarget::Login,
+        _ => FailedTarget::Settings,
+    }
+}
+
+/// 單項查詢失敗是否可保留為「待核实」並繼續（否則向上傳播）。
+fn is_recoverable(err: &AppError) -> bool {
+    if err.needs_relogin() {
+        return false;
+    }
+    !matches!(err, AppError::Network { kind, .. } if kind.is_connection_level())
 }
 
 fn parse_date(value: &str) -> AppResult<NaiveDate> {
@@ -706,3 +1361,7 @@ fn parse_date(value: &str) -> AppResult<NaiveDate> {
 #[cfg(test)]
 #[path = "tests/worker_test.rs"]
 mod worker_test;
+
+#[cfg(test)]
+#[path = "tests/scheduler_test.rs"]
+mod scheduler_test;

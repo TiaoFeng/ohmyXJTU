@@ -6,13 +6,16 @@ use reqwest::blocking::Client;
 use reqwest::redirect::Policy;
 
 use super::{Body, HttpClient, HttpRequest, HttpResponse, Method};
-use crate::error::{AppError, AppResult};
+use crate::error::{AppError, AppResult, NetworkKind};
 
 /// 單次請求的預設逾時。
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// 最多跟隨的重定向次數。
 const MAX_REDIRECTS: usize = 10;
+
+/// 錯誤鏈摘要的最大長度（字元數）。
+const MAX_DETAIL_CHARS: usize = 320;
 
 /// 內建 cookie jar 的阻塞式 HTTP 客戶端。
 ///
@@ -98,16 +101,124 @@ fn build_client(user_agent: &str, policy: Policy) -> AppResult<Client> {
         .cookie_store(true)
         .redirect(policy)
         .timeout(DEFAULT_TIMEOUT)
+        // 考勤入口（bk-kq.xjtu.edu.cn）的第一個回應以舊式多行標頭承載
+        // Content-Security-Policy（續行使用裸 LF）。Hyper 預設拒收這類標頭，
+        // 會讓請求在還沒開始重定向前就失敗；Python requests 對此寬容，參考實作
+        // 因此不受影響。這裡只放寬這一種舊式折行格式，不選擇「忽略所有無效標頭」，
+        // TLS 驗證等安全性設定維持不變。
+        .http1_allow_obsolete_multiline_headers_in_responses(true)
         .build()
         .map_err(|err| AppError::network(format!("初始化 HTTP 客户端失败：{err}")))
 }
 
+/// 將 `reqwest` 錯誤映射為帶類別的網路錯誤。
+///
+/// 錯誤鏈會保留底層原因（例如 `invalid HTTP header parsed`），但一律去除
+/// URL 與查詢參數，避免把敏感資訊帶進使用者可見訊息。
 fn map_error(err: reqwest::Error) -> AppError {
-    if err.is_timeout() {
-        AppError::network(format!("请求超时：{err}"))
-    } else if err.is_connect() {
-        AppError::network(format!("无法连接服务器：{err}"))
-    } else {
-        AppError::network(err.to_string())
-    }
+    AppError::network_kind(classify(&err), describe(&err))
 }
+
+/// 依錯誤鏈判斷網路錯誤類別。
+fn classify(err: &reqwest::Error) -> NetworkKind {
+    classify_chain(
+        &chain_text(err),
+        err.is_timeout(),
+        err.is_redirect(),
+        err.is_connect(),
+    )
+}
+
+/// 分類邏輯本體（純函式，便於以真實錯誤鏈文字測試）。
+///
+/// `chain` 需為小寫的錯誤鏈全文；旗標對應 `reqwest::Error` 的
+/// `is_timeout`／`is_redirect`／`is_connect`。
+fn classify_chain(
+    chain: &str,
+    is_timeout: bool,
+    is_redirect: bool,
+    is_connect: bool,
+) -> NetworkKind {
+    if is_timeout {
+        return NetworkKind::Timeout;
+    }
+    if is_redirect {
+        return NetworkKind::Redirect;
+    }
+    if chain.contains("invalid http header") || chain.contains("invalid header") {
+        return NetworkKind::HttpParse;
+    }
+    if chain.contains("dns")
+        || chain.contains("failed to lookup")
+        || chain.contains("name or service not known")
+        || chain.contains("nodename nor servname")
+    {
+        return NetworkKind::Dns;
+    }
+    if chain.contains("certificate") || chain.contains("tls") || chain.contains("handshake") {
+        return NetworkKind::Tls;
+    }
+    if is_connect
+        || chain.contains("connection closed")
+        || chain.contains("connection reset")
+        || chain.contains("broken pipe")
+        || chain.contains("unexpected eof")
+    {
+        return NetworkKind::Connect;
+    }
+    NetworkKind::Other
+}
+
+/// 串接錯誤鏈全文（小寫）供關鍵字判類。
+fn chain_text(err: &reqwest::Error) -> String {
+    let mut text = String::new();
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(err);
+    while let Some(item) = current {
+        text.push_str(&item.to_string().to_lowercase());
+        text.push('\n');
+        current = item.source();
+    }
+    text
+}
+
+/// 將錯誤鏈整理為去識別化的單行摘要。
+fn describe(err: &reqwest::Error) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(err);
+    while let Some(item) = current {
+        let text = sanitize(&item.to_string());
+        if !text.is_empty() && parts.last().map(String::as_str) != Some(text.as_str()) {
+            parts.push(text);
+        }
+        current = item.source();
+    }
+
+    let mut detail = parts.join("：");
+    if detail.chars().count() > MAX_DETAIL_CHARS {
+        let cut = detail
+            .char_indices()
+            .nth(MAX_DETAIL_CHARS)
+            .map_or(detail.len(), |(index, _)| index);
+        detail.truncate(cut);
+        detail.push('…');
+    }
+    detail
+}
+
+/// 以 `<url>` 取代任何含查詢參數的網址。
+fn sanitize(text: &str) -> String {
+    text.split_whitespace()
+        .map(|token| {
+            if token.contains("://") {
+                "<url>"
+            } else {
+                token
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[cfg(test)]
+#[path = "tests/reqwest_client_test.rs"]
+mod reqwest_client_test;

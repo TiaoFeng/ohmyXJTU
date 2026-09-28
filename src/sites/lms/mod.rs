@@ -58,6 +58,17 @@ pub struct ActivityDetail {
     pub submissions: Option<LmsSubmissionList>,
 }
 
+/// 作業提交摘要。
+#[derive(Debug, Clone)]
+pub struct SubmissionSummary {
+    /// 是否以小組為單位提交（以活動詳情為準）。
+    pub submit_by_group: bool,
+    /// 有效提交數；`None` 代表無法確認。
+    pub count: Option<usize>,
+    /// 無法確認的原因。
+    pub note: Option<String>,
+}
+
 /// 思源學堂 API。
 pub struct LmsApi<'a> {
     session: &'a mut SessionManager,
@@ -123,10 +134,15 @@ impl<'a> LmsApi<'a> {
         let activity: LmsActivity = parse_json(&response, "查询活动详情")?;
 
         let submissions = if activity.kind() == ActivityKind::Homework {
+            // 詳情中的 submit_by_group 是權威的小組判定（簡要列表常缺少此欄位）。
             let submit_by_group = activity.submit_by_group.unwrap_or(false);
-            // 提交記錄抓取失敗時保持 `None`：寧可顯示「待核实」，不可誤判為未提交。
-            self.submissions(activity_id, submit_by_group, activity.group_id.as_deref())
-                .ok()
+            match self.submissions(activity_id, submit_by_group, activity.group_id.as_deref()) {
+                Ok(list) => Some(list),
+                // 登入態失效必須向上傳播，交由統一重登流程處理。
+                Err(err) if err.needs_relogin() => return Err(err),
+                // 其他錯誤保持「待核实」，不可誤判為未提交。
+                Err(_) => None,
+            }
         } else {
             None
         };
@@ -134,6 +150,24 @@ impl<'a> LmsApi<'a> {
         Ok(ActivityDetail {
             activity,
             submissions,
+        })
+    }
+
+    /// 作業提交摘要：先取活動詳情確定小組，再抓提交記錄。
+    pub fn submission_summary(&mut self, activity_id: &str) -> AppResult<SubmissionSummary> {
+        let detail = self.activity(activity_id)?;
+        let submit_by_group = detail.activity.submit_by_group.unwrap_or(false);
+        Ok(match detail.submissions {
+            Some(list) => SubmissionSummary {
+                submit_by_group,
+                count: Some(list.effective_count()),
+                note: None,
+            },
+            None => SubmissionSummary {
+                submit_by_group,
+                count: None,
+                note: Some("未取到提交记录，无法确认提交状态".to_owned()),
+            },
         })
     }
 

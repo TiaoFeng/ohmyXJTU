@@ -1,24 +1,35 @@
 //! 背景事件套用測試。
 
 use std::path::PathBuf;
+use std::sync::mpsc::channel;
 
 use crate::config::AccessPolicy;
-use crate::domain::homework::{HomeworkInput, HomeworkState, aggregate};
+use crate::domain::homework::{HomeworkGroup, HomeworkInput, HomeworkState, aggregate};
+use crate::domain::semester::{TermCode, TermSource};
 use crate::sites::lms::LmsCourse;
-use crate::task::Event;
-use crate::tui::app::{App, FlowData, FormState, LoginScreen, Page, ScheduleData, Screen};
+use crate::task::{Event, FailedTarget, HomeworkUpdate};
+use crate::tui::app::{
+    App, FlowData, FormState, LoginScreen, Page, ScheduleData, Screen, SettingsState,
+};
 
-use super::apply_event;
+use super::apply_event as apply_event_with_jobs;
+
+/// 套用事件（不需要檢查送出的任務時使用；任務會被丟棄）。
+fn apply_event(app: &mut App, event: Event) {
+    let (jobs, _rx) = channel();
+    apply_event_with_jobs(app, event, &jobs);
+}
 
 fn app() -> App {
     App::new(AccessPolicy::Auto)
 }
 
 #[test]
-fn vault_ready_moves_to_login() {
+fn vault_ready_moves_to_main_and_starts_loading() {
     let mut app = app();
     apply_event(&mut app, Event::VaultReady);
-    assert!(matches!(app.screen, Screen::Login(_)));
+    assert!(matches!(app.screen, Screen::Main), "解锁后直接进入主画面");
+    assert!(app.schedule.is_loading(), "应触发当前页面的首次加载");
 }
 
 #[test]
@@ -154,7 +165,7 @@ fn data_events_fill_pages() {
 }
 
 #[test]
-fn homework_event_reports_count() {
+fn homework_event_updates_groups_and_counts() {
     let mut app = app();
     let items = aggregate(
         &[HomeworkInput {
@@ -165,18 +176,33 @@ fn homework_event_reports_count() {
             end_time: None,
             submit_by_group: false,
             submission_count: Some(0),
+            note: None,
         }],
         chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00+08:00").expect("固定时间"),
     );
     assert_eq!(items[0].state, HomeworkState::Pending);
 
-    apply_event(&mut app, Event::Homework(items));
-    assert!(app.homework.ready().is_some());
-    assert_eq!(app.message_text(), Some("共 1 项待处理作业"));
+    apply_event(
+        &mut app,
+        Event::Homework(HomeworkUpdate {
+            term_label: Some("2026-2027 学年 第 1 学期".to_owned()),
+            term_source: Some(TermSource::Attendance),
+            courses_included: 2,
+            courses_skipped: 1,
+            term_options: Vec::new(),
+            items,
+            progress: None,
+        }),
+    );
+
+    let data = app.homework.ready().expect("应有作业资料");
+    assert_eq!(data.group_count(HomeworkGroup::Unfinished), 1);
+    assert_eq!(data.group_count(HomeworkGroup::Completed), 0);
+    assert_eq!(app.message_text(), Some("作业已更新：未完成 1 项"));
 }
 
 #[test]
-fn failure_leaves_login_screen_and_marks_pages() {
+fn data_failure_returns_to_main_and_marks_target_page() {
     let mut app = app();
     app.set_screen(Screen::Login(Box::new(LoginScreen::Progress {
         note: "正在登录…".to_owned(),
@@ -188,15 +214,86 @@ fn failure_leaves_login_screen_and_marks_pages() {
         Event::Failed {
             what: "课表".to_owned(),
             message: "网络连接失败".to_owned(),
+            target: FailedTarget::Schedule,
         },
     );
 
-    // 不可停在「正在登录…」：使用者需要能按 enter 重試。
+    // 資料任務失敗：離開「正在登录…」回到主畫面，失敗標記只落在課表頁。
+    assert!(matches!(app.screen, Screen::Main));
+    assert!(matches!(app.schedule, Page::Failed { .. }));
+}
+
+#[test]
+fn login_failure_switches_to_failed_screen() {
+    let mut app = app();
+    app.set_screen(Screen::Login(Box::new(LoginScreen::Progress {
+        note: "正在登录…".to_owned(),
+    })));
+
+    apply_event(
+        &mut app,
+        Event::Failed {
+            what: "登录".to_owned(),
+            message: "网络连接失败".to_owned(),
+            target: FailedTarget::Login,
+        },
+    );
+
     match &app.screen {
         Screen::Login(screen) => assert!(matches!(screen.as_ref(), LoginScreen::Failed { .. })),
         _ => panic!("应停留在登录画面并显示失败原因"),
     }
-    assert!(matches!(app.schedule, Page::Failed(_)));
+}
+
+#[test]
+fn settings_failure_keeps_popup_and_draft() {
+    let mut app = app();
+    app.set_screen(Screen::Settings(SettingsState::open(AccessPolicy::Auto)));
+    if let Screen::Settings(state) = &mut app.screen {
+        state.draft = Some(AccessPolicy::WebVpn);
+        state.saving = true;
+    }
+
+    apply_event(
+        &mut app,
+        Event::Failed {
+            what: "访问模式".to_owned(),
+            message: "配置错误".to_owned(),
+            target: FailedTarget::Settings,
+        },
+    );
+
+    let Screen::Settings(state) = app.screen else {
+        panic!("设置保存失败时应保留弹窗");
+    };
+    assert!(!state.saving, "失败后应解除保存中");
+    assert_eq!(
+        state.policy(app.access_policy),
+        AccessPolicy::WebVpn,
+        "应保留草稿"
+    );
+    assert_eq!(
+        app.access_policy,
+        AccessPolicy::Auto,
+        "失败时不得更新已生效值"
+    );
+}
+
+#[test]
+fn needs_term_opens_picker_and_marks_homework() {
+    let mut app = app();
+    apply_event(
+        &mut app,
+        Event::HomeworkNeedsTerm {
+            options: vec![TermCode::parse("2026-2027-1").expect("学期")],
+            suggestion: None,
+            reason: "考勤系统不可用".to_owned(),
+        },
+    );
+
+    assert!(matches!(app.screen, Screen::TermPicker(_)));
+    assert!(matches!(app.homework, Page::Failed { .. }));
+    assert_eq!(app.term_options.len(), 1);
 }
 
 #[test]
@@ -274,8 +371,9 @@ fn task_failure_stays_on_credentials_form() {
     apply_event(
         &mut app,
         Event::Failed {
-            what: "账户设置".to_owned(),
+            what: "重新输入账户".to_owned(),
             message: "口令错误或凭证文件已损坏".to_owned(),
+            target: FailedTarget::Login,
         },
     );
 
@@ -286,7 +384,7 @@ fn task_failure_stays_on_credentials_form() {
         LoginScreen::Credentials { form, .. } => {
             assert_eq!(
                 form.error.as_deref(),
-                Some("账户设置失败：口令错误或凭证文件已损坏")
+                Some("重新输入账户失败：口令错误或凭证文件已损坏")
             );
             assert!(!form.busy);
             assert_eq!(form.fields[0].value.value(), "3120000001");

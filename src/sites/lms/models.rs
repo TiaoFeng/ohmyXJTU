@@ -63,6 +63,9 @@ pub struct LmsSemester {
     /// 識別碼。
     #[serde(default, deserialize_with = "optional_string_or_number")]
     pub id: Option<String>,
+    /// 學期代碼，形如 `2026-1`（起始學年-學期序）；課程與考勤學期的配對依賴此欄位。
+    #[serde(default)]
+    pub code: Option<String>,
     /// 名稱。
     #[serde(default)]
     pub name: Option<String>,
@@ -232,5 +235,13 @@ impl LmsSubmissionList {
     /// 提交記錄數。
     pub fn count(&self) -> usize {
         self.list.len()
+    }
+
+    /// 有效提交數。
+    ///
+    /// 目前以提交清單筆數為準；待以實網脫敏樣本核實「草稿／撤回」等欄位後，
+    /// 再排除無效記錄。
+    pub fn effective_count(&self) -> usize {
+        self.count()
     }
 }

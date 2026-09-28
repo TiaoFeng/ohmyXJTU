@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <title>西安交通大学统一身份认证</title>
+    <script type="text/javascript">
+      var globalConfig = eval('(' + "{\"mfaEnabled\":false}" + ')');
+    </script>
+  </head>
+  <body>
+    <form id="loginForm" action="/cas/login?service=example" method="post">
+      <input type="hidden" name="execution" value="e2s1-fixture-execution" />
+    </form>
+    <div class="account-list">
+      <div class="account-wrap">
+        <div class="avatar"></div>
+        <div class="name">本科生</div>
+        <el-radio class="checkbox-radio" label="3120000001-1"></el-radio>
+      </div>
+      <div class="account-wrap">
+        <div class="avatar"></div>
+        <div class="name">研究生</div>
+        <el-radio class="checkbox-radio" label="3120000001-2"></el-radio>
+      </div>
+    </div>
+    <form action="/cas/login" method="post">
+      <input type="hidden" name="execution" value="e2s2-fixture-execution" />
+      <input type="hidden" name="_eventId" value="submit" />
+      <input type="hidden" name="useDefault" value="false" />
+    </form>
+  </body>
+</html>

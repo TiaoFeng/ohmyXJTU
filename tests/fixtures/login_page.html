@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <title>西安交通大学统一身份认证</title>
+    <script type="text/javascript">
+      var globalConfig = eval('(' + "{\"mfaEnabled\":true,\"qrCodeLoginEnabled\":true,\"geolocationEnabled\":false}" + ')');
+    </script>
+  </head>
+  <body>
+    <div id="app">
+      <form id="loginForm" action="/cas/login?service=example" method="post">
+        <input type="hidden" name="execution" value="e1s1-fixture-execution" />
+        <input type="hidden" name="_eventId" value="submit" />
+        <input type="text" name="username" value="" autocomplete="off" />
+        <input type="password" name="password" value="" autocomplete="off" />
+        <input type="text" name="captcha" value="" />
+        <input type="submit" name="submit1" value="Login1" />
+      </form>
+    </div>
+  </body>
+</html>

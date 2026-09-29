@@ -351,6 +351,7 @@ fn too_small_lines(width: u16, height: u16) -> Vec<Line<'static>> {
 /// 尺寸不足時顯示提示，回傳是否可以直接結束繪製。
 ///
 /// 提示上下左右都置中：先以底色鋪滿整個畫面，再於垂直置中的文字帶上繪製兩行。
+/// 所有畫面共用同一門檻（由 `views::draw` 在最上層呼叫）。
 pub fn too_small(frame: &mut Frame) -> bool {
     let area = frame.area();
     if area.width >= MIN_WIDTH && area.height >= MIN_HEIGHT {

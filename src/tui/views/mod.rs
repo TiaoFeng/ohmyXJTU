@@ -10,7 +10,14 @@ use ratatui::Frame;
 use crate::tui::app::{App, Screen};
 
 /// 依目前畫面繪製。
+///
+/// 終端小於最小尺寸時，所有畫面（含啟動時的解鎖／首次設定表單與登入覆蓋層）
+/// 一律改為顯示置中的放大提示：表單在過小的終端會被裁切而無法操作。
 pub fn draw(frame: &mut Frame, app: &mut App) {
+    if crate::tui::ui::too_small(frame) {
+        return;
+    }
+
     match &app.screen {
         Screen::Setup(form) => {
             crate::tui::ui::draw_form(

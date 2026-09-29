@@ -15,11 +15,9 @@ use crate::tui::views::{content, settings, term_picker};
 const SIDEBAR_WIDTH: u16 = 22;
 
 /// 繪製主畫面。
+///
+/// 尺寸守衛由 `views::draw` 在最上層統一處理（所有畫面共用）。
 pub fn draw(frame: &mut Frame, app: &mut App) {
-    if crate::tui::ui::too_small(frame) {
-        return;
-    }
-
     let area = frame.area();
     let [body, footer] = Layout::vertical([Constraint::Min(8), Constraint::Length(1)]).areas(area);
     let [sidebar, content_area] =

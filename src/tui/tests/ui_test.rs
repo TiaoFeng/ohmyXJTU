@@ -1509,3 +1509,81 @@ fn too_small_message_hidden_at_minimum_size() {
         "達到 64x18 門檻時不應顯示提示：\n{text}"
     );
 }
+
+#[test]
+fn too_small_message_shown_on_startup_forms() {
+    // 啟動時的解鎖／首次設定／設定表單與登入覆蓋層共用同一道尺寸守衛：
+    // 過小的終端一律顯示放大提示，而不是把表單裁切到無法操作。
+    let mut app = App::new(AccessPolicy::Auto); // 預設畫面＝解鎖表單
+    let terminal = draw(48, 18, |frame| crate::tui::views::draw(frame, &mut app));
+    let text = screen_text(terminal.backend());
+    assert!(text.contains("终端太小了"), "解鎖畫面應顯示提示：\n{text}");
+    assert!(!text.contains("解锁凭证"), "過小時不應擠出表單：\n{text}");
+
+    app.set_screen(Screen::Setup(FormState::setup()));
+    let terminal = draw(48, 18, |frame| crate::tui::views::draw(frame, &mut app));
+    let text = screen_text(terminal.backend());
+    assert!(
+        text.contains("终端太小了"),
+        "首次設定畫面應顯示提示：\n{text}"
+    );
+    assert!(!text.contains("首次使用"), "過小時不應擠出表單：\n{text}");
+
+    app.set_screen(Screen::SettingsForm(FormState::change_passphrase()));
+    let terminal = draw(48, 18, |frame| crate::tui::views::draw(frame, &mut app));
+    let text = screen_text(terminal.backend());
+    assert!(text.contains("终端太小了"), "設定表單應顯示提示：\n{text}");
+    assert!(
+        !text.contains("修改加密口令"),
+        "過小時不應擠出表單：\n{text}"
+    );
+
+    // 登入互動覆蓋層也不能蓋掉提示。
+    app.set_screen(Screen::Main);
+    app.login = Some(Box::new(LoginScreen::Progress {
+        note: "正在登录…".to_owned(),
+    }));
+    let terminal = draw(48, 18, |frame| crate::tui::views::draw(frame, &mut app));
+    let text = screen_text(terminal.backend());
+    assert!(
+        text.contains("终端太小了"),
+        "登入彈窗開啟時仍應顯示提示：\n{text}"
+    );
+    assert!(
+        !text.contains("正在登录"),
+        "過小時不應畫出登入彈窗：\n{text}"
+    );
+}
+
+#[test]
+fn startup_form_visible_at_minimum_size() {
+    // 剛好 64x18：解鎖表單照常顯示（守衛不啟用）。
+    let mut app = App::new(AccessPolicy::Auto);
+    let terminal = draw(MIN_WIDTH, MIN_HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(
+        !text.contains("终端太小了"),
+        "達到門檻時不顯示提示：\n{text}"
+    );
+    assert!(text.contains("解锁凭证"), "應顯示解鎖表單標題：\n{text}");
+    assert!(text.contains("加密口令"), "應顯示欄位標籤：\n{text}");
+}
+
+#[test]
+fn login_overlay_visible_when_terminal_is_large_enough() {
+    // 放大後登入彈窗照常顯示（守衛只在過小時接手）。
+    let mut app = main_screen_app();
+    app.login = Some(Box::new(LoginScreen::Progress {
+        note: "正在登录…".to_owned(),
+    }));
+
+    let terminal = draw(100, 30, |frame| crate::tui::views::draw(frame, &mut app));
+    let text = screen_text(terminal.backend());
+    assert!(!text.contains("终端太小了"), "足夠大時不顯示提示：\n{text}");
+    assert!(
+        text.contains("正在登录"),
+        "足夠大時應顯示登入彈窗：\n{text}"
+    );
+}

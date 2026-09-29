@@ -1,5 +1,6 @@
 //! TUI 應用狀態（畫面路由與各頁資料）。
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -9,10 +10,10 @@ use ratatui::widgets::ListState;
 use crate::config::AccessPolicy;
 use crate::domain::homework::{HomeworkGroup, HomeworkItem};
 use crate::domain::semester::TermCode;
-use crate::session::AccessMode;
+use crate::session::{AccessMode, SiteKind};
 use crate::sites::attendance::{AttendanceStatus, FlowRecord};
 use crate::sites::lms::{LmsActivity, LmsCourse, LmsSubmission};
-use crate::task::FailedTarget;
+use crate::task::{FailedTarget, HomeworkIssue};
 use crate::tui::text::InputLine;
 
 /// 訊息保留時間。
@@ -72,6 +73,14 @@ impl NavItem {
     /// 上一個項目。
     pub fn previous(self) -> Self {
         Self::from_index((self.index() + NAV_COUNT - 1) % NAV_COUNT)
+    }
+
+    /// 頁面資料所屬站點。
+    pub fn site(self) -> SiteKind {
+        match self {
+            Self::Schedule | Self::Attendance => SiteKind::Attendance,
+            Self::Homework | Self::Lms => SiteKind::Lms,
+        }
     }
 }
 
@@ -272,6 +281,8 @@ pub struct HomeworkData {
     pub term_options: Vec<TermCode>,
     /// 全部作業（已依分組與截止時間排序）。
     pub items: Vec<HomeworkItem>,
+    /// 「待核实」作業的共同原因彙總（依項數遞減）。
+    pub issues: Vec<HomeworkIssue>,
     /// 載入進度（完成, 總數）；`None` 表示載入完成。
     pub progress: Option<(usize, usize)>,
 }
@@ -677,8 +688,8 @@ pub struct App {
     pub lms: LmsState,
     /// 訪問策略設定。
     pub access_policy: AccessPolicy,
-    /// 目前實際使用的訪問方式。
-    pub access_mode: Option<AccessMode>,
+    /// 各站點目前的登入狀態（站點 → 實際訪問方式）。
+    pub site_modes: HashMap<SiteKind, AccessMode>,
     /// 驗證碼圖片路徑（顯示於狀態列）。
     pub captcha_path: Option<PathBuf>,
     /// 暫時訊息（自動過期）。
@@ -720,7 +731,7 @@ impl App {
             attendance: Page::Idle,
             lms: LmsState::default(),
             access_policy,
-            access_mode: None,
+            site_modes: HashMap::new(),
             captcha_path: None,
             message: None,
             quit: false,
@@ -786,6 +797,29 @@ impl App {
     pub fn select_previous(&mut self) {
         let current = self.page_selection();
         self.set_selection(current.saturating_sub(1));
+    }
+
+    /// 記錄站點登入成功時的訪問方式。
+    pub fn set_site_mode(&mut self, site: SiteKind, mode: AccessMode) {
+        self.site_modes.insert(site, mode);
+    }
+
+    /// 清除單一站點的登入狀態。
+    pub fn clear_site_mode(&mut self, site: SiteKind) {
+        self.site_modes.remove(&site);
+    }
+
+    /// 清除所有站點的登入狀態（解鎖、換帳號、切換訪問模式時）。
+    pub fn clear_site_modes(&mut self) {
+        self.site_modes.clear();
+    }
+
+    /// 目前頁面的登入狀態文字（底欄顯示用）。
+    pub fn session_label(&self) -> String {
+        match self.site_modes.get(&self.nav.site()) {
+            Some(mode) => format!("已登录 · {}", mode.label()),
+            None => "未登录".to_owned(),
+        }
     }
 
     /// 設定目前頁面的選取索引。

@@ -83,11 +83,9 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn hints(app: &App) -> String {
-    let mode = app
-        .access_mode
-        .map_or("未登录".to_owned(), |mode| mode.label().to_owned());
     let mut text = format!(
-        "[{mode} · {}]  q 退出  ←/→ 切换页面  ↑/↓ 选择  r 刷新  ^P 账户设置",
+        "[{} · {}]  q 退出  ←/→ 切换页面  ↑/↓ 选择  r 刷新  ^P 账户设置",
+        app.session_label(),
         app.access_policy.label()
     );
 

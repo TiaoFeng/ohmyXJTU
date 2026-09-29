@@ -4,6 +4,7 @@
 //! 課程活動為 `GET /api/courses/{id}/activities`，活動詳情為
 //! `GET /api/activities/{id}`（作業會附帶提交記錄）。
 
+mod js_object;
 pub mod models;
 
 pub use models::{ActivityKind, LmsActivity, LmsCourse, LmsSubmission, LmsSubmissionList};
@@ -56,6 +57,8 @@ pub struct ActivityDetail {
     pub activity: LmsActivity,
     /// 提交記錄；`None` 代表無法確認（顯示為「待核实」）。
     pub submissions: Option<LmsSubmissionList>,
+    /// 無法取得提交記錄的原因（階段化；查詢成功或非作業時為 `None`）。
+    pub note: Option<String>,
 }
 
 /// 作業提交摘要。
@@ -81,20 +84,34 @@ impl<'a> LmsApi<'a> {
     }
 
     /// 目前登入者的使用者 ID。
+    ///
+    /// 使用者資訊解析失敗時會記入站點狀態（負快取），避免逐項作業重複請求
+    /// `/user/index`；重新登入或成功解析時自動清除。
     pub fn user_id(&mut self) -> AppResult<String> {
         if let Some(user_id) = self.session.site_user_id(SiteKind::Lms) {
             return Ok(user_id.to_owned());
+        }
+        if let Some(reason) = self.session.site_user_id_error(SiteKind::Lms) {
+            return Err(AppError::protocol(reason.to_owned()));
         }
 
         let response = self.session.send(
             SiteKind::Lms,
             HttpRequest::get(format!("{BASE_URL}/user/index")),
         )?;
-        let user_id = user_id_from_page(&response.text())
-            .ok_or_else(|| AppError::protocol("无法从思源学堂首页解析用户 ID"))?;
-        self.session
-            .set_site_user_id(SiteKind::Lms, user_id.clone());
-        Ok(user_id)
+        match user_id_from_page(&response.text()) {
+            Some(user_id) => {
+                self.session
+                    .set_site_user_id(SiteKind::Lms, user_id.clone());
+                Ok(user_id)
+            }
+            None => {
+                let reason = "思源学堂用户信息解析失败（/user/index 无法解析 globalData.user）";
+                self.session
+                    .set_site_user_id_error(SiteKind::Lms, reason.to_owned());
+                Err(AppError::protocol(reason))
+            }
+        }
     }
 
     /// 我的課程（附帶被跳過的項目數）。
@@ -127,12 +144,9 @@ impl<'a> LmsApi<'a> {
 
     /// 活動詳情；作業會一併抓取提交記錄。
     pub fn activity(&mut self, activity_id: &str) -> AppResult<ActivityDetail> {
-        let response = self.session.send(
-            SiteKind::Lms,
-            HttpRequest::get(format!("{BASE_URL}/api/activities/{activity_id}")),
-        )?;
-        let activity: LmsActivity = parse_json(&response, "查询活动详情")?;
+        let activity = self.activity_detail(activity_id)?;
 
+        let mut note = None;
         let submissions = if activity.kind() == ActivityKind::Homework {
             // 詳情中的 submit_by_group 是權威的小組判定（簡要列表常缺少此欄位）。
             let submit_by_group = activity.submit_by_group.unwrap_or(false);
@@ -141,7 +155,10 @@ impl<'a> LmsApi<'a> {
                 // 登入態失效必須向上傳播，交由統一重登流程處理。
                 Err(err) if err.needs_relogin() => return Err(err),
                 // 其他錯誤保持「待核实」，不可誤判為未提交。
-                Err(_) => None,
+                Err(err) => {
+                    note = Some(submission_failure_note(&err));
+                    None
+                }
             }
         } else {
             None
@@ -150,25 +167,52 @@ impl<'a> LmsApi<'a> {
         Ok(ActivityDetail {
             activity,
             submissions,
+            note,
         })
     }
 
-    /// 作業提交摘要：先取活動詳情確定小組，再抓提交記錄。
+    /// 作業提交摘要：先取活動詳情確定小組，再依需要查詢提交記錄。
+    ///
+    /// 個人作業優先採用詳情中的 `user_submit_count`（「当前用户提交次数」，
+    /// 有值時可省一次提交列表請求；語意待實網脫敏樣本核實，若語意有出入
+    /// 只需調整此處）；小組作業一律以詳情確認的 `group_id` 查詢小組提交
+    /// 記錄，缺 `group_id` 時保持「待核实」並說明原因。
     pub fn submission_summary(&mut self, activity_id: &str) -> AppResult<SubmissionSummary> {
-        let detail = self.activity(activity_id)?;
-        let submit_by_group = detail.activity.submit_by_group.unwrap_or(false);
-        Ok(match detail.submissions {
-            Some(list) => SubmissionSummary {
+        let detail = self.activity_detail(activity_id)?;
+        let submit_by_group = detail.submit_by_group.unwrap_or(false);
+
+        if !submit_by_group && let Some(count) = detail.user_submit_count {
+            return Ok(SubmissionSummary {
+                submit_by_group,
+                count: Some(count as usize),
+                note: None,
+            });
+        }
+
+        match self.submissions(activity_id, submit_by_group, detail.group_id.as_deref()) {
+            Ok(list) => Ok(SubmissionSummary {
                 submit_by_group,
                 count: Some(list.effective_count()),
                 note: None,
-            },
-            None => SubmissionSummary {
+            }),
+            // 登入態失效必須向上傳播，交由統一重登流程處理。
+            Err(err) if err.needs_relogin() => Err(err),
+            // 其他錯誤保持「待核实」，並保留階段化原因。
+            Err(err) => Ok(SubmissionSummary {
                 submit_by_group,
                 count: None,
-                note: Some("未取到提交记录，无法确认提交状态".to_owned()),
-            },
-        })
+                note: Some(submission_failure_note(&err)),
+            }),
+        }
+    }
+
+    /// 取得活動詳情（不含提交記錄）。
+    fn activity_detail(&mut self, activity_id: &str) -> AppResult<LmsActivity> {
+        let response = self.session.send(
+            SiteKind::Lms,
+            HttpRequest::get(format!("{BASE_URL}/api/activities/{activity_id}")),
+        )?;
+        parse_json(&response, "查询活动详情")
     }
 
     /// 查詢個人或小組的提交記錄。
@@ -193,51 +237,34 @@ impl<'a> LmsApi<'a> {
     }
 }
 
-/// 從 `/user/index` 的 `globalData.user` 取出使用者 ID。
+/// 「待核实」項目的原因文案（階段化、脫敏；供作業頁彙總顯示）。
+pub fn submission_failure_note(err: &AppError) -> String {
+    format!("无法确认提交状态：{err}")
+}
+
+/// 從 `/user/index` 頁面的 `globalData.user` 取出使用者 ID。
+///
+/// 真實頁面的 `globalData` 是 JavaScript 物件語法（鍵名可不加引號、
+/// 以 `None` 表示空值、允許尾逗號）：先以寬容解析器讀取整個 `globalData`，
+/// 失敗時再按參考實作的語義（`dept` 為邊界）單獨擷取 `user` 子物件。
 fn user_id_from_page(html: &str) -> Option<String> {
-    let config = extract_js_object(html, "globalData")?;
-    match config.pointer("/user/id") {
-        Some(Value::String(text)) => Some(text.clone()),
+    if let Some(global) = js_object::find_named_value(html, "globalData")
+        && let Some(user) = global.get("user")
+        && let Some(user_id) = user_id_from_value(user)
+    {
+        return Some(user_id);
+    }
+    let user = js_object::parse_js_object(html, "user", "dept")?;
+    user_id_from_value(&user)
+}
+
+/// `user` 子物件中的 `id`（數字或字串皆可；空字串視為無效）。
+fn user_id_from_value(user: &Value) -> Option<String> {
+    match user.get("id") {
+        Some(Value::String(text)) if !text.trim().is_empty() => Some(text.trim().to_owned()),
         Some(Value::Number(number)) => Some(number.to_string()),
         _ => None,
     }
-}
-
-/// 取出 `key = {…}` 形式的 JavaScript 物件（以字串與轉義感知的花括號配對）。
-fn extract_js_object(html: &str, key: &str) -> Option<Value> {
-    let start = html.find(key)?;
-    let rest = &html[start + key.len()..];
-    let open = rest.find('{')?;
-    let object = &rest[open..];
-    let end = matching_brace(object)?;
-    serde_json::from_str(&object[..=end]).ok()
-}
-
-/// 回傳與第一個 `{` 配對的 `}` 之位元組索引。
-fn matching_brace(text: &str) -> Option<usize> {
-    let mut depth = 0_u32;
-    let mut in_string = false;
-    let mut escaped = false;
-
-    for (index, character) in text.char_indices() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        match character {
-            '\\' if in_string => escaped = true,
-            '"' => in_string = !in_string,
-            '{' if !in_string => depth += 1,
-            '}' if !in_string => {
-                depth = depth.checked_sub(1)?;
-                if depth == 0 {
-                    return Some(index);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
 }
 
 #[cfg(test)]

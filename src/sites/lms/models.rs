@@ -202,9 +202,21 @@ pub struct LmsSubmission {
     /// 建立時間。
     #[serde(default)]
     pub created_at: Option<String>,
-    /// 是否為最新版本。
-    #[serde(default)]
+    /// 是否為最新版本（寬容解析：布林、`0`/`1` 或字串）。
+    #[serde(default, deserialize_with = "lenient_bool")]
     pub is_latest_version: Option<bool>,
+    /// 伺服器狀態碼（型別未定，保留原始值供後續脫敏樣本核實）。
+    #[serde(default)]
+    pub status: Option<serde_json::Value>,
+    /// 是否為重新提交。
+    #[serde(default, deserialize_with = "lenient_bool")]
+    pub is_resubmitted: Option<bool>,
+    /// 是否為重做。
+    #[serde(default, deserialize_with = "lenient_bool")]
+    pub is_redo: Option<bool>,
+    /// 是否允許撤回（僅代表「可以」撤回，不代表已撤回）。
+    #[serde(default, deserialize_with = "lenient_bool")]
+    pub can_retract: Option<bool>,
     /// 分數。
     #[serde(default)]
     pub score: Option<serde_json::Value>,
@@ -239,9 +251,31 @@ impl LmsSubmissionList {
 
     /// 有效提交數。
     ///
-    /// 目前以提交清單筆數為準；待以實網脫敏樣本核實「草稿／撤回」等欄位後，
-    /// 再排除無效記錄。
+    /// 排除非最新版本的記錄（`is_latest_version == false`）；`None` 代表頁面
+    /// 未提供該欄位，無法證明是舊版本，仍計入。草稿／撤回的精確判據
+    /// （`status`、`can_retract` 等語意）尚待實網脫敏樣本核實，暫不臆測。
     pub fn effective_count(&self) -> usize {
-        self.count()
+        self.list
+            .iter()
+            .filter(|submission| submission.is_latest_version != Some(false))
+            .count()
     }
+}
+
+/// 寬容布林：接受布林、`0`/`1` 與其字串形式；其他型別視為未知（`None`）。
+fn lenient_bool<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value: Option<serde_json::Value> = serde::Deserialize::deserialize(deserializer)?;
+    Ok(value.and_then(|value| match value {
+        serde_json::Value::Bool(flag) => Some(flag),
+        serde_json::Value::Number(number) => number.as_i64().map(|number| number != 0),
+        serde_json::Value::String(text) => match text.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" => Some(true),
+            "false" | "0" => Some(false),
+            _ => None,
+        },
+        _ => None,
+    }))
 }

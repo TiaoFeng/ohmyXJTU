@@ -153,14 +153,19 @@ fn homework(frame: &mut Frame, area: Rect, app: &mut App) {
         return;
     };
 
-    // 分組標籤列＋載入狀態。
+    // 分組標籤列＋載入狀態（有待核实項目時再加一行原因提示）。
     let header = homework_tabs(data, app.homework_group, app.homework.is_loading());
+    let warning = homework_warning(data);
+    let header_height = 1 + u16::from(warning.is_some());
     let [header_area, body_area] =
-        Layout::vertical([Constraint::Length(1), Constraint::Min(3)]).areas(area);
-    frame.render_widget(
-        Paragraph::new(header).style(THEME.base_style()),
-        header_area,
-    );
+        Layout::vertical([Constraint::Length(header_height), Constraint::Min(3)]).areas(area);
+    let [tabs_area, warning_area] =
+        Layout::vertical([Constraint::Length(1), Constraint::Length(header_height - 1)])
+            .areas(header_area);
+    frame.render_widget(Paragraph::new(header).style(THEME.base_style()), tabs_area);
+    if let Some(line) = warning {
+        frame.render_widget(Paragraph::new(line).style(THEME.base_style()), warning_area);
+    }
 
     let (list_area, detail_area) = split_detail(body_area, app.homework_detail);
     let (items, detail) = {
@@ -221,6 +226,26 @@ fn homework_tabs(data: &HomeworkData, group: HomeworkGroup, loading: bool) -> Li
         ));
     }
     Line::from(spans)
+}
+
+/// 「已确认 / 待核实」提示列：仅在存在待核实作业时出现。
+fn homework_warning(data: &HomeworkData) -> Option<Line<'static>> {
+    let unknown = data.group_count(HomeworkGroup::Unknown);
+    if unknown == 0 {
+        return None;
+    }
+    let confirmed = data.items.len() - unknown;
+    let reason = data
+        .issues
+        .first()
+        .map_or("具体原因见条目详情", |issue| issue.reason.as_str());
+    Some(Line::from(vec![
+        Span::styled(
+            format!(" 已确认 {confirmed} / 待核实 {unknown}："),
+            THEME.accent_style(),
+        ),
+        Span::styled(format!("{reason}（按 r 重试）"), THEME.muted_style()),
+    ]))
 }
 
 fn homework_item(item: &HomeworkItem) -> ListItem<'static> {

@@ -92,8 +92,45 @@ fn extracts_user_id_from_home_page() {
 }
 
 #[test]
-fn matching_brace_handles_escapes() {
-    assert_eq!(matching_brace(r#"{"a":"}"}"#), Some(8));
-    assert_eq!(matching_brace(r#"{"a":{"b":1}}"#), Some(12));
-    assert_eq!(matching_brace("{"), None);
+fn parses_user_id_from_loose_javascript_page() {
+    // 真實頁面：未加引號的鍵、None、尾逗號（參考實作 _parse_js_object 的形態）。
+    let html = r#"<html><script>
+        var globalData = { user: { id: 4210, name: "张三", dept: None, role: "Student", }, dept: { id: 3 }, locale: "zh-CN" };
+    </script></html>"#;
+    assert_eq!(user_id_from_page(html).as_deref(), Some("4210"));
+
+    // globalData 無法整體解析時，仍可按 user/dept 邊界擷取 user.id。
+    let html =
+        r#"<script>var globalData = { flag: getFlag(), user: { id: 9 }, dept: {} };</script>"#;
+    assert_eq!(user_id_from_page(html).as_deref(), Some("9"));
+
+    // 字串型別的使用者 ID。
+    let html = r#"<script>var globalData = { user: { id: "7788" }, dept: {} };</script>"#;
+    assert_eq!(user_id_from_page(html).as_deref(), Some("7788"));
+
+    // 缺少 user.id：不得以其他欄位代替。
+    let html = r#"<script>var globalData = { user: { name: "张三" }, dept: {} };</script>"#;
+    assert_eq!(user_id_from_page(html), None);
+}
+
+#[test]
+fn effective_count_excludes_old_versions() {
+    let value = json!({
+        "list": [
+            {"id": 1, "is_latest_version": true},
+            {"id": 2, "is_latest_version": false},
+            {"id": 3},
+            {"id": 4, "is_latest_version": 0},
+            {"id": 5, "is_latest_version": "false"}
+        ],
+    });
+
+    let submissions: LmsSubmissionList =
+        crate::sites::deserialize_value(value, "查询作业提交记录").unwrap();
+    assert_eq!(submissions.count(), 5);
+    assert_eq!(
+        submissions.effective_count(),
+        2,
+        "旧版本（false／0／\"false\"）不计入有效提交"
+    );
 }

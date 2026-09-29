@@ -6,10 +6,11 @@ use std::sync::mpsc::channel;
 use crate::config::AccessPolicy;
 use crate::domain::homework::{HomeworkGroup, HomeworkInput, HomeworkState, aggregate};
 use crate::domain::semester::{TermCode, TermSource};
+use crate::session::{AccessMode, SiteKind};
 use crate::sites::lms::LmsCourse;
 use crate::task::{Event, FailedTarget, HomeworkUpdate};
 use crate::tui::app::{
-    App, FlowData, FormState, LoginScreen, Page, ScheduleData, Screen, SettingsState,
+    App, FlowData, FormState, LoginScreen, NavItem, Page, ScheduleData, Screen, SettingsState,
 };
 
 use super::apply_event as apply_event_with_jobs;
@@ -112,14 +113,22 @@ fn mfa_event_preserves_typed_code() {
 }
 
 #[test]
-fn login_success_returns_to_main() {
+fn login_success_returns_to_main_and_updates_site_mode() {
     let mut app = app();
     app.set_screen(Screen::Login(Box::new(LoginScreen::Progress {
         note: "正在登录…".to_owned(),
     })));
-    apply_event(&mut app, Event::LoginSucceeded);
+    apply_event(
+        &mut app,
+        Event::LoginSucceeded {
+            site: SiteKind::Attendance,
+            mode: Some(AccessMode::Direct),
+        },
+    );
     assert!(matches!(app.screen, Screen::Main));
     assert_eq!(app.message_text(), Some("登录成功"));
+    // 目前頁面為課表（考勤站點）：底欄顯示實際訪問方式。
+    assert_eq!(app.session_label(), "已登录 · 直连");
 }
 
 #[test]
@@ -191,6 +200,7 @@ fn homework_event_updates_groups_and_counts() {
             courses_skipped: 1,
             term_options: Vec::new(),
             items,
+            issues: Vec::new(),
             progress: None,
         }),
     );
@@ -392,4 +402,43 @@ fn task_failure_stays_on_credentials_form() {
         other => panic!("应停留在凭证表单，实际为 {other:?}"),
     }
     assert!(app.message_text().is_some(), "狀態列仍應顯示錯誤");
+}
+
+#[test]
+fn session_state_is_tracked_per_site() {
+    let mut app = app();
+
+    // 未登入：底欄顯示未登录。
+    app.nav = NavItem::Lms;
+    assert_eq!(app.session_label(), "未登录");
+
+    apply_event(
+        &mut app,
+        Event::LoginSucceeded {
+            site: SiteKind::Lms,
+            mode: Some(AccessMode::WebVpn),
+        },
+    );
+    assert_eq!(app.session_label(), "已登录 · WebVPN");
+
+    // 另一站點（考勤）不受影響。
+    app.nav = NavItem::Schedule;
+    assert_eq!(app.session_label(), "未登录");
+
+    // 會話失效只清除該站點。
+    app.set_site_mode(SiteKind::Attendance, AccessMode::Direct);
+    apply_event(
+        &mut app,
+        Event::SessionExpired {
+            site: SiteKind::Lms,
+        },
+    );
+    app.nav = NavItem::Lms;
+    assert_eq!(app.session_label(), "未登录");
+    app.nav = NavItem::Attendance;
+    assert_eq!(app.session_label(), "已登录 · 直连");
+
+    // 解鎖、換帳號或切換訪問模式：全部清除。
+    apply_event(&mut app, Event::SessionsCleared);
+    assert_eq!(app.session_label(), "未登录");
 }

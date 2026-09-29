@@ -48,6 +48,8 @@ struct SiteState {
     access_mode: AccessMode,
     headers: Vec<(String, String)>,
     user_id: Option<String>,
+    /// 使用者資訊解析失敗的原因（負快取，避免逐項重取）。
+    user_id_error: Option<String>,
 }
 
 /// 會話管理器。
@@ -189,10 +191,25 @@ impl SessionManager {
             .and_then(|state| state.user_id.as_deref())
     }
 
-    /// 記錄站點內的識別碼（站點層稍後才取得時回寫）。
+    /// 記錄站點內的識別碼（站點層稍後才取得時回寫）；同時清除解析失敗的負快取。
     pub fn set_site_user_id(&mut self, site: SiteKind, user_id: String) {
         if let Some(state) = self.sites.get_mut(&site) {
             state.user_id = Some(user_id);
+            state.user_id_error = None;
+        }
+    }
+
+    /// 站點使用者資訊的解析失敗原因（負快取；成功解析或重新登入時清除）。
+    pub fn site_user_id_error(&self, site: SiteKind) -> Option<&str> {
+        self.sites
+            .get(&site)
+            .and_then(|state| state.user_id_error.as_deref())
+    }
+
+    /// 記錄站點使用者資訊的解析失敗原因，避免對同一站點重複請求。
+    pub fn set_site_user_id_error(&mut self, site: SiteKind, message: String) {
+        if let Some(state) = self.sites.get_mut(&site) {
+            state.user_id_error = Some(message);
         }
     }
 
@@ -356,6 +373,7 @@ impl SessionManager {
                 access_mode: mode,
                 headers: login.headers,
                 user_id: login.user_id,
+                user_id_error: None,
             },
         );
     }

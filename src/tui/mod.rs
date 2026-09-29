@@ -132,13 +132,23 @@ fn apply_event(app: &mut App, event: Event, jobs: &Sender<Job>) {
         Event::LoginFailed(message) => {
             set_login_error(app, message);
         }
-        Event::LoginSucceeded => {
+        Event::LoginSucceeded { site, mode } => {
+            match mode {
+                Some(mode) => app.set_site_mode(site, mode),
+                None => app.clear_site_mode(site),
+            }
             if !app.is_main() {
                 app.set_screen(Screen::Main);
             }
             // 若目前頁面尚未載入（例如從失敗畫面重試成功），補一次載入。
             handler::ensure_page(app, jobs);
             app.set_message("登录成功");
+        }
+        Event::SessionsCleared => {
+            app.clear_site_modes();
+        }
+        Event::SessionExpired { site } => {
+            app.clear_site_mode(site);
         }
         Event::Schedule(data) => {
             app.schedule = Page::Ready(*data);
@@ -161,6 +171,7 @@ fn apply_event(app: &mut App, event: Event, jobs: &Sender<Job>) {
                 courses_skipped: update.courses_skipped,
                 term_options: update.term_options,
                 items: update.items,
+                issues: update.issues,
                 progress,
             };
             app.term_options = data.term_options.clone();

@@ -29,9 +29,11 @@ use crate::domain::homework::{HomeworkInput, HomeworkItem};
 use crate::domain::semester::{self, TermCode, TermResolution, TermSource};
 use crate::domain::{attendance_match, homework, schedule};
 use crate::error::{AppError, AppResult};
-use crate::session::{LoginStage, SessionManager, SiteKind};
+use crate::session::{AccessMode, LoginStage, SessionManager, SiteKind};
 use crate::sites::attendance::{AttendanceApi, AttendanceSite};
-use crate::sites::lms::{ActivityKind, LmsActivity, LmsApi, LmsCourse, LmsSite};
+use crate::sites::lms::{
+    ActivityKind, LmsActivity, LmsApi, LmsCourse, LmsSite, submission_failure_note,
+};
 use crate::tui::app::{ActivityDetailView, FlowData, LessonEntry, ScheduleData};
 
 /// 考勤流水分頁大小。
@@ -208,8 +210,20 @@ pub enum Event {
     },
     /// 登入失敗。
     LoginFailed(String),
-    /// 登入成功。
-    LoginSucceeded,
+    /// 登入成功（附完成登入的站點與實際訪問方式）。
+    LoginSucceeded {
+        /// 完成登入的站點。
+        site: SiteKind,
+        /// 實際使用的訪問方式（無法取得時為 `None`）。
+        mode: Option<AccessMode>,
+    },
+    /// 會話已全部重置（解鎖、換帳號或切換訪問模式）：介面清除站點登入狀態。
+    SessionsCleared,
+    /// 站點登入態已失效，即將重新登入。
+    SessionExpired {
+        /// 站點。
+        site: SiteKind,
+    },
     /// 課表資料。
     Schedule(Box<ScheduleData>),
     /// 作業載入更新（部分結果或最終結果）。
@@ -286,8 +300,19 @@ pub struct HomeworkUpdate {
     pub term_options: Vec<TermCode>,
     /// 目前已彙總的作業。
     pub items: Vec<HomeworkItem>,
+    /// 提交狀態無法確認的原因彙總（依項數遞減）。
+    pub issues: Vec<HomeworkIssue>,
     /// 載入進度（已完成課程數, 課程總數）；`None` 表示已載入完成。
     pub progress: Option<(usize, usize)>,
+}
+
+/// 「待核实」作業的共同原因彙總（同一原因只列一次）。
+#[derive(Debug, Clone)]
+pub struct HomeworkIssue {
+    /// 原因（階段化的失敗說明）。
+    pub reason: String,
+    /// 受影響的作業項數。
+    pub count: usize,
 }
 
 /// 進行中的登入流程。
@@ -387,9 +412,35 @@ impl HomeworkRunner {
             courses_skipped: self.skipped_terms,
             term_options: self.term_options.clone(),
             items: homework::aggregate(&self.inputs, now),
+            issues: homework_issues(&self.inputs),
             progress,
         }
     }
+}
+
+/// 彙總「待核实」作業的共同原因（同一原因只列一次，依項數遞減再按文字排序）。
+fn homework_issues(inputs: &[HomeworkInput]) -> Vec<HomeworkIssue> {
+    let mut grouped: Vec<HomeworkIssue> = Vec::new();
+    for input in inputs
+        .iter()
+        .filter(|input| input.submission_count.is_none())
+    {
+        let reason = input
+            .note
+            .clone()
+            .unwrap_or_else(|| "无法确认提交状态".to_owned());
+        match grouped.iter_mut().find(|issue| issue.reason == reason) {
+            Some(issue) => issue.count += 1,
+            None => grouped.push(HomeworkIssue { reason, count: 1 }),
+        }
+    }
+    grouped.sort_by(|left, right| {
+        right
+            .count
+            .cmp(&left.count)
+            .then_with(|| left.reason.cmp(&right.reason))
+    });
+    grouped
 }
 
 /// 思源學堂課程／活動快取（記憶體、有效期五分鐘）。
@@ -645,6 +696,8 @@ impl Worker {
         self.generation += 1;
         self.pending_data.clear();
         self.cache.clear();
+        // 舊帳號的站點登入狀態已失效：介面應清除。
+        self.emit(Event::SessionsCleared);
         Ok(())
     }
 
@@ -664,6 +717,8 @@ impl Worker {
         // 保存設定本身不觸發登入，後續登入由各頁面按需進行。
         self.generation += 1;
         self.cache.clear();
+        // 連線與登入態已重建：介面清除站點登入狀態。
+        self.emit(Event::SessionsCleared);
         self.emit(Event::AccessPolicyUpdated(policy));
         Ok(())
     }
@@ -746,10 +801,14 @@ impl Worker {
         self.drive(stage, flow.site, credentials, flow.retry)
     }
 
-    fn finish_login(&mut self, _site: SiteKind, retry: Option<Job>) -> AppResult<()> {
+    fn finish_login(&mut self, site: SiteKind, retry: Option<Job>) -> AppResult<()> {
         // 登入成功後才更新保險庫，失敗的憑證不會覆蓋舊憑證。
         self.commit_pending_vault();
-        self.emit(Event::LoginSucceeded);
+        let mode = self
+            .session
+            .as_ref()
+            .and_then(|session| session.access_mode(site));
+        self.emit(Event::LoginSucceeded { site, mode });
         // 登入成功後續跑等待中的任務（可能是資料任務或控制任務）。
         if let Some(job) = retry.or(self.retry.take()) {
             if job.is_control() {
@@ -936,6 +995,7 @@ impl Worker {
 
         if err.needs_relogin() || switched {
             // 登入態失效（或剛切換路由）：記下任務，重新登入後自動重試。
+            self.emit(Event::SessionExpired { site });
             self.retry = Some(job);
             if let Err(login_err) = self.begin_login(site, None)
                 && let Some(job) = self.retry.take()
@@ -1055,6 +1115,7 @@ impl Worker {
                 courses_skipped: 0,
                 term_options: Vec::new(),
                 items: Vec::new(),
+                issues: Vec::new(),
                 progress: None,
             }));
             return Ok(None);
@@ -1211,7 +1272,7 @@ impl Worker {
             }
             // 登入態失效與連線層錯誤向上傳播；其他單項失敗保留「待核实」。
             Err(err) if !is_recoverable(&err) => return Err(err),
-            Err(err) => input.note = Some(err.to_string()),
+            Err(err) => input.note = Some(submission_failure_note(&err)),
         }
         Ok(input)
     }
@@ -1285,18 +1346,13 @@ impl Worker {
         let mut api = LmsApi::new(session);
         let detail = api.activity(activity_id)?;
 
-        let (submissions, note) = match detail.submissions {
-            Some(list) => (Some(list.list), None),
-            None => (None, Some("无法确认提交状态（未取到提交记录）".to_owned())),
-        };
-
         Ok(ActivityDetailView {
             title: detail.activity.display_title(),
             kind: detail.activity.kind().label().to_owned(),
             end_time: detail.activity.end_time,
             submit_by_group: detail.activity.submit_by_group.unwrap_or(false),
-            submissions,
-            note,
+            submissions: detail.submissions.map(|list| list.list),
+            note: detail.note,
         })
     }
 

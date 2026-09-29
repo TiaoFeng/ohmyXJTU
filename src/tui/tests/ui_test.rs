@@ -11,6 +11,8 @@ use ratatui::backend::TestBackend;
 use crate::config::AccessPolicy;
 use crate::domain::homework::{HomeworkGroup, HomeworkInput, aggregate};
 use crate::domain::semester::TermCode;
+use crate::session::{AccessMode, SiteKind};
+use crate::task::HomeworkIssue;
 use crate::tui::app::{
     App, FormState, HomeworkData, LoginScreen, NavItem, Page, Screen, TermPickerState,
 };
@@ -293,6 +295,7 @@ fn draws_homework_groups_and_switches_them() {
         courses_skipped: 1,
         term_options: Vec::new(),
         items,
+        issues: Vec::new(),
         progress: Some((1, 2)),
     });
 
@@ -364,4 +367,84 @@ fn draws_term_picker_popup() {
     );
     assert!(text.contains("（建议）"), "應標示建議學期：\n{text}");
     assert!(text.contains("enter 确定"), "應顯示操作提示：\n{text}");
+}
+
+#[test]
+fn draws_homework_unknown_warning_with_reason() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00+08:00").expect("固定时间");
+    let items = aggregate(
+        &[
+            homework_input("待办作业", "2026-10-01 23:59:59", 0),
+            HomeworkInput {
+                course_id: "1".to_owned(),
+                course_name: "编译原理".to_owned(),
+                activity_id: "a-unknown".to_owned(),
+                title: "待核实作业".to_owned(),
+                end_time: Some("2026-10-02 23:59:59".to_owned()),
+                submit_by_group: false,
+                submission_count: None,
+                note: Some("无法确认提交状态：思源学堂用户信息解析失败".to_owned()),
+            },
+        ],
+        now,
+    );
+
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Homework;
+    app.homework = Page::Ready(HomeworkData {
+        term_label: Some("2026-2027 学年 第 1 学期".to_owned()),
+        term_source: Some("考勤系统"),
+        courses_included: 1,
+        courses_skipped: 0,
+        term_options: Vec::new(),
+        items,
+        issues: vec![HomeworkIssue {
+            reason: "无法确认提交状态：思源学堂用户信息解析失败".to_owned(),
+            count: 1,
+        }],
+        progress: None,
+    });
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(
+        text.contains("已确认 1 / 待核实 1"),
+        "應顯示已確認與待核實數量：\n{text}"
+    );
+    assert!(
+        text.contains("用户信息解析失败"),
+        "應顯示待核實原因：\n{text}"
+    );
+    assert!(text.contains("按 r 重试"), "應提示可重試：\n{text}");
+}
+
+#[test]
+fn footer_shows_site_session_state() {
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Homework;
+    app.homework = Page::Ready(HomeworkData::default());
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(
+        text.contains("未登录"),
+        "未登入時底欄應顯示未登录：\n{text}"
+    );
+
+    // 思源學堂已登入：作業頁底欄顯示實際訪問方式。
+    app.set_site_mode(SiteKind::Lms, AccessMode::Direct);
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(
+        text.contains("已登录 · 直连"),
+        "登入後底欄應顯示訪問方式：\n{text}"
+    );
 }

@@ -259,10 +259,14 @@ fn saves_credentials_only_after_login_succeeds() {
 
     let events = harness.drain_events();
     assert!(
-        events
-            .iter()
-            .any(|event| matches!(event, Event::LoginSucceeded)),
-        "应当回报登录成功"
+        events.iter().any(|event| matches!(
+            event,
+            Event::LoginSucceeded {
+                site: SiteKind::Attendance,
+                mode: Some(AccessMode::Direct),
+            }
+        )),
+        "登录成功事件应携带站点与访问方式"
     );
     assert!(
         events
@@ -320,7 +324,7 @@ fn public_key_failure_is_recoverable_by_retrying() {
 
     harness.dispatch(Job::RetryLogin).expect("重试应当成功");
     assert!(
-        harness.saw(|event| matches!(event, Event::LoginSucceeded)),
+        harness.saw(|event| matches!(event, Event::LoginSucceeded { .. })),
         "第二次重试应当登录成功"
     );
 }
@@ -370,6 +374,12 @@ fn unlock_does_not_start_login() {
             .any(|event| matches!(event, Event::LoginProgress(_))),
         "解锁不再预登录任何站点"
     );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::SessionsCleared)),
+        "解锁后应回报会话已重置"
+    );
 }
 
 #[test]
@@ -379,8 +389,17 @@ fn set_access_policy_saves_without_login_and_keeps_old_value_on_failure() {
     harness
         .dispatch(Job::SetAccessPolicy(AccessPolicy::WebVpn))
         .expect("保存应当成功");
+    let events = harness.drain_events();
     assert!(
-        harness.saw(|event| matches!(event, Event::AccessPolicyUpdated(AccessPolicy::WebVpn))),
+        events
+            .iter()
+            .any(|event| matches!(event, Event::SessionsCleared)),
+        "切换访问模式后应回报会话已重置"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::AccessPolicyUpdated(AccessPolicy::WebVpn))),
         "应回报访问策略已更新"
     );
     let saved = std::fs::read_to_string(harness.config_path()).expect("读取配置文件");
@@ -489,7 +508,12 @@ impl FakeHomeworkSite {
 }
 
 /// 思源學堂首頁（含使用者 ID，供個人提交查詢使用）。
-const USER_PAGE: &str = r#"<html><script>var globalData = {"user": {"id": 42}};</script></html>"#;
+///
+/// 以真實頁面的 JavaScript 物件語法（未加引號的鍵、`None`）撰寫，
+/// 驗證整條提交查詢鏈路都依賴寬容解析。
+const USER_PAGE: &str = r#"<html><script>
+    var globalData = { user: { id: 42, name: "张三", dept: None, role: "Student", }, dept: { id: 3 }, locale: "zh-CN" };
+</script></html>"#;
 
 /// 取出所有作業更新事件。
 fn homework_updates(harness: &mut Harness) -> Vec<HomeworkUpdate> {
@@ -729,7 +753,23 @@ fn homework_session_expiry_relogs_in_and_retries() {
         .dispatch(Job::LoadHomework { force: false })
         .expect("重登后应当成功");
 
-    let updates = homework_updates(&mut harness);
+    let events = harness.drain_events();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::SessionExpired {
+                site: SiteKind::Lms
+            }
+        )),
+        "会话失效时应回报对应站点"
+    );
+    let updates: Vec<HomeworkUpdate> = events
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::Homework(update) => Some(update),
+            _ => None,
+        })
+        .collect();
     let last = updates.last().expect("最终更新");
     assert_eq!(last.items.len(), 1, "重试后应得到最终结果");
     assert_eq!(last.items[0].state, HomeworkState::Pending);
@@ -798,4 +838,197 @@ fn homework_reuses_cache_until_forced() {
         .expect("强制刷新");
     assert_eq!(count(&site, "/api/my-courses"), 2, "强制刷新应重新查询");
     assert_eq!(count(&site, "/courses/1/activities"), 2);
+}
+
+#[test]
+fn homework_reports_user_page_failure_once_without_repeated_requests() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let tracker = Arc::clone(&seen);
+    let mut harness = harness(move |request: &HttpRequest| {
+        let url = request.url.clone();
+        tracker.lock().expect("lock").push(url.clone());
+        if url.ends_with("/api/my-courses") {
+            return Ok(json(serde_json::json!({ "courses": [
+                { "id": "1", "name": "编译原理", "semester": { "code": "2026-1" } },
+            ]})));
+        }
+        if url.ends_with("/user/index") {
+            // 使用者首頁不含可解析的 globalData（例如改版或登入頁）。
+            return Ok(HttpResponse::new(
+                200,
+                "https://lms.xjtu.edu.cn/user/index",
+                "<html><body>无法解析的页面</body></html>",
+            ));
+        }
+        if url.ends_with("/courses/1/activities") {
+            return Ok(json(serde_json::json!({ "activities": [
+                { "id": "11", "type": "homework", "title": "作业A" },
+                { "id": "12", "type": "homework", "title": "作业B" },
+            ]})));
+        }
+        if url.ends_with("/api/activities/11") {
+            return Ok(json(serde_json::json!({
+                "id": "11", "type": "homework", "title": "作业A", "submit_by_group": false
+            })));
+        }
+        if url.ends_with("/api/activities/12") {
+            return Ok(json(serde_json::json!({
+                "id": "12", "type": "homework", "title": "作业B", "submit_by_group": false
+            })));
+        }
+        panic!("未预期的请求：{url}");
+    });
+    harness.login_lms_only();
+    harness.worker.config.homework_term = Some("2026-2027-1".to_owned());
+
+    harness
+        .dispatch(Job::LoadHomework { force: false })
+        .expect("作业加载应当成功");
+
+    let updates = homework_updates(&mut harness);
+    let last = updates.last().expect("最终更新");
+    assert_eq!(last.items.len(), 2);
+    assert!(
+        last.items
+            .iter()
+            .all(|item| item.state == HomeworkState::Unknown),
+        "用户信息无法解析时不得判成任一确定状态：{:#?}",
+        last.items
+    );
+    assert_eq!(
+        last.issues.len(),
+        1,
+        "共同故障只应汇总一次：{:#?}",
+        last.issues
+    );
+    assert_eq!(last.issues[0].count, 2);
+    assert!(
+        last.issues[0].reason.contains("用户信息解析失败"),
+        "原因应指向用户信息解析阶段：{}",
+        last.issues[0].reason
+    );
+
+    let user_page_requests = seen
+        .lock()
+        .expect("lock")
+        .iter()
+        .filter(|url| url.ends_with("/user/index"))
+        .count();
+    assert_eq!(
+        user_page_requests, 1,
+        "解析失败应负缓存，不得逐项重取 /user/index"
+    );
+}
+
+#[test]
+fn homework_uses_detail_submit_count_without_submission_request() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let tracker = Arc::clone(&seen);
+    let mut harness = harness(move |request: &HttpRequest| {
+        let url = request.url.clone();
+        tracker.lock().expect("lock").push(url.clone());
+        if url.ends_with("/api/my-courses") {
+            return Ok(json(serde_json::json!({ "courses": [
+                { "id": "1", "name": "编译原理", "semester": { "code": "2026-1" } },
+            ]})));
+        }
+        if url.ends_with("/courses/1/activities") {
+            return Ok(json(serde_json::json!({ "activities": [
+                { "id": "11", "type": "homework", "title": "已交作业" },
+                { "id": "12", "type": "homework", "title": "未交作业" },
+            ]})));
+        }
+        if url.ends_with("/api/activities/11") {
+            return Ok(json(serde_json::json!({
+                "id": "11", "type": "homework", "title": "已交作业",
+                "submit_by_group": false, "user_submit_count": 2
+            })));
+        }
+        if url.ends_with("/api/activities/12") {
+            return Ok(json(serde_json::json!({
+                "id": "12", "type": "homework", "title": "未交作业",
+                "submit_by_group": false, "user_submit_count": 0
+            })));
+        }
+        panic!("未预期的请求：{url}");
+    });
+    harness.login_lms_only();
+    harness.worker.config.homework_term = Some("2026-2027-1".to_owned());
+
+    harness
+        .dispatch(Job::LoadHomework { force: false })
+        .expect("作业加载应当成功");
+
+    let updates = homework_updates(&mut harness);
+    let last = updates.last().expect("最终更新");
+    let by_title = |title: &str| {
+        last.items
+            .iter()
+            .find(|item| item.title == title)
+            .unwrap_or_else(|| panic!("找不到作业 {title}"))
+    };
+    assert_eq!(by_title("已交作业").state, HomeworkState::Completed);
+    assert_eq!(by_title("未交作业").state, HomeworkState::Pending);
+    assert!(last.issues.is_empty());
+
+    let url_list = seen.lock().expect("lock").clone();
+    assert!(
+        !url_list.iter().any(|url| url.contains("/submission_list")),
+        "详情提供 user_submit_count 时不应再查提交列表：{url_list:?}"
+    );
+    assert!(
+        !url_list.iter().any(|url| url.ends_with("/user/index")),
+        "不应为已确定的状态查询用户信息：{url_list:?}"
+    );
+}
+
+#[test]
+fn group_homework_without_group_id_stays_unknown_with_reason() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let tracker = Arc::clone(&seen);
+    let mut harness = harness(move |request: &HttpRequest| {
+        let url = request.url.clone();
+        tracker.lock().expect("lock").push(url.clone());
+        if url.ends_with("/api/my-courses") {
+            return Ok(json(serde_json::json!({ "courses": [
+                { "id": "1", "name": "编译原理", "semester": { "code": "2026-1" } },
+            ]})));
+        }
+        if url.ends_with("/courses/1/activities") {
+            return Ok(json(serde_json::json!({ "activities": [
+                { "id": "11", "type": "homework", "title": "小组作业" },
+            ]})));
+        }
+        if url.ends_with("/api/activities/11") {
+            // 小组作业但缺少 group_id：无法拼接提交地址。
+            return Ok(json(serde_json::json!({
+                "id": "11", "type": "homework", "title": "小组作业",
+                "submit_by_group": true
+            })));
+        }
+        panic!("未预期的请求：{url}");
+    });
+    harness.login_lms_only();
+    harness.worker.config.homework_term = Some("2026-2027-1".to_owned());
+
+    harness
+        .dispatch(Job::LoadHomework { force: false })
+        .expect("作业加载应当成功");
+
+    let updates = homework_updates(&mut harness);
+    let last = updates.last().expect("最终更新");
+    assert_eq!(last.items.len(), 1);
+    assert_eq!(last.items[0].state, HomeworkState::Unknown);
+    let note = last.items[0].note.as_deref().unwrap_or_default();
+    assert!(note.contains("group_id"), "原因应指出缺少 group_id：{note}");
+    assert_eq!(last.issues.len(), 1);
+    assert!(last.issues[0].reason.contains("group_id"));
+    assert!(
+        !seen
+            .lock()
+            .expect("lock")
+            .iter()
+            .any(|url| url.contains("/submission_list")),
+        "缺少 group_id 时不得请求提交列表"
+    );
 }

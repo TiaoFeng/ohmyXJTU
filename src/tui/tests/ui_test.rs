@@ -1388,3 +1388,124 @@ fn activity_rows_align_title_and_deadline_columns() {
         "截止欄起點必須一致：\n{first}\n{second}"
     );
 }
+
+/// 造一個主畫面的 App（尺寸不足時 `too_small` 會在內容之前接手）。
+fn main_screen_app() -> App {
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app
+}
+
+#[test]
+fn too_small_message_is_centered_and_colors_current_size() {
+    // 48x18：寬度未達 64、高度剛好 18。提示應上下左右置中，
+    // 且只有未達標的數字轉紅。
+    let mut app = main_screen_app();
+
+    let terminal = draw(48, 18, |frame| crate::tui::views::draw(frame, &mut app));
+    let backend = terminal.backend();
+    let text = screen_text(backend);
+    assert!(text.contains("终端太小了:"), "應顯示新版提示：\n{text}");
+    assert!(!text.contains("窗口过小"), "舊版文案不應再出現：\n{text}");
+    assert!(!text.contains("至少需要"), "不再顯示最低需求：\n{text}");
+
+    let (title_y, title_row) = find_row(backend, "终端太小了");
+    assert_eq!(title_y, 8, "第一行應垂直置中（(18-2)/2）：\n{text}");
+    assert_eq!(
+        column_of(&title_row, "终端太小了"),
+        19,
+        "第一行應水平置中（48/2 − 11/2）：\n{title_row}"
+    );
+
+    let (size_y, size_row) = find_row(backend, "宽 = ");
+    assert_eq!(size_y, 9, "第二行應緊接在下一列：\n{text}");
+    let line_start = column_of(&size_row, "宽 = ");
+    assert_eq!(
+        line_start, 16,
+        "第二行應水平置中（48/2 − 16/2）：\n{size_row}"
+    );
+
+    let width_col = column_of(&size_row, "48");
+    let height_col = column_of(&size_row, "高 = ") + 5;
+    assert_eq!(
+        backend.buffer()[(line_start, size_y)].fg,
+        THEME.text,
+        "標題文字應為白色：\n{size_row}"
+    );
+    assert_eq!(
+        backend.buffer()[(width_col, size_y)].fg,
+        THEME.red,
+        "寬度 48 未達 64 應為紅色：\n{size_row}"
+    );
+    assert_eq!(
+        backend.buffer()[(height_col, size_y)].fg,
+        THEME.green,
+        "高度 18 已達門檻應為綠色：\n{size_row}"
+    );
+}
+
+#[test]
+fn too_small_message_flags_only_the_failing_dimension() {
+    // 100x12：夠寬、太矮。
+    let mut app = main_screen_app();
+    let terminal = draw(100, 12, |frame| crate::tui::views::draw(frame, &mut app));
+    let backend = terminal.backend();
+    let (size_y, size_row) = find_row(backend, "宽 = 100");
+    // 提示帶自 (12-2)/2 = 5 起算，第二行落在帶內第二列。
+    assert_eq!(size_y, 6, "第二行應在提示帶的第二列：\n{size_row}");
+    assert_eq!(
+        backend.buffer()[(column_of(&size_row, "宽 = ") + 5, size_y)].fg,
+        THEME.green,
+        "寬度 100 已達門檻應為綠色：\n{size_row}"
+    );
+    assert_eq!(
+        backend.buffer()[(column_of(&size_row, "高 = ") + 5, size_y)].fg,
+        THEME.red,
+        "高度 12 未達 18 應為紅色：\n{size_row}"
+    );
+
+    // 48x24：太窄、夠高。
+    let terminal = draw(48, 24, |frame| crate::tui::views::draw(frame, &mut app));
+    let backend = terminal.backend();
+    let (size_y, size_row) = find_row(backend, "宽 = 48");
+    // 提示帶自 (24-2)/2 = 11 起算，第二行落在帶內第二列。
+    assert_eq!(size_y, 12, "第二行應在提示帶的第二列：\n{size_row}");
+    assert_eq!(
+        backend.buffer()[(column_of(&size_row, "宽 = ") + 5, size_y)].fg,
+        THEME.red,
+        "寬度 48 未達 64 應為紅色：\n{size_row}"
+    );
+    assert_eq!(
+        backend.buffer()[(column_of(&size_row, "高 = ") + 5, size_y)].fg,
+        THEME.green,
+        "高度 24 已達門檻應為綠色：\n{size_row}"
+    );
+}
+
+#[test]
+fn too_small_message_survives_single_row_terminal() {
+    let mut app = main_screen_app();
+    let terminal = draw(40, 1, |frame| crate::tui::views::draw(frame, &mut app));
+    let text = screen_text(terminal.backend());
+    assert!(
+        text.contains("终端太小了"),
+        "只剩一列時仍應顯示標題：\n{text}"
+    );
+    assert!(
+        !text.contains("高 = "),
+        "只放得下一列時不顯示第二行：\n{text}"
+    );
+}
+
+#[test]
+fn too_small_message_hidden_at_minimum_size() {
+    let mut app = main_screen_app();
+    let terminal = draw(MIN_WIDTH, MIN_HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(
+        !text.contains("终端太小了"),
+        "達到 64x18 門檻時不應顯示提示：\n{text}"
+    );
+}

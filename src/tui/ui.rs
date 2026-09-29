@@ -329,20 +329,49 @@ pub fn draw_login(frame: &mut Frame, screen: &LoginScreen) {
     }
 }
 
+/// 「终端太小」提示的文字：兩行白色文案，兩個數字依是否達到門檻上色
+///（達標綠、未達標紅），讓使用者一眼看出是太窄還是太矮。
+fn too_small_lines(width: u16, height: u16) -> Vec<Line<'static>> {
+    let text = |content: &str| Span::styled(content.to_owned(), Style::default().fg(THEME.text));
+    let number = |value: u16, min: u16| {
+        let color = if value >= min { THEME.green } else { THEME.red };
+        Span::styled(value.to_string(), Style::default().fg(color))
+    };
+    vec![
+        Line::from(text("终端太小了:")),
+        Line::from(vec![
+            text("宽 = "),
+            number(width, MIN_WIDTH),
+            text("  高 = "),
+            number(height, MIN_HEIGHT),
+        ]),
+    ]
+}
+
 /// 尺寸不足時顯示提示，回傳是否可以直接結束繪製。
+///
+/// 提示上下左右都置中：先以底色鋪滿整個畫面，再於垂直置中的文字帶上繪製兩行。
 pub fn too_small(frame: &mut Frame) -> bool {
     let area = frame.area();
     if area.width >= MIN_WIDTH && area.height >= MIN_HEIGHT {
         return false;
     }
-    let message = format!(
-        "终端窗口过小：当前 {}x{}，至少需要 {}x{}",
-        area.width, area.height, MIN_WIDTH, MIN_HEIGHT
-    );
+
+    let lines = too_small_lines(area.width, area.height);
+    let height = u16::try_from(lines.len())
+        .unwrap_or(u16::MAX)
+        .min(area.height);
+    let band = Rect {
+        x: area.x,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width: area.width,
+        height,
+    };
+
+    frame.render_widget(Block::default().style(THEME.base_style()), area);
     frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(message, THEME.error_style())))
-            .style(THEME.base_style()),
-        area,
+        Paragraph::new(lines).centered().style(THEME.base_style()),
+        band,
     );
     true
 }

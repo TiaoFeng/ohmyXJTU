@@ -113,7 +113,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
 
 fn hints(app: &App) -> String {
     let mut text = format!(
-        "[{} · {}]  q 退出  ←/→ 切换页面  ↑/↓ 选择  r 刷新  ^P 账户设置",
+        "[{} {}]  q 退出  ←/→ 切换页面  ↑/↓ 选择  r 刷新  ^P 账户设置",
         app.session_label(),
         app.access_policy.label()
     );
@@ -121,7 +121,7 @@ fn hints(app: &App) -> String {
     match app.nav {
         NavItem::Attendance => text.push_str("  n/p 翻页"),
         NavItem::Homework => {
-            text.push_str("  [ ] 分组  s 学期");
+            text.push_str("  [ ] 分组  s 学期  o 打开网页");
             if app.homework_detail {
                 text.push_str("  enter 收起详情");
             } else {

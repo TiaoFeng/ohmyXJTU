@@ -205,6 +205,23 @@ pub fn fit_display(text: &str, width: usize) -> String {
     pad_display(&truncated, width)
 }
 
+/// 依顯示寬度補齊首端空白（靠右對齊；不截斷，超長原樣返回）。
+pub fn pad_display_start(text: &str, width: usize) -> String {
+    let current = display_width(text);
+    let mut result = String::with_capacity(text.len() + width.saturating_sub(current));
+    for _ in current..width {
+        result.push(' ');
+    }
+    result.push_str(text);
+    result
+}
+
+/// 截斷並靠右補齊到固定顯示寬度（列表欄位排版用；`width` 為 0 時為空字串）。
+pub fn fit_display_start(text: &str, width: usize) -> String {
+    let truncated = truncate_display(text, width);
+    pad_display_start(&truncated, width)
+}
+
 #[cfg(test)]
 #[path = "tests/text_test.rs"]
 mod text_test;

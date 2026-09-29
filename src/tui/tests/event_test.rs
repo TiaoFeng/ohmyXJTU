@@ -122,7 +122,7 @@ fn login_success_returns_to_main_and_updates_site_mode() {
     assert!(matches!(app.screen, Screen::Main));
     assert_eq!(app.message_text(), Some("登录成功"));
     // 目前頁面為課表（考勤站點）：底欄顯示實際訪問方式。
-    assert_eq!(app.session_label(), "已登录 · 直连");
+    assert_eq!(app.session_label(), "直连");
 }
 
 #[test]
@@ -526,7 +526,7 @@ fn session_state_is_tracked_per_site() {
             mode: Some(AccessMode::WebVpn),
         },
     );
-    assert_eq!(app.session_label(), "已登录 · WebVPN");
+    assert_eq!(app.session_label(), "WebVPN");
 
     // 另一站點（考勤）不受影響。
     app.nav = NavItem::Schedule;
@@ -543,7 +543,7 @@ fn session_state_is_tracked_per_site() {
     app.nav = NavItem::Lms;
     assert_eq!(app.session_label(), "未登录");
     app.nav = NavItem::Attendance;
-    assert_eq!(app.session_label(), "已登录 · 直连");
+    assert_eq!(app.session_label(), "直连");
 
     // 解鎖、換帳號或切換訪問模式：全部清除。
     apply_event(&mut app, Event::SessionsCleared);

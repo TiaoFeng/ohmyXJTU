@@ -15,7 +15,7 @@ use crate::sites::lms::{ActivityKind, LmsActivity};
 use crate::tui::app::{
     ActivityDetailView, App, HomeworkData, LessonEntry, LmsLevel, NavItem, Page,
 };
-use crate::tui::text::fit_display;
+use crate::tui::text::{display_width, fit_display, fit_display_start};
 use crate::tui::theme::THEME;
 use crate::tui::views::main_view::render_list;
 
@@ -59,10 +59,20 @@ fn schedule(frame: &mut Frame, area: Rect, app: &mut App) {
         }
         Some(_) => {
             let (list_area, detail_area) = split_detail(area, app.schedule_detail);
+            let width = row_width(list_area);
             let (items, detail) = {
                 let data = app.schedule.ready().expect("已确认存在课表数据");
+                let Some(columns) = schedule_columns(width, ScheduleNeeds::of(&data.lessons))
+                else {
+                    too_narrow(frame, list_area, &title, schedule_min_row_width(), width);
+                    return;
+                };
                 let index = app.page_selection().min(data.lessons.len() - 1);
-                let items = data.lessons.iter().map(lesson_item).collect::<Vec<_>>();
+                let items = data
+                    .lessons
+                    .iter()
+                    .map(|lesson| lesson_item(lesson, columns))
+                    .collect::<Vec<_>>();
                 let detail = app
                     .schedule_detail
                     .then(|| lesson_lines(&data.lessons[index]));
@@ -76,28 +86,153 @@ fn schedule(frame: &mut Frame, area: Rect, app: &mut App) {
     }
 }
 
-fn lesson_item(lesson: &LessonEntry) -> ListItem<'static> {
-    ListItem::new(Line::from(vec![
+/// 星期欄寬（「周一」為兩個全角字）。
+const WEEKDAY_WIDTH: usize = 4;
+/// 節次欄寬（最寬為 `11-12`，靠右對齊）。
+const SECTIONS_WIDTH: usize = 5;
+/// 考勤狀態欄寬（最寬標籤為三個全角字，如「待考勤」）。
+const STATUS_WIDTH: usize = 6;
+/// 課表日期欄寬（`MM-DD`）。
+const DATE_WIDTH: usize = 5;
+/// 課表七欄之間的單欄間隔數。
+const SCHEDULE_GAPS: usize = 6;
+/// 課表課程欄的最小寬度（三個全角字，低於此值即代表終端過窄）。
+const SCHEDULE_COURSE_MIN_WIDTH: usize = 6;
+/// 課表地點欄的最小寬度。
+const SCHEDULE_CLASSROOM_MIN_WIDTH: usize = 8;
+/// 課表教師欄的最小寬度（低於此值時整欄收起）。
+const SCHEDULE_TEACHER_MIN_WIDTH: usize = 6;
+
+/// 課表清單的文字欄內容需求（可見列的最大顯示寬）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ScheduleNeeds {
+    /// 課程名稱需求寬度。
+    course: usize,
+    /// 地點需求寬度。
+    classroom: usize,
+    /// 教師需求寬度。
+    teacher: usize,
+}
+
+impl ScheduleNeeds {
+    /// 由本週課程組出需求。
+    fn of(lessons: &[LessonEntry]) -> Self {
+        Self {
+            course: lessons
+                .iter()
+                .map(|lesson| display_width(&lesson.course_name))
+                .max()
+                .unwrap_or(0),
+            classroom: lessons
+                .iter()
+                .map(|lesson| display_width(&lesson.classroom))
+                .max()
+                .unwrap_or(0),
+            teacher: lessons
+                .iter()
+                .map(|lesson| display_width(&lesson.teacher))
+                .max()
+                .unwrap_or(0),
+        }
+    }
+}
+
+/// 課表清單的欄寬（單位為終端顯示欄）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ScheduleColumns {
+    /// 課程欄寬。
+    course: usize,
+    /// 地點欄寬。
+    classroom: usize,
+    /// 教師欄寬（`0` 代表不顯示）。
+    teacher: usize,
+}
+
+/// 依可用寬度與內容需求決定課表欄寬；終端過窄而無法完整顯示時回傳 `None`。
+///
+/// 日期、星期、節次與考勤狀態為固定欄；欄位自左而右緊密排列，剩餘寬度留在
+/// 列尾。課程、地點與教師欄都以可見內容的寬度為準（空間足夠即完整顯示）；
+/// 空間不足時先隱藏教師欄、再縮地點，讓課程名稱最後才縮（下限為三個全角字）。
+fn schedule_columns(available: usize, needs: ScheduleNeeds) -> Option<ScheduleColumns> {
+    let fixed = schedule_fixed_width();
+    let mut classroom = needs.classroom.max(SCHEDULE_CLASSROOM_MIN_WIDTH);
+    let mut teacher = if needs.teacher == 0 {
+        0
+    } else {
+        needs.teacher.max(SCHEDULE_TEACHER_MIN_WIDTH)
+    };
+    let mut rest = available.saturating_sub(fixed + classroom + teacher);
+    while rest < needs.course && (teacher > 0 || classroom > SCHEDULE_CLASSROOM_MIN_WIDTH) {
+        if teacher > SCHEDULE_TEACHER_MIN_WIDTH {
+            teacher -= 2;
+        } else if teacher > 0 {
+            teacher = 0;
+        } else {
+            classroom -= 2;
+        }
+        rest = available.saturating_sub(fixed + classroom + teacher);
+    }
+    if rest < SCHEDULE_COURSE_MIN_WIDTH {
+        return None;
+    }
+    Some(ScheduleColumns {
+        course: rest.min(needs.course.max(SCHEDULE_COURSE_MIN_WIDTH)),
+        classroom,
+        teacher,
+    })
+}
+
+/// 課表固定欄寬合計（含欄間隔）。
+fn schedule_fixed_width() -> usize {
+    DATE_WIDTH + WEEKDAY_WIDTH + SECTIONS_WIDTH + STATUS_WIDTH + SCHEDULE_GAPS
+}
+
+/// 課表清單可完整顯示所需的最小列寬。
+fn schedule_min_row_width() -> usize {
+    schedule_fixed_width() + SCHEDULE_CLASSROOM_MIN_WIDTH + SCHEDULE_COURSE_MIN_WIDTH
+}
+
+/// 課表列：日期／星期／節次／課程／地點／（教師）／考勤狀態。
+///
+/// 各欄以顯示寬度排版（中文佔兩欄），因此不同長度的課程名稱、地點與教師
+/// 都不會讓考勤狀態欄左右浮動。
+fn lesson_item(lesson: &LessonEntry, columns: ScheduleColumns) -> ListItem<'static> {
+    let mut spans = vec![
         Span::styled(
             format!("{} ", lesson.date.format("%m-%d")),
             THEME.muted_style(),
         ),
         Span::styled(
-            format!("{:<3} ", weekday_label(lesson.date)),
+            format!(
+                "{} ",
+                fit_display(weekday_label(lesson.date), WEEKDAY_WIDTH)
+            ),
             THEME.muted_style(),
         ),
-        Span::styled(format!("{:>4}  ", lesson.sections), THEME.muted_style()),
         Span::styled(
-            lesson.course_name.clone(),
+            format!("{} ", fit_display_start(&lesson.sections, SECTIONS_WIDTH)),
+            THEME.muted_style(),
+        ),
+        Span::styled(
+            format!("{} ", fit_display(&lesson.course_name, columns.course)),
             Style::default().fg(THEME.text).add_modifier(Modifier::BOLD),
         ),
-        Span::styled(format!("  {}", lesson.classroom), THEME.muted_style()),
-        Span::styled(format!("  {}", lesson.teacher), THEME.muted_style()),
         Span::styled(
-            format!("  {}", lesson.label),
-            THEME.status_style(lesson.label),
+            format!("{} ", fit_display(&lesson.classroom, columns.classroom)),
+            THEME.muted_style(),
         ),
-    ]))
+    ];
+    if columns.teacher > 0 {
+        spans.push(Span::styled(
+            format!("{} ", fit_display(&lesson.teacher, columns.teacher)),
+            THEME.muted_style(),
+        ));
+    }
+    spans.push(Span::styled(
+        lesson.label.to_owned(),
+        THEME.status_style(lesson.label),
+    ));
+    ListItem::new(Line::from(spans))
 }
 
 fn lesson_lines(lesson: &LessonEntry) -> Vec<Line<'static>> {
@@ -180,10 +315,15 @@ fn homework(frame: &mut Frame, area: Rect, app: &mut App) {
             return;
         }
         let visible = data.group_items(app.homework_group);
+        let width = row_width(list_area);
+        let Some(columns) = homework_columns(width, RowNeeds::of_homework(&visible)) else {
+            too_narrow(frame, list_area, &title, homework_min_row_width(), width);
+            return;
+        };
         let index = app.page_selection().min(visible.len() - 1);
         let items = visible
             .iter()
-            .map(|item| homework_item(item))
+            .map(|item| homework_item(item, columns))
             .collect::<Vec<_>>();
         let detail = app.homework_detail.then(|| homework_lines(visible[index]));
         (items, detail)
@@ -294,26 +434,264 @@ fn homework_warning(app: &App, data: &HomeworkData) -> Option<Line<'static>> {
     Some(Line::from(spans))
 }
 
-fn homework_item(item: &HomeworkItem) -> ListItem<'static> {
-    ListItem::new(Line::from(vec![
+/// 作業狀態欄寬（最寬標籤「待提交」「已完成」「待核实」為三個全角字）。
+const HOMEWORK_STATE_WIDTH: usize = 6;
+/// 「小组」欄寬。
+const GROUP_WIDTH: usize = 4;
+/// 完整截止時間欄寬（`YYYY-MM-DD HH:MM`）。
+const DEADLINE_FULL_WIDTH: usize = 16;
+/// 精簡截止時間欄寬（`MM-DD HH:MM`）。
+const DEADLINE_COMPACT_WIDTH: usize = 11;
+/// 截止時間欄的「截止」前綴。
+const DEADLINE_PREFIX: &str = "截止 ";
+/// 標題欄的最小寬度（三個全角字）。
+const TITLE_MIN_WIDTH: usize = 6;
+/// 作業課程欄的最小寬度（三個全角字，低於此值即代表終端過窄）。
+const HOMEWORK_COURSE_MIN_WIDTH: usize = 6;
+/// 活動類型欄寬（最寬標籤「课程内容」為四個全角字）。
+const ACTIVITY_KIND_WIDTH: usize = 8;
+
+/// 作業與活動清單的欄寬（單位為終端顯示欄）。
+///
+/// 兩者共用「標籤欄＋標題＋（狀態）＋截止時間＋（小组）」的骨架：作業的標籤
+/// 欄是課程名稱、含狀態欄；活動的標籤欄是活動類型、沒有狀態欄（`state == 0`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RowColumns {
+    /// 首欄（課程名稱或活動類型）欄寬。
+    label: usize,
+    /// 標題欄寬。
+    title: usize,
+    /// 狀態欄寬；`0` 代表不顯示狀態欄。
+    state: usize,
+    /// 截止時間欄寬。
+    deadline: usize,
+    /// 是否顯示「截止」前綴。
+    deadline_prefix: bool,
+    /// 是否使用不含年份的精簡日期。
+    compact: bool,
+    /// 是否顯示「小组」欄。
+    group: bool,
+}
+
+/// 作業／活動清單的文字欄內容需求（可見列的最大顯示寬）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct RowNeeds {
+    /// 標籤欄（課程名稱或活動類型）需求寬度。
+    label: usize,
+    /// 標題欄需求寬度。
+    title: usize,
+}
+
+impl RowNeeds {
+    /// 由作業列組出需求。
+    fn of_homework(items: &[&HomeworkItem]) -> Self {
+        Self {
+            label: items
+                .iter()
+                .map(|item| display_width(&item.course_name))
+                .max()
+                .unwrap_or(0),
+            title: items
+                .iter()
+                .map(|item| display_width(&item.title))
+                .max()
+                .unwrap_or(0),
+        }
+    }
+
+    /// 由活動列組出需求（類型欄為固定寬度）。
+    fn of_activities(activities: &[&LmsActivity]) -> Self {
+        Self {
+            label: ACTIVITY_KIND_WIDTH,
+            title: activities
+                .iter()
+                .map(|activity| display_width(&activity.display_title()))
+                .max()
+                .unwrap_or(0),
+        }
+    }
+}
+
+/// 作業清單欄寬；終端過窄而無法完整顯示時回傳 `None`。
+fn homework_columns(available: usize, needs: RowNeeds) -> Option<RowColumns> {
+    row_columns(
+        available,
+        HOMEWORK_COURSE_MIN_WIDTH,
+        HOMEWORK_STATE_WIDTH,
+        needs,
+    )
+}
+
+/// 活動清單欄寬（類型欄固定寬度、沒有狀態欄）；終端過窄時回傳 `None`。
+fn activity_columns(available: usize, needs: RowNeeds) -> Option<RowColumns> {
+    row_columns(available, ACTIVITY_KIND_WIDTH, 0, needs)
+}
+
+/// 作業清單可完整顯示所需的最小列寬。
+fn homework_min_row_width() -> usize {
+    row_min_row_width(HOMEWORK_COURSE_MIN_WIDTH, HOMEWORK_STATE_WIDTH)
+}
+
+/// 活動清單可完整顯示所需的最小列寬。
+fn activity_min_row_width() -> usize {
+    row_min_row_width(ACTIVITY_KIND_WIDTH, 0)
+}
+
+/// 依可用寬度與內容需求決定欄寬。
+///
+/// 欄位自左而右緊密排列，用不到的寬度留在**列尾**——不像以往把標題欄撐滿、
+/// 將後半欄位推到畫面右側。標籤欄與標題欄以可見內容的寬度為準，空間足夠即
+/// 完整顯示；不足時先依序犧牲「小组」欄、截止前綴與年份，再依內容需求比例
+/// 縮減，連下限都放不下時回傳 `None`（由呼叫端提示放大終端）。
+fn row_columns(
+    available: usize,
+    label_min: usize,
+    state: usize,
+    needs: RowNeeds,
+) -> Option<RowColumns> {
+    /// 依偏好排序的欄位組合：（顯示「小组」欄、顯示「截止」前綴、截止欄寬、寬裕量）。
+    ///
+    /// 「寬裕量」是標籤欄與標題欄下限之外的額外寬度：空間足夠寬鬆才採用該
+    /// 組合，否則退而求其次（寧可先少顯示前綴或年份，也不把兩個文字欄壓到下限）。
+    const TIERS: [(bool, bool, usize, usize); 4] = [
+        (true, true, DEADLINE_FULL_WIDTH, 8),
+        (false, true, DEADLINE_FULL_WIDTH, 8),
+        (false, false, DEADLINE_FULL_WIDTH, 4),
+        (false, false, DEADLINE_COMPACT_WIDTH, 0),
+    ];
+    let minimum = label_min + TITLE_MIN_WIDTH;
+    let mut fallback = None;
+    for (group, prefix, deadline, slack) in TIERS {
+        let rest = available.saturating_sub(row_fixed_width(state, deadline, prefix, group));
+        if rest < minimum {
+            continue;
+        }
+        let columns = row_columns_at(rest, label_min, state, deadline, prefix, group, needs);
+        if rest >= minimum + slack {
+            return Some(columns);
+        }
+        // 後續組合的可分配寬度只會更大，先記住目前最寬的可行組合。
+        fallback = Some(columns);
+    }
+    fallback
+}
+
+/// 依欄位組合計算各欄寬（`rest` 為標籤欄與標題欄可分配的寬度）。
+fn row_columns_at(
+    rest: usize,
+    label_min: usize,
+    state: usize,
+    deadline: usize,
+    deadline_prefix: bool,
+    group: bool,
+    needs: RowNeeds,
+) -> RowColumns {
+    let (label, title) = split_text_widths(rest, label_min, needs);
+    RowColumns {
+        label,
+        title,
+        state,
+        deadline,
+        deadline_prefix,
+        compact: deadline == DEADLINE_COMPACT_WIDTH,
+        group,
+    }
+}
+
+/// 在標籤欄與標題欄之間分配寬度。
+///
+/// 空間足夠時兩欄都取內容需求寬度（完整顯示，剩餘寬度留在列尾）；不足時依
+/// 內容需求比例分配，並確保標題欄不低於下限。
+fn split_text_widths(rest: usize, label_min: usize, needs: RowNeeds) -> (usize, usize) {
+    let label_need = needs.label.max(label_min);
+    let title_need = needs.title.max(TITLE_MIN_WIDTH);
+    if label_need + title_need <= rest {
+        return (label_need, title_need);
+    }
+    let total = label_need + title_need;
+    let label = (rest * label_need / total).clamp(label_min, rest.saturating_sub(TITLE_MIN_WIDTH));
+    (label, rest - label)
+}
+
+/// 指定欄位組合的固定寬度（不含標籤欄與標題欄，含所有欄間隔）。
+fn row_fixed_width(state: usize, deadline: usize, prefix: bool, group: bool) -> usize {
+    state
+        + deadline
+        + if prefix {
+            display_width(DEADLINE_PREFIX)
+        } else {
+            0
+        }
+        + if group { GROUP_WIDTH } else { 0 }
+        // 間隔數＝欄數 − 1（標籤｜標題｜（狀態）｜截止｜（小组））。
+        + 2
+        + usize::from(state > 0)
+        + usize::from(group)
+}
+
+/// 清單可完整顯示所需的最小列寬（標籤欄與標題欄均取下限）。
+fn row_min_row_width(label_min: usize, state: usize) -> usize {
+    row_fixed_width(state, DEADLINE_COMPACT_WIDTH, false, false) + label_min + TITLE_MIN_WIDTH
+}
+
+/// 作業列：課程／標題／狀態／截止時間／（小组）。
+fn homework_item(item: &HomeworkItem, columns: RowColumns) -> ListItem<'static> {
+    let deadline = deadline_list_label(item.end_time.as_deref(), columns.compact);
+    let mut spans = vec![
         Span::styled(
-            format!("{:<10} ", truncate(&item.course_name, 10)),
+            format!("{} ", fit_display(&item.course_name, columns.label)),
             THEME.accent_style(),
         ),
-        Span::styled(item.title.clone(), Style::default().fg(THEME.text)),
         Span::styled(
-            format!("  {}", item.state.label()),
+            format!("{} ", fit_display(&item.title, columns.title)),
+            Style::default().fg(THEME.text),
+        ),
+        Span::styled(
+            format!("{} ", fit_display(item.state.label(), columns.state)),
             THEME.status_style(item.state.label()),
         ),
-        Span::styled(
-            format!("  截止 {}", deadline_label(item.end_time.as_deref())),
+        Span::styled(deadline_cell(&deadline, columns), THEME.muted_style()),
+    ];
+    if columns.group {
+        spans.push(Span::styled(
+            fit_display(group_label(item.submit_by_group), GROUP_WIDTH),
             THEME.muted_style(),
-        ),
-        Span::styled(
-            if item.submit_by_group { "  小组" } else { "" },
-            THEME.muted_style(),
-        ),
-    ]))
+        ));
+    }
+    ListItem::new(Line::from(spans))
+}
+
+/// 截止時間欄內容：可含「截止」前綴，後面還有欄位時補上間隔。
+fn deadline_cell(deadline: &str, columns: RowColumns) -> String {
+    let mut cell = String::new();
+    if columns.deadline_prefix {
+        cell.push_str(DEADLINE_PREFIX);
+    }
+    cell.push_str(&fit_display(deadline, columns.deadline));
+    if columns.group {
+        cell.push(' ');
+    }
+    cell
+}
+
+/// 提交單位欄文字（個人作業留白，維持欄位寬度）。
+fn group_label(submit_by_group: bool) -> &'static str {
+    if submit_by_group { "小组" } else { "" }
+}
+
+/// 列表中顯示的截止時間（`compact` 為真時省略年份）。
+fn deadline_list_label(value: Option<&str>, compact: bool) -> String {
+    parse_time(value).map_or_else(
+        || value.map_or_else(|| "无截止时间".to_owned(), |raw| raw.trim().to_owned()),
+        |time| {
+            time.format(if compact {
+                "%m-%d %H:%M"
+            } else {
+                "%Y-%m-%d %H:%M"
+            })
+            .to_string()
+        },
+    )
 }
 
 fn homework_lines(item: &HomeworkItem) -> Vec<Line<'static>> {
@@ -389,8 +767,8 @@ fn flow(frame: &mut Frame, area: Rect, app: &mut App) {
             let (items, detail) = {
                 let data = app.attendance.ready().expect("已确认存在流水数据");
                 let index = app.page_selection().min(data.records.len() - 1);
-                // 清單有邊框：內容寬度需扣除左右框線，狀態欄才能對齊。
-                let columns = flow_columns(usize::from(list_area.width.saturating_sub(2)));
+                // 清單有邊框與高亮符號：欄寬需以實際列寬計算，狀態欄才能對齊。
+                let columns = flow_columns(row_width(list_area));
                 let items = data
                     .records
                     .iter()
@@ -552,13 +930,20 @@ fn lms(frame: &mut Frame, area: Rect, app: &mut App) {
                     empty(frame, area, &title, Some("该课程没有活动"), false);
                 }
                 Some(_) => {
-                    let tabs = activity_tabs(&app.activity_group_counts(), app.lms.activity_group);
-                    let items = app
-                        .lms_activities_in_group()
-                        .iter()
-                        .map(|activity| activity_item(activity))
-                        .collect::<Vec<_>>();
-                    activity_list(frame, area, &title, tabs, items, &mut app.activity_state);
+                    let width = row_width(area);
+                    let needs = RowNeeds::of_activities(&app.lms_activities_in_group());
+                    if let Some(columns) = activity_columns(width, needs) {
+                        let tabs =
+                            activity_tabs(&app.activity_group_counts(), app.lms.activity_group);
+                        let items = app
+                            .lms_activities_in_group()
+                            .iter()
+                            .map(|activity| activity_item(activity, columns))
+                            .collect::<Vec<_>>();
+                        activity_list(frame, area, &title, tabs, items, &mut app.activity_state);
+                    } else {
+                        too_narrow(frame, area, &title, activity_min_row_width(), width);
+                    }
                 }
             }
         }
@@ -643,27 +1028,30 @@ fn render_course_list(
     *state.offset_mut() = visual.offset();
 }
 
-/// 活動清單的單列。
-fn activity_item(activity: &LmsActivity) -> ListItem<'static> {
-    ListItem::new(Line::from(vec![
+/// 活動列：類型／標題／截止時間／（小组）。
+fn activity_item(activity: &LmsActivity, columns: RowColumns) -> ListItem<'static> {
+    let deadline = deadline_list_label(activity.end_time.as_deref(), columns.compact);
+    let mut spans = vec![
         Span::styled(
-            format!("{:<6} ", activity.kind().label()),
-            THEME.muted_style(),
-        ),
-        Span::styled(activity.display_title(), Style::default().fg(THEME.text)),
-        Span::styled(
-            format!("  截止 {}", deadline_label(activity.end_time.as_deref())),
+            format!("{} ", fit_display(activity.kind().label(), columns.label)),
             THEME.muted_style(),
         ),
         Span::styled(
-            if activity.submit_by_group.unwrap_or(false) {
-                "  小组"
-            } else {
-                ""
-            },
-            THEME.muted_style(),
+            format!("{} ", fit_display(&activity.display_title(), columns.title)),
+            Style::default().fg(THEME.text),
         ),
-    ]))
+        Span::styled(deadline_cell(&deadline, columns), THEME.muted_style()),
+    ];
+    if columns.group {
+        spans.push(Span::styled(
+            fit_display(
+                group_label(activity.submit_by_group.unwrap_or(false)),
+                GROUP_WIDTH,
+            ),
+            THEME.muted_style(),
+        ));
+    }
+    ListItem::new(Line::from(spans))
 }
 
 /// 活動分組標籤列（顯示各組計數，並以目前分組高亮）。
@@ -793,6 +1181,39 @@ fn detail_lines(detail: &ActivityDetailView) -> Vec<Line<'static>> {
 
 // ── 共用 ─────────────────────────────────────────────
 
+/// 清單列以外的固定佔用欄寬：外框左右欄線與選取列的高亮符號。
+const ROW_CHROME_WIDTH: u16 = 3;
+
+/// 清單列的可用顯示寬度：扣除外框左右欄線與選取列的高亮符號。
+///
+/// `render_list` 以 `▍` 作為高亮符號，ratatui 會為每一列保留該欄寬；欄寬
+/// 計算若漏扣，最寬的內容會在最後一欄被裁掉。
+fn row_width(area: Rect) -> usize {
+    usize::from(area.width.saturating_sub(ROW_CHROME_WIDTH))
+}
+
+/// 終端過窄、清單無法完整顯示時顯示的提示。
+///
+/// `required` 與 `available` 都是列寬（顯示欄）；訊息換算成使用者看到的終端
+/// 欄數（含側邊欄與外框），方便對照要放大到多寬。
+fn too_narrow(frame: &mut Frame, area: Rect, title: &str, required: usize, available: usize) {
+    // 側邊欄寬度＝畫面總寬 − 內容區寬度。
+    let sidebar = usize::from(frame.area().width.saturating_sub(area.width));
+    let chrome = sidebar + usize::from(ROW_CHROME_WIDTH);
+    let message = format!(
+        "终端过窄，无法完整显示列表：请放大窗口（当前 {} 栏，本页至少需要 {} 栏）",
+        available + chrome,
+        required + chrome
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(message, THEME.muted_style())))
+            .block(THEME.block(title))
+            .style(THEME.base_style())
+            .wrap(Wrap { trim: true }),
+        area,
+    );
+}
+
 fn split_detail(area: Rect, open: bool) -> (Rect, Option<Rect>) {
     if !open {
         return (area, None);
@@ -844,11 +1265,9 @@ fn weekday_label(date: NaiveDate) -> &'static str {
     }
 }
 
+/// 完整截止時間文字（詳情面板用，列表請用 [`deadline_list_label`]）。
 fn deadline_label(value: Option<&str>) -> String {
-    parse_time(value).map_or_else(
-        || value.map_or_else(|| "无截止时间".to_owned(), |raw| raw.trim().to_owned()),
-        |time| time.format("%Y-%m-%d %H:%M").to_string(),
-    )
+    deadline_list_label(value, false)
 }
 
 fn fallback(value: &str) -> &str {
@@ -856,16 +1275,6 @@ fn fallback(value: &str) -> &str {
         "未知"
     } else {
         value
-    }
-}
-
-fn truncate(value: &str, max_chars: usize) -> String {
-    let mut chars = value.chars();
-    let truncated: String = chars.by_ref().take(max_chars).collect();
-    if chars.next().is_some() {
-        format!("{truncated}…")
-    } else {
-        truncated
     }
 }
 

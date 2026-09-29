@@ -110,3 +110,14 @@ fn pads_and_fits_by_display_width() {
     assert_eq!(fit_display("中文中文中文", 9), "中文中文…");
     assert_eq!(fit_display("中文中文中文", 8), "中文中… ");
 }
+
+#[test]
+fn fits_start_aligned_columns_by_display_width() {
+    assert_eq!(pad_display_start("1-2", 5), "  1-2");
+    assert_eq!(pad_display_start("11-12", 5), "11-12");
+    assert_eq!(pad_display_start("中文", 6), "  中文");
+    assert_eq!(fit_display_start("1-2", 5), "  1-2");
+    assert_eq!(fit_display_start("中文中文", 5), "中文…");
+    assert_eq!(display_width(&fit_display_start("中文中文", 5)), 5);
+    assert_eq!(fit_display_start("abc", 0), "");
+}

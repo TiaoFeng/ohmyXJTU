@@ -855,9 +855,12 @@ impl App {
     }
 
     /// 目前頁面的登入狀態文字（底欄顯示用）。
+    ///
+    /// 已登入時只顯示實際訪問方式（「直连」「WebVPN」）——登入正常不需佔用
+    /// 版面；只有「未登录」才需要提示。
     pub fn session_label(&self) -> String {
         match self.site_modes.get(&self.nav.site()) {
-            Some(mode) => format!("已登录 · {}", mode.label()),
+            Some(mode) => mode.label().to_owned(),
             None => "未登录".to_owned(),
         }
     }

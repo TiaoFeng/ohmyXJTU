@@ -109,6 +109,8 @@ pub enum Job {
     OpenActivity {
         /// 活動識別碼。
         activity_id: String,
+        /// 所屬課程識別碼（作業的前端網址需要；其他類型可為 `None`）。
+        course_id: Option<String>,
         /// 活動類型（決定網址來源）。
         kind: ActivityKind,
     },
@@ -1024,8 +1026,12 @@ impl Worker {
             Job::LoadActivityDetail { activity_id } => {
                 Event::ActivityDetail(Box::new(self.load_activity_detail(activity_id)?))
             }
-            Job::OpenActivity { activity_id, kind } => {
-                Event::OpenUrl(self.open_activity_url(activity_id, *kind)?)
+            Job::OpenActivity {
+                activity_id,
+                course_id,
+                kind,
+            } => {
+                Event::OpenUrl(self.open_activity_url(activity_id, course_id.as_deref(), *kind)?)
             }
             _ => return Ok(None),
         };
@@ -1525,20 +1531,35 @@ impl Worker {
 
     /// 解析「開啟活動網頁」的目標網址（WebVPN 模式自動改址）。
     ///
-    /// 課程內容與直播優先使用伺服器回傳的播放器網址；作業、資料等其他
-    /// 類型使用思源學堂首頁（前端路由未經驗證，不拼接自造路徑）。
-    fn open_activity_url(&mut self, activity_id: &str, kind: ActivityKind) -> AppResult<String> {
+    /// - 課程內容與直播：優先使用伺服器回傳的播放器網址。
+    /// - 作業：開啟所屬課程的作業列表（前端路由；缺少課程識別碼時回退首頁）。
+    /// - 資料與其他類型：思源學堂首頁（前端路由未經驗證，不拼接自造路徑）。
+    fn open_activity_url(
+        &mut self,
+        activity_id: &str,
+        course_id: Option<&str>,
+        kind: ActivityKind,
+    ) -> AppResult<String> {
         let mut url = lms::LOGIN_URL.to_owned();
-        if matches!(kind, ActivityKind::Lesson | ActivityKind::LectureLive) {
-            match self.lesson_player_url(activity_id) {
-                Ok(player_url) => url = player_url,
-                Err(err) if err.needs_relogin() => return Err(err),
-                Err(err) => {
-                    self.emit(Event::Notice(format!(
-                        "无法获取播放地址，已改为打开思源学堂首页：{err}"
-                    )));
+        match kind {
+            ActivityKind::Lesson | ActivityKind::LectureLive => {
+                match self.lesson_player_url(activity_id) {
+                    Ok(player_url) => url = player_url,
+                    Err(err) if err.needs_relogin() => return Err(err),
+                    Err(err) => {
+                        self.emit(Event::Notice(format!(
+                            "无法获取播放地址，已改为打开思源学堂首页：{err}"
+                        )));
+                    }
                 }
             }
+            ActivityKind::Homework => match course_id.and_then(lms::course_homework_url) {
+                Some(homework_url) => url = homework_url,
+                None => self.emit(Event::Notice(
+                    "无法确定作业所属课程，已改为打开思源学堂首页".to_owned(),
+                )),
+            },
+            ActivityKind::Material | ActivityKind::Unknown => {}
         }
         self.rewrite_for_mode(url)
     }

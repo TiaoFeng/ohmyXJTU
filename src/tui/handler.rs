@@ -560,11 +560,42 @@ fn change_group(app: &mut App, delta: i32) {
     }
 }
 
-/// 開啟目前活動的網頁（`o`；思源學堂活動與詳情層）。
+/// 開啟目前選取項目的網頁（`o`）：作業頁與思源學堂活動／詳情層。
 fn open_activity(app: &mut App, jobs: &Sender<Job>) {
-    if app.nav != NavItem::Lms {
-        return;
+    match app.nav {
+        NavItem::Homework => open_homework(app, jobs),
+        NavItem::Lms => open_lms_activity(app, jobs),
+        _ => {}
     }
+}
+
+/// 作業頁：開啟目前選取作業所屬課程的作業列表（前端網址由工作執行緒組出）。
+fn open_homework(app: &mut App, jobs: &Sender<Job>) {
+    let target = app.homework.ready().and_then(|data| {
+        data.group_items(app.homework_group)
+            .get(app.page_selection())
+            .map(|item| (item.activity_id.clone(), item.course_id.clone()))
+    });
+    let Some((activity_id, course_id)) = target else {
+        app.set_message("请先选择要打开的作业");
+        return;
+    };
+    app.set_message("正在打开作业网页…");
+    let _ = jobs.send(Job::OpenActivity {
+        activity_id,
+        course_id: Some(course_id),
+        kind: ActivityKind::Homework,
+    });
+}
+
+/// 思源學堂頁：開啟目前活動的網頁（活動與詳情層）；附上所在課程識別碼。
+fn open_lms_activity(app: &mut App, jobs: &Sender<Job>) {
+    let course_id = app
+        .lms
+        .courses
+        .ready()
+        .and_then(|courses| courses.get(app.lms.course_index))
+        .map(|course| course.id.clone());
     let target = match app.lms.level {
         LmsLevel::Activities => {
             let selected = app.page_selection();
@@ -584,7 +615,11 @@ fn open_activity(app: &mut App, jobs: &Sender<Job>) {
         return;
     };
     app.set_message("正在解析活动网页…");
-    let _ = jobs.send(Job::OpenActivity { activity_id, kind });
+    let _ = jobs.send(Job::OpenActivity {
+        activity_id,
+        course_id,
+        kind,
+    });
 }
 
 /// 開啟學期選擇器（作業頁按 `s`）。

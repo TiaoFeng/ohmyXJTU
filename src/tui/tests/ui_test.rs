@@ -17,8 +17,8 @@ use crate::sites::attendance::FlowRecord;
 use crate::sites::lms::{ActivityKind, LmsActivity, LmsCourse};
 use crate::task::HomeworkIssue;
 use crate::tui::app::{
-    ActivityDetailView, App, FlowData, FormState, HomeworkData, LmsLevel, LoginScreen, NavItem,
-    Page, Screen, SettingsState, TermPickerState,
+    ActivityDetailView, App, FlowData, FormState, HomeworkData, LessonEntry, LmsLevel, LoginScreen,
+    NavItem, Page, ScheduleData, Screen, SettingsState, TermPickerState,
 };
 use crate::tui::text::{InputLine, MASK_CHAR};
 use crate::tui::theme::THEME;
@@ -440,19 +440,23 @@ fn footer_shows_site_session_state() {
     });
     let text = screen_text(terminal.backend());
     assert!(
-        text.contains("未登录"),
-        "未登入時底欄應顯示未登录：\n{text}"
+        text.contains("[未登录 自动]"),
+        "未登入時底欄應顯示未登录與訪問策略：\n{text}"
     );
 
-    // 思源學堂已登入：作業頁底欄顯示實際訪問方式。
+    // 思源學堂已登入：作業頁底欄只顯示實際訪問方式（不再贅述「已登录」）。
     app.set_site_mode(SiteKind::Lms, AccessMode::Direct);
     let terminal = draw(WIDTH, HEIGHT, |frame| {
         crate::tui::views::draw(frame, &mut app)
     });
     let text = screen_text(terminal.backend());
     assert!(
-        text.contains("已登录 · 直连"),
-        "登入後底欄應顯示訪問方式：\n{text}"
+        text.contains("[直连 自动]"),
+        "登入後底欄應顯示訪問方式與策略：\n{text}"
+    );
+    assert!(
+        !text.contains("已登录"),
+        "登入狀態正常時不應佔用底欄版面：\n{text}"
     );
 }
 
@@ -1078,5 +1082,309 @@ fn sidebar_left_aligns_labels_and_blinks_dots_before_text() {
     assert!(
         !homework.contains('.'),
         "未載入頁面不應顯示點：{homework:?}"
+    );
+}
+
+/// 課表測試用課程。
+fn lesson_entry(course: &str, classroom: &str, teacher: &str, label: &'static str) -> LessonEntry {
+    LessonEntry {
+        date: chrono::NaiveDate::from_ymd_opt(2026, 9, 29).expect("日期"),
+        sections: "1-2".to_owned(),
+        course_name: course.to_owned(),
+        classroom: classroom.to_owned(),
+        teacher: teacher.to_owned(),
+        weeks: "1-16".to_owned(),
+        status: None,
+        label,
+    }
+}
+
+/// 課表頁資料。
+fn schedule_data(lessons: Vec<LessonEntry>) -> ScheduleData {
+    ScheduleData {
+        semester: "2026-2027-1".to_owned(),
+        week: 4,
+        lessons,
+        skipped: 0,
+    }
+}
+
+#[test]
+fn schedule_rows_align_attendance_column() {
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Schedule;
+    app.schedule = Page::Ready(schedule_data(vec![
+        lesson_entry("高等数学", "主楼A101", "张老师", "正常"),
+        lesson_entry("思想道德与法治", "逸夫科学馆", "欧阳老师", "缺勤"),
+        lesson_entry("大学物理", "中2-2201", "李老师", "请假"),
+    ]));
+    // 選取第三列，避免高亮樣式蓋掉前兩列的狀態色。
+    app.schedule_state.select(Some(2));
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let backend = terminal.backend();
+    let (normal_y, normal_row) = find_row(backend, "高等数学");
+    let (absent_y, absent_row) = find_row(backend, "思想道德与法治");
+
+    let normal_col = column_of(&normal_row, "正常");
+    let absent_col = column_of(&absent_row, "缺勤");
+    assert_eq!(
+        normal_col, absent_col,
+        "考勤狀態欄起點不得受課程、地點與教師長度影響：\n{normal_row}\n{absent_row}"
+    );
+    assert_eq!(
+        column_of(&normal_row, "主楼A101"),
+        column_of(&absent_row, "逸夫科学馆"),
+        "地點欄起點必須一致：\n{normal_row}\n{absent_row}"
+    );
+    assert_eq!(
+        backend.buffer()[(normal_col, normal_y)].fg,
+        THEME.green,
+        "正常應為成功綠"
+    );
+    assert_eq!(
+        backend.buffer()[(absent_col, absent_y)].fg,
+        THEME.red,
+        "缺勤應為錯誤紅"
+    );
+}
+
+#[test]
+fn schedule_rows_hide_teacher_column_when_narrow() {
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Schedule;
+    app.schedule = Page::Ready(schedule_data(vec![lesson_entry(
+        "高等数学",
+        "主楼A101",
+        "张老师",
+        "正常",
+    )]));
+
+    let terminal = draw(70, HEIGHT, |frame| crate::tui::views::draw(frame, &mut app));
+    let text = screen_text(terminal.backend());
+    assert!(text.contains("高等数学"), "課程仍應可見：\n{text}");
+    assert!(text.contains("主楼A101"), "地點仍應可見：\n{text}");
+    assert!(!text.contains("张老师"), "寬度不足時收起教師欄：\n{text}");
+    assert!(text.contains("正常"), "考勤狀態仍應可見：\n{text}");
+}
+
+#[test]
+fn homework_rows_trade_group_and_title_detail_when_narrow() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00+08:00").expect("固定时间");
+    let items = aggregate(
+        &[HomeworkInput {
+            course_id: "2".to_owned(),
+            course_name: "马克思主义基本原理概论".to_owned(),
+            activity_id: "a-2".to_owned(),
+            title: "社会实践报告与社会调查作业".to_owned(),
+            end_time: Some("2026-10-08 23:59:59".to_owned()),
+            submit_by_group: true,
+            submission_count: Some(0),
+            note: None,
+        }],
+        now,
+    );
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Homework;
+    app.homework = Page::Ready(homework_data(items, None));
+
+    // 100 欄：完整欄位（含「截止」前綴與「小组」欄）。
+    let wide = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let (_, wide_row) = find_row(wide.backend(), "马克思");
+    assert!(
+        wide_row.contains("截止 2026-10-08 23:59"),
+        "寬畫面應顯示完整截止時間：\n{wide_row}"
+    );
+    assert!(
+        wide_row.contains("小组"),
+        "寬畫面應顯示提交單位：\n{wide_row}"
+    );
+
+    // 70 欄：收起「小组」欄與「截止」前綴（日期仍完整），標題以省略號截斷。
+    let narrow = draw(70, HEIGHT, |frame| crate::tui::views::draw(frame, &mut app));
+    let (_, narrow_row) = find_row(narrow.backend(), "马克思");
+    assert!(
+        !narrow_row.contains("小组"),
+        "窄畫面應收起提交單位欄：\n{narrow_row}"
+    );
+    assert!(
+        !narrow_row.contains("截止"),
+        "窄畫面應收起「截止」前綴：\n{narrow_row}"
+    );
+    assert!(
+        narrow_row.contains("2026-10-08 23:59"),
+        "窄畫面仍應保留完整日期：\n{narrow_row}"
+    );
+    assert!(
+        narrow_row.contains('…'),
+        "過長的文字應以省略號截斷：\n{narrow_row}"
+    );
+
+    // 64 欄：再壓縮日期（省略年份）。
+    let compact = draw(64, HEIGHT, |frame| crate::tui::views::draw(frame, &mut app));
+    let (_, compact_row) = find_row(compact.backend(), "马克思");
+    assert!(
+        compact_row.contains("10-08 23:59"),
+        "極窄畫面應壓縮為不含年份的日期：\n{compact_row}"
+    );
+    assert!(
+        !compact_row.contains("2026-"),
+        "壓縮後不應再顯示年份：\n{compact_row}"
+    );
+}
+
+#[test]
+fn schedule_rows_show_full_names_when_terminal_is_wide() {
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Schedule;
+    app.schedule = Page::Ready(schedule_data(vec![
+        lesson_entry(
+            "毛泽东思想和中国特色社会主义理论体系概论",
+            "主楼B-204",
+            "赵金瑞",
+            "待考勤",
+        ),
+        lesson_entry("体育-3", "塑胶田径场-田径场", "胡良楠", "待核实"),
+    ]));
+    // 選取第二列，避免高亮樣式影響第一列的擷取。
+    app.schedule_state.select(Some(1));
+
+    let terminal = draw(160, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(
+        text.contains("毛泽东思想和中国特色社会主义理论体系概论"),
+        "足夠寬時課程名稱應完整顯示：\n{text}"
+    );
+    assert!(
+        text.contains("塑胶田径场-田径场"),
+        "足夠寬時地點應完整顯示：\n{text}"
+    );
+    assert!(text.contains("赵金瑞"), "教師欄應完整顯示：\n{text}");
+}
+
+#[test]
+fn homework_rows_show_full_names_when_terminal_is_wide() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00+08:00").expect("固定时间");
+    let items = aggregate(
+        &[
+            HomeworkInput {
+                course_id: "1".to_owned(),
+                course_name: "微电子电路基础".to_owned(),
+                activity_id: "a-1".to_owned(),
+                title: "第五章作业（含附件）".to_owned(),
+                end_time: Some("2026-10-12 15:59:59".to_owned()),
+                submit_by_group: false,
+                submission_count: Some(0),
+                note: None,
+            },
+            homework_input("第一章作业", "2026-10-20 23:59:59", 0),
+        ],
+        now,
+    );
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Homework;
+    app.homework = Page::Ready(homework_data(items, None));
+    // 選取第二列，避免高亮樣式影響第一列的擷取。
+    app.homework_state.select(Some(1));
+
+    let terminal = draw(160, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(
+        text.contains("微电子电路基础"),
+        "足夠寬時課程名稱應完整顯示：\n{text}"
+    );
+    assert!(
+        text.contains("第五章作业（含附件）"),
+        "足夠寬時標題應完整顯示：\n{text}"
+    );
+    assert!(
+        text.contains("截止 2026-10-12 15:59"),
+        "截止時間應完整顯示：\n{text}"
+    );
+}
+
+#[test]
+fn lists_ask_to_enlarge_terminal_when_too_narrow() {
+    // 課表頁：64 欄（全域允許的最小寬度）時課程欄會縮到三個字以下，
+    // 依規則改為提示放大窗口，而不是擠出殘缺的列表。
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Schedule;
+    app.schedule = Page::Ready(schedule_data(vec![lesson_entry(
+        "高等数学",
+        "主楼A101",
+        "张老师",
+        "正常",
+    )]));
+
+    let terminal = draw(64, HEIGHT, |frame| crate::tui::views::draw(frame, &mut app));
+    let text = screen_text(terminal.backend());
+    assert!(text.contains("终端过窄"), "過窄時應提示放大窗口：\n{text}");
+    assert!(
+        !text.contains("主楼A101"),
+        "過窄時不應擠出殘缺的列表：\n{text}"
+    );
+
+    // 放寬兩欄即可正常顯示（不再提示）。
+    let terminal = draw(66, HEIGHT, |frame| crate::tui::views::draw(frame, &mut app));
+    let text = screen_text(terminal.backend());
+    assert!(!text.contains("终端过窄"), "足夠寬時不應提示：\n{text}");
+    assert!(text.contains("高等数"), "足夠寬時應顯示課表：\n{text}");
+}
+
+#[test]
+fn activity_rows_align_title_and_deadline_columns() {
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Lms;
+    app.lms.level = LmsLevel::Activities;
+    app.lms.activity_group = crate::domain::activity::ActivityGroup::Homework;
+    app.lms.activities = Page::Ready(vec![
+        LmsActivity {
+            id: "1".to_owned(),
+            kind: "homework".to_owned(),
+            title: Some("作业一".to_owned()),
+            end_time: Some("2026-10-08 23:59:59".to_owned()),
+            submit_by_group: Some(false),
+            ..lms_activity("1", "homework", None)
+        },
+        LmsActivity {
+            id: "2".to_owned(),
+            kind: "homework".to_owned(),
+            title: Some("很长很长的作业标题示例".to_owned()),
+            end_time: Some("2026-09-20 12:00:00".to_owned()),
+            submit_by_group: Some(true),
+            ..lms_activity("2", "homework", None)
+        },
+    ]);
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let backend = terminal.backend();
+    let (_, first) = find_row(backend, "作业一");
+    let (_, second) = find_row(backend, "很长很长");
+    assert_eq!(
+        column_of(&first, "作业一"),
+        column_of(&second, "很长很长"),
+        "標題欄起點必須一致（類型欄以顯示寬度排版）：\n{first}\n{second}"
+    );
+    assert_eq!(
+        column_of(&first, "2026-10-08"),
+        column_of(&second, "2026-09-20"),
+        "截止欄起點必須一致：\n{first}\n{second}"
     );
 }

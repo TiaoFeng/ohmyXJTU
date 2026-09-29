@@ -1171,6 +1171,7 @@ fn opening_lesson_activity_uses_server_player_url() {
     harness
         .dispatch(Job::OpenActivity {
             activity_id: "23".to_owned(),
+            course_id: None,
             kind: lms::ActivityKind::Lesson,
         })
         .expect("打开活动");
@@ -1191,7 +1192,7 @@ fn opening_lesson_activity_uses_server_player_url() {
 }
 
 #[test]
-fn opening_homework_activity_opens_lms_home() {
+fn opening_homework_activity_opens_course_homework_page() {
     let site = Arc::new(FakeHomeworkSite {
         seen: Arc::new(Mutex::new(Vec::new())),
         courses: serde_json::json!({ "courses": [] }),
@@ -1209,6 +1210,7 @@ fn opening_homework_activity_opens_lms_home() {
     harness
         .dispatch(Job::OpenActivity {
             activity_id: "11".to_owned(),
+            course_id: Some("42".to_owned()),
             kind: lms::ActivityKind::Homework,
         })
         .expect("打开活动");
@@ -1221,9 +1223,70 @@ fn opening_homework_activity_opens_lms_home() {
     assert!(
         harness.saw(|event| matches!(
             event,
+            Event::OpenUrl(url) if url == "https://lms.xjtu.edu.cn/course/42/homework"
+        )),
+        "作業應開啟所屬課程的作業列表（且不得附帶 hash 片段）"
+    );
+}
+
+#[test]
+fn opening_homework_activity_without_usable_course_falls_back_to_home() {
+    let site = Arc::new(FakeHomeworkSite {
+        seen: Arc::new(Mutex::new(Vec::new())),
+        courses: serde_json::json!({ "courses": [] }),
+        activities: Vec::new(),
+        details: Vec::new(),
+        expire_first_submission: false,
+        submissions: AtomicUsize::new(0),
+        attendance_term: None,
+    });
+
+    let system = Arc::clone(&site);
+    let mut harness = harness(move |request| system.handle(request));
+    harness.login_lms_only();
+
+    // 缺少課程識別碼。
+    harness
+        .dispatch(Job::OpenActivity {
+            activity_id: "11".to_owned(),
+            course_id: None,
+            kind: lms::ActivityKind::Homework,
+        })
+        .expect("打开活动");
+    // 識別碼含 URL unsafe 字元：不得拼接進網址。
+    harness
+        .dispatch(Job::OpenActivity {
+            activity_id: "12".to_owned(),
+            course_id: Some("4 2/../x".to_owned()),
+            kind: lms::ActivityKind::Homework,
+        })
+        .expect("打开活动");
+
+    let events = harness.drain_events();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                Event::Notice(message) if message.contains("无法确定作业所属课程")
+            ))
+            .count(),
+        2,
+        "兩種無效識別碼都應告知使用者：{events:?}"
+    );
+    assert!(
+        events.iter().all(|event| !matches!(
+            event,
+            Event::OpenUrl(url) if url.contains("/course/")
+        )),
+        "無效識別碼不得拼出課程網址：{events:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
             Event::OpenUrl(url) if url == "https://lms.xjtu.edu.cn"
         )),
-        "作業應開啟思源學堂首頁"
+        "應回退到思源學堂首頁"
     );
 }
 
@@ -1251,6 +1314,7 @@ fn opening_lesson_in_webvpn_mode_rewrites_url() {
     harness
         .dispatch(Job::OpenActivity {
             activity_id: "23".to_owned(),
+            course_id: None,
             kind: lms::ActivityKind::Lesson,
         })
         .expect("打开活动");
@@ -1278,6 +1342,7 @@ fn opening_lesson_without_player_url_falls_back_to_home() {
     harness
         .dispatch(Job::OpenActivity {
             activity_id: "23".to_owned(),
+            course_id: None,
             kind: lms::ActivityKind::Lesson,
         })
         .expect("打开活动");

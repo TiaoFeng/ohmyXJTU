@@ -5,6 +5,33 @@ use serde_json::json;
 use super::*;
 
 #[test]
+fn course_homework_url_uses_verified_route_without_hash() {
+    assert_eq!(
+        course_homework_url("27465").as_deref(),
+        Some("https://lms.xjtu.edu.cn/course/27465/homework")
+    );
+    assert_eq!(
+        course_homework_url(" 4711 ").as_deref(),
+        Some("https://lms.xjtu.edu.cn/course/4711/homework"),
+        "前後空白應先去除"
+    );
+    // 帶 hash 的啟動網址會讓前端卡死，產出的網址一律不得含 '#'。
+    let url = course_homework_url("27465").expect("網址");
+    assert!(!url.contains('#'), "網址不得附帶 hash 片段：{url}");
+}
+
+#[test]
+fn course_homework_url_rejects_unsafe_identifiers() {
+    for course_id in ["", "   ", "4 2", "4/2", "../x", "42?x=1", "４２"] {
+        assert_eq!(
+            course_homework_url(course_id),
+            None,
+            "識別碼 {course_id:?} 不應被拼接進網址"
+        );
+    }
+}
+
+#[test]
 fn parses_courses_and_skips_incomplete_items() {
     let value = json!([
         {

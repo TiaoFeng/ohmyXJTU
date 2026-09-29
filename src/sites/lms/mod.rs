@@ -28,6 +28,27 @@ pub const POLICY: SitePolicy = SitePolicy {
     use_webvpn_when_off_campus: false,
 };
 
+/// 課程作業列表頁的前端網址（`o` 開啟作業用）。
+///
+/// 路由形態 `/course/<課程識別碼>/homework` 由外部維護中的開源工具核實
+/// （其前端路由表為 `/course/<識別碼>/homework#/`）。這裡**刻意不帶 `#`
+/// 片段**：同一工具的實測記錄指出，帶 hash 的啟動網址會讓 SPA 卡死，
+/// 因此只使用不含 hash 的路徑。
+///
+/// 課程識別碼僅接受 URL 安全字元；無法安全拼接時回傳 `None`，由呼叫端
+/// 決定替代目標。
+pub fn course_homework_url(course_id: &str) -> Option<String> {
+    let course_id = course_id.trim();
+    let safe = !course_id.is_empty()
+        && course_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'));
+    if !safe {
+        return None;
+    }
+    Some(format!("{BASE_URL}/course/{course_id}/homework"))
+}
+
 /// 站點擴充點。
 #[derive(Debug, Default, Clone, Copy)]
 pub struct LmsSite;

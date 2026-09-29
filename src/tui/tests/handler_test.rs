@@ -6,11 +6,12 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::config::AccessPolicy;
 use crate::domain::activity::ActivityGroup;
+use crate::domain::homework::{HomeworkInput, aggregate};
 use crate::sites::lms::{ActivityKind, LmsActivity, LmsCourse};
 use crate::task::Job;
 use crate::tui::app::{
-    ActivityDetailView, App, FormKind, FormState, LmsLevel, LoginScreen, NavItem, Page,
-    ScheduleData, Screen, SettingsState,
+    ActivityDetailView, App, FormKind, FormState, HomeworkData, LmsLevel, LoginScreen, NavItem,
+    Page, ScheduleData, Screen, SettingsState,
 };
 
 use super::handle_key;
@@ -577,12 +578,21 @@ fn o_key_sends_open_activity_for_selected_item() {
         lms_activity("2", "homework"),
     ]);
 
+    // 附上目前課程識別碼：作業需要它組出課程作業列表網址。
+    app.lms.courses = Page::Ready(vec![course_with_term("7", Some("2026-1"))]);
+    app.lms.course_index = 0;
+
     // 過濾後清單的第一項為作業 2。
     press(&mut app, &jobs, KeyCode::Char('o'));
     assert!(matches!(
         rx.try_recv(),
-        Ok(Job::OpenActivity { activity_id, kind })
-            if activity_id == "2" && kind == ActivityKind::Homework
+        Ok(Job::OpenActivity {
+            activity_id,
+            course_id,
+            kind
+        }) if activity_id == "2"
+            && course_id.as_deref() == Some("7")
+            && kind == ActivityKind::Homework
     ));
 
     // 詳情層沿用目前活動。
@@ -605,6 +615,65 @@ fn o_key_sends_open_activity_for_selected_item() {
     app.nav = NavItem::Schedule;
     press(&mut app, &jobs, KeyCode::Char('o'));
     assert!(rx.try_recv().is_err());
+}
+
+/// 建構作業頁資料（單一課程、單一作業）。
+fn homework_page(course_id: &str, activity_id: &str, submitted: usize) -> HomeworkData {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00+08:00").expect("固定时间");
+    let input = HomeworkInput {
+        course_id: course_id.to_owned(),
+        course_name: "编译原理".to_owned(),
+        activity_id: activity_id.to_owned(),
+        title: "第一次作业".to_owned(),
+        end_time: Some("2026-10-01 23:59:59".to_owned()),
+        submit_by_group: false,
+        submission_count: Some(submitted),
+        note: None,
+    };
+    HomeworkData {
+        term_label: Some("2026-2027 学年 第 1 学期".to_owned()),
+        term_source: Some("考勤系统"),
+        courses_included: 1,
+        courses_skipped: 0,
+        term_options: Vec::new(),
+        items: aggregate(&[input], now),
+        issues: Vec::new(),
+        courses_failed: 0,
+        progress: None,
+    }
+}
+
+#[test]
+fn o_key_on_homework_page_opens_selected_homework_course() {
+    let (jobs, rx) = channel();
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Homework;
+
+    // 尚未載入作業：提示而不送任務。
+    press(&mut app, &jobs, KeyCode::Char('o'));
+    assert!(rx.try_recv().is_err(), "未載入時不應送出任務");
+    assert_eq!(app.message_text(), Some("请先选择要打开的作业"));
+
+    app.homework = Page::Ready(homework_page("42", "a-1", 0));
+    press(&mut app, &jobs, KeyCode::Char('o'));
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(Job::OpenActivity {
+            activity_id,
+            course_id,
+            kind
+        }) if activity_id == "a-1"
+            && course_id.as_deref() == Some("42")
+            && kind == ActivityKind::Homework
+    ));
+
+    // 分組過濾後沒有項目：同樣只提示，不送任務。
+    use crate::domain::homework::HomeworkGroup;
+    app.homework_group = HomeworkGroup::Completed;
+    app.set_selection(0);
+    press(&mut app, &jobs, KeyCode::Char('o'));
+    assert!(rx.try_recv().is_err(), "空清單不應送出任務");
 }
 
 #[test]

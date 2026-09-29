@@ -810,6 +810,14 @@ fn lms_courses_partition_current_term_first() {
         "順序應為當前學期 → 歷史 → 未知：\n{text}"
     );
 
+    // 「历史课程」標題與上方課程之間應空出一列。
+    let (header_y, _) = find_row(backend, "历史课程");
+    assert_eq!(
+        header_y,
+        current_y + 2,
+        "歷史分區標題前應留一列空白：\n{text}"
+    );
+
     // 歷史課程以較淺灰色呈現；當前學期課程維持一般文字色。
     let history_col = column_of(&history_row, "课程1");
     assert_eq!(
@@ -987,5 +995,72 @@ fn term_picker_and_login_overlays_keep_continuous_borders() {
     assert_popup_borders(
         terminal.backend(),
         centered_rect(Rect::new(0, 0, WIDTH, HEIGHT), 84, 7),
+    );
+}
+
+/// 找出側邊欄中含有指定文字的列，回傳側邊欄內文（避開同列的內容面板文字）。
+fn find_sidebar_row(backend: &TestBackend, label: &str) -> String {
+    let area = backend.buffer().area;
+    for y in area.y..area.y + area.height {
+        let row = row_text(backend, y);
+        // 列格式：`│側邊欄內文││內容內文│`，第 2 段（索引 1）即側邊欄內文。
+        if let Some(sidebar) = row.split('│').nth(1)
+            && sidebar.contains(label)
+        {
+            return sidebar.to_owned();
+        }
+    }
+    panic!("側邊欄找不到 {label}：\n{backend}");
+}
+
+#[test]
+fn sidebar_centers_labels_with_animated_loading_dots() {
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.schedule.start_loading("正在加载课表与考勤记录…");
+
+    // 相位 3：標籤前顯示「...」；不再出現被截斷的載入說明。
+    app.tick = 3;
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let sidebar = find_sidebar_row(terminal.backend(), "课表");
+    assert!(sidebar.contains("..."), "載入中應顯示三點動畫：{sidebar:?}");
+    assert!(
+        !sidebar.contains("正在"),
+        "側邊欄不得顯示載入說明：{sidebar:?}"
+    );
+
+    // 指示燈＋標籤在側邊欄內框（寬 20）置中：左右留白差 ≤ 1。
+    let dots_col = column_of(&sidebar, "...");
+    let label_col = column_of(&sidebar, "课表");
+    let left_gap = usize::from(dots_col);
+    let right_gap = 20 - (usize::from(label_col) + 4);
+    assert!(
+        left_gap.abs_diff(right_gap) <= 1,
+        "項目應置中：left={left_gap} right={right_gap}（{sidebar:?}）"
+    );
+
+    // 相位 0：指示燈為空白，標籤欄位不得改變（動畫不造成跳動）。
+    app.tick = 0;
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let sidebar_blank = find_sidebar_row(terminal.backend(), "课表");
+    assert!(
+        !sidebar_blank.contains('.'),
+        "相位 0 不應顯示點：{sidebar_blank:?}"
+    );
+    assert_eq!(
+        column_of(&sidebar_blank, "课表"),
+        label_col,
+        "動畫不得讓標籤位移"
+    );
+
+    // 未載入的頁面永遠沒有指示燈。
+    let homework = find_sidebar_row(terminal.backend(), "作业");
+    assert!(
+        !homework.contains('.'),
+        "未載入頁面不應顯示點：{homework:?}"
     );
 }

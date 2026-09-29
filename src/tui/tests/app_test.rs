@@ -182,3 +182,13 @@ fn messages_expire_only_after_ttl() {
     );
     assert_eq!(app.message_text(), Some("登录成功"));
 }
+
+#[test]
+fn animation_tick_advances_for_loading_dots() {
+    let mut app = App::new(AccessPolicy::Auto);
+    assert_eq!(app.tick, 0, "動畫由第 0 相位開始");
+    app.advance_tick();
+    assert_eq!(app.tick, 1);
+    app.advance_tick();
+    assert_eq!(app.tick, 2);
+}

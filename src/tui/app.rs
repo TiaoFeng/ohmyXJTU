@@ -726,6 +726,8 @@ pub struct App {
     pub message: Option<(String, Instant)>,
     /// 是否結束程式。
     pub quit: bool,
+    /// 動畫影格計數（每幀遞增；供載入指示燈動畫使用）。
+    pub tick: u64,
     /// 側邊欄選取狀態。
     pub nav_state: ListState,
     /// 課表選取狀態。
@@ -767,6 +769,7 @@ impl App {
             pending_open: None,
             message: None,
             quit: false,
+            tick: 0,
             nav_state: ListState::default().with_selected(Some(0)),
             schedule_state: ListState::default().with_selected(Some(0)),
             homework_state: ListState::default().with_selected(Some(0)),
@@ -957,6 +960,11 @@ impl App {
         self.message = Some((message.into(), Instant::now()));
     }
 
+    /// 前進一個動畫影格（供載入指示燈動畫使用）。
+    pub fn advance_tick(&mut self) {
+        self.tick = self.tick.wrapping_add(1);
+    }
+
     /// 清除過期的訊息。
     pub fn expire_message(&mut self) {
         if let Some((_, at)) = &self.message
@@ -988,20 +996,6 @@ impl App {
             NavItem::Homework => self.homework.is_loading(),
             NavItem::Attendance => self.attendance.is_loading(),
             NavItem::Lms => self.lms.courses.is_loading(),
-        }
-    }
-
-    /// 目前頁面的載入／錯誤說明。
-    pub fn current_note(&self) -> Option<&str> {
-        match self.nav {
-            NavItem::Schedule => self.schedule.note(),
-            NavItem::Homework => self.homework.note(),
-            NavItem::Attendance => self.attendance.note(),
-            NavItem::Lms => match self.lms.level {
-                LmsLevel::Courses => self.lms.courses.note(),
-                LmsLevel::Activities => self.lms.activities.note(),
-                LmsLevel::Detail => self.lms.detail.note(),
-            },
         }
     }
 }

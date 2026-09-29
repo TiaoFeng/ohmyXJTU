@@ -7,6 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 
 use crate::tui::app::{App, LmsLevel, NavItem, Screen};
+use crate::tui::text::display_width;
 use crate::tui::theme::THEME;
 use crate::tui::views::{content, settings, term_picker};
 
@@ -36,29 +37,14 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
 }
 
+/// 側邊欄載入指示燈的固定寬度（三個點＋一個空白）。
+const LOADING_DOTS_WIDTH: usize = 4;
+
 fn draw_sidebar(frame: &mut Frame, area: Rect, app: &mut App) {
+    let inner_width = usize::from(area.width.saturating_sub(2));
     let items: Vec<ListItem<'static>> = NavItem::ALL
         .iter()
-        .map(|nav| {
-            let marker = if app.is_loading(*nav) { "…" } else { "" };
-            let note = match app.nav == *nav {
-                true => app.current_note().unwrap_or("").to_owned(),
-                false => String::new(),
-            };
-            let note = if note.is_empty() {
-                String::new()
-            } else {
-                format!(" {note}")
-            };
-            ListItem::new(Line::from(vec![
-                Span::styled(
-                    format!(" {:<10}", nav.label()),
-                    Style::default().fg(THEME.text),
-                ),
-                Span::styled(marker, THEME.muted_style()),
-                Span::styled(note, THEME.muted_style()),
-            ]))
-        })
+        .map(|nav| nav_item(*nav, app, inner_width))
         .collect();
 
     app.nav_state.select(Some(app.nav.index()));
@@ -66,6 +52,45 @@ fn draw_sidebar(frame: &mut Frame, area: Rect, app: &mut App) {
         .block(THEME.block("ohmyXJTU"))
         .highlight_style(THEME.highlight_style());
     frame.render_stateful_widget(list, area, &mut app.nav_state);
+}
+
+/// 側邊欄單列：載入指示燈（三點循環動畫）＋置中標籤。
+///
+/// 指示燈佔用固定寬度的前置欄位（未載入時為空白），因此載入狀態與動畫
+/// 都不會讓標籤左右跳動；指示燈與標籤一起在側邊欄內框置中。
+fn nav_item(nav: NavItem, app: &App, width: usize) -> ListItem<'static> {
+    let label = nav.label();
+    let label_width = display_width(label);
+    let pad = width.saturating_sub(LOADING_DOTS_WIDTH + label_width) / 2;
+    let dots = if app.is_loading(nav) {
+        loading_dots(app.tick)
+    } else {
+        ""
+    };
+    // 選取列以 accent 為底，指示燈需改用深色才看得見。
+    let dots_style = if app.nav == nav {
+        Style::default().fg(THEME.base)
+    } else {
+        THEME.accent_style()
+    };
+    ListItem::new(Line::from(vec![
+        Span::raw(" ".repeat(pad)),
+        Span::styled(
+            format!("{dots:<width$}", width = LOADING_DOTS_WIDTH),
+            dots_style,
+        ),
+        Span::styled(label.to_owned(), Style::default().fg(THEME.text)),
+    ]))
+}
+
+/// 載入指示的三點動畫：每幀前進一格並循環，空相位形成閃爍。
+fn loading_dots(tick: u64) -> &'static str {
+    match tick % 4 {
+        0 => "",
+        1 => ".",
+        2 => "..",
+        _ => "...",
+    }
 }
 
 fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {

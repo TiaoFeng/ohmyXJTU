@@ -61,6 +61,7 @@ fn main_loop(
 ) -> AppResult<()> {
     loop {
         app.expire_message();
+        app.advance_tick();
         terminal
             .draw(|frame| views::draw(frame, app))
             .map_err(|err| AppError::Tui(err.to_string()))?;

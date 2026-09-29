@@ -8,6 +8,8 @@ use crate::sites::lms::LmsCourse;
 pub enum CourseRow<'a> {
     /// 分區標題列。
     Header(String),
+    /// 分區之間的空白列。
+    Spacer,
     /// 課程列。
     Course {
         /// 課程在原始清單中的索引（選取與開啟使用）。
@@ -19,6 +21,14 @@ pub enum CourseRow<'a> {
         /// 是否無法解析學期。
         unknown: bool,
     },
+}
+
+/// 加入分區標題；非首個分區前先留一列空白，讓分區界線清楚。
+fn push_section(rows: &mut Vec<CourseRow<'_>>, title: String) {
+    if !rows.is_empty() {
+        rows.push(CourseRow::Spacer);
+    }
+    rows.push(CourseRow::Header(title));
 }
 
 /// 產生課程列：當前學期置頂、其次歷史課程（學期新到舊）、最後是學期未知。
@@ -47,7 +57,7 @@ pub fn course_rows(courses: &[LmsCourse], current: Option<TermCode>) -> Vec<Cour
         .filter(|(_, course)| course_term(course) == Some(current))
         .collect();
     if !current_rows.is_empty() {
-        rows.push(CourseRow::Header(format!("当前学期 · {}", current.label())));
+        push_section(&mut rows, format!("当前学期 · {}", current.label()));
         rows.extend(
             current_rows
                 .into_iter()
@@ -71,7 +81,7 @@ pub fn course_rows(courses: &[LmsCourse], current: Option<TermCode>) -> Vec<Cour
     if !history.is_empty() {
         // 由新到舊；`sort_by_key` 穩定，同學期維持原始順序。
         history.sort_by_key(|entry| std::cmp::Reverse(entry.2));
-        rows.push(CourseRow::Header("历史课程".to_owned()));
+        push_section(&mut rows, "历史课程".to_owned());
         rows.extend(
             history
                 .into_iter()
@@ -90,7 +100,7 @@ pub fn course_rows(courses: &[LmsCourse], current: Option<TermCode>) -> Vec<Cour
         .filter(|(_, course)| course_term(course).is_none())
         .collect();
     if !unknown.is_empty() {
-        rows.push(CourseRow::Header("学期未知".to_owned()));
+        push_section(&mut rows, "学期未知".to_owned());
         rows.extend(
             unknown
                 .into_iter()

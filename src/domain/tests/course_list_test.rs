@@ -27,7 +27,18 @@ fn course_order(rows: &[CourseRow<'_>]) -> Vec<usize> {
     rows.iter()
         .filter_map(|row| match row {
             CourseRow::Course { course_index, .. } => Some(*course_index),
-            CourseRow::Header(_) => None,
+            CourseRow::Header(_) | CourseRow::Spacer => None,
+        })
+        .collect()
+}
+
+/// 列型別序列（H＝標題、S＝空白、C＝課程），供斷言分區留白。
+fn row_kinds(rows: &[CourseRow<'_>]) -> String {
+    rows.iter()
+        .map(|row| match row {
+            CourseRow::Header(_) => 'H',
+            CourseRow::Spacer => 'S',
+            CourseRow::Course { .. } => 'C',
         })
         .collect()
 }
@@ -46,7 +57,7 @@ fn current_term_comes_first_with_history_sorted_newest_first() {
         .iter()
         .filter_map(|row| match row {
             CourseRow::Header(text) => Some(text.as_str()),
-            CourseRow::Course { .. } => None,
+            CourseRow::Course { .. } | CourseRow::Spacer => None,
         })
         .collect();
     assert_eq!(
@@ -68,13 +79,18 @@ fn current_term_comes_first_with_history_sorted_newest_first() {
         .iter()
         .filter_map(|row| match row {
             CourseRow::Course { historical, .. } => Some(*historical),
-            CourseRow::Header(_) => None,
+            CourseRow::Header(_) | CourseRow::Spacer => None,
         })
         .collect();
     assert_eq!(
         historical,
         vec![false, true, true, true],
         "當前學期之外的課程（含未知）都用歷史樣式"
+    );
+    assert_eq!(
+        row_kinds(&rows),
+        "HCSHCCSHC",
+        "每個分區標題前（首個除外）應留一列空白"
     );
 }
 
@@ -113,13 +129,13 @@ fn visual_index_skips_headers_and_maps_every_course() {
     assert_eq!(visual_index(&rows, 1), Some(1), "當前學期課程緊接標題列");
     assert_eq!(
         visual_index(&rows, 0),
-        Some(3),
-        "歷史課程在第二個標題列之後"
+        Some(4),
+        "歷史課程在空白列與標題列之後"
     );
     assert_eq!(
         visual_index(&rows, 2),
-        Some(5),
-        "未知課程在第三個標題列之後"
+        Some(7),
+        "未知課程在空白列與標題列之後"
     );
     assert_eq!(visual_index(&rows, 9), None, "不存在的課程沒有位置");
 }

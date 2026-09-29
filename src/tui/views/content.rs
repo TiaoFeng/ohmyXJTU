@@ -597,6 +597,7 @@ fn course_row_item(row: &CourseRow<'_>) -> ListItem<'static> {
             format!("  {text}"),
             THEME.muted_style(),
         ))),
+        CourseRow::Spacer => ListItem::new(Line::default()),
         CourseRow::Course {
             course, historical, ..
         } => {

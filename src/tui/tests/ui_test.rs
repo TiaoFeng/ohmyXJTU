@@ -1014,34 +1014,51 @@ fn find_sidebar_row(backend: &TestBackend, label: &str) -> String {
 }
 
 #[test]
-fn sidebar_centers_labels_with_animated_loading_dots() {
+fn sidebar_left_aligns_labels_and_blinks_dots_before_text() {
     let mut app = App::new(AccessPolicy::Auto);
     app.set_screen(Screen::Main);
     app.schedule.start_loading("正在加载课表与考勤记录…");
 
-    // 相位 3：標籤前顯示「...」；不再出現被截斷的載入說明。
+    // 相位 3：三點顯示在文字正前方；不再出現被截斷的載入說明。
     app.tick = 3;
     let terminal = draw(WIDTH, HEIGHT, |frame| {
         crate::tui::views::draw(frame, &mut app)
     });
-    let sidebar = find_sidebar_row(terminal.backend(), "课表");
-    assert!(sidebar.contains("..."), "載入中應顯示三點動畫：{sidebar:?}");
+    let backend = terminal.backend();
+    let schedule = find_sidebar_row(backend, "课表");
+    let homework = find_sidebar_row(backend, "作业");
+    let attendance = find_sidebar_row(backend, "考勤流水");
+    let lms = find_sidebar_row(backend, "思源学堂");
+
     assert!(
-        !sidebar.contains("正在"),
-        "側邊欄不得顯示載入說明：{sidebar:?}"
+        schedule.contains("..."),
+        "載入中應顯示三點動畫：{schedule:?}"
+    );
+    assert!(
+        !schedule.contains("正在"),
+        "側邊欄不得顯示載入說明：{schedule:?}"
     );
 
-    // 指示燈＋標籤在側邊欄內框（寬 20）置中：左右留白差 ≤ 1。
-    let dots_col = column_of(&sidebar, "...");
-    let label_col = column_of(&sidebar, "课表");
-    let left_gap = usize::from(dots_col);
-    let right_gap = 20 - (usize::from(label_col) + 4);
-    assert!(
-        left_gap.abs_diff(right_gap) <= 1,
-        "項目應置中：left={left_gap} right={right_gap}（{sidebar:?}）"
+    // 標籤左對齊：所有項目共用同一個文字起始欄。
+    let label_col = column_of(&schedule, "课表");
+    assert_eq!(column_of(&homework, "作业"), label_col, "標籤應左對齊");
+    assert_eq!(column_of(&attendance, "考勤流水"), label_col);
+    assert_eq!(column_of(&lms, "思源学堂"), label_col);
+
+    // 文字欄置中：以最寬標籤（考勤流水，寬 8）計算左右留白相等。
+    let left_margin = usize::from(label_col);
+    let right_margin = 20 - (left_margin + 8);
+    assert_eq!(left_margin, right_margin, "文字欄應置中：{schedule:?}");
+
+    // 三點緊貼文字正前方（不參與置中）。
+    let dots_col = column_of(&schedule, "...");
+    assert_eq!(
+        usize::from(dots_col) + 4,
+        usize::from(label_col),
+        "三點應顯示在文字正前方：{schedule:?}"
     );
 
-    // 相位 0：指示燈為空白，標籤欄位不得改變（動畫不造成跳動）。
+    // 相位 0：三點為空白，標籤欄位不得改變（動畫不造成跳動）。
     app.tick = 0;
     let terminal = draw(WIDTH, HEIGHT, |frame| {
         crate::tui::views::draw(frame, &mut app)
@@ -1058,7 +1075,6 @@ fn sidebar_centers_labels_with_animated_loading_dots() {
     );
 
     // 未載入的頁面永遠沒有指示燈。
-    let homework = find_sidebar_row(terminal.backend(), "作业");
     assert!(
         !homework.contains('.'),
         "未載入頁面不應顯示點：{homework:?}"

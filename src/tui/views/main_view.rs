@@ -42,9 +42,16 @@ const LOADING_DOTS_WIDTH: usize = 4;
 
 fn draw_sidebar(frame: &mut Frame, area: Rect, app: &mut App) {
     let inner_width = usize::from(area.width.saturating_sub(2));
+    // 文字欄起點：以最寬標籤為基準讓整欄置中，標籤之間保持左對齊。
+    let widest = NavItem::ALL
+        .iter()
+        .map(|nav| display_width(nav.label()))
+        .max()
+        .unwrap_or(0);
+    let text_start = inner_width.saturating_sub(widest) / 2;
     let items: Vec<ListItem<'static>> = NavItem::ALL
         .iter()
-        .map(|nav| nav_item(*nav, app, inner_width))
+        .map(|nav| nav_item(*nav, app, text_start))
         .collect();
 
     app.nav_state.select(Some(app.nav.index()));
@@ -54,14 +61,11 @@ fn draw_sidebar(frame: &mut Frame, area: Rect, app: &mut App) {
     frame.render_stateful_widget(list, area, &mut app.nav_state);
 }
 
-/// 側邊欄單列：載入指示燈（三點循環動畫）＋置中標籤。
+/// 側邊欄單列：文字欄（標籤左對齊、整欄置中）＋文字正前方的載入指示燈。
 ///
-/// 指示燈佔用固定寬度的前置欄位（未載入時為空白），因此載入狀態與動畫
-/// 都不會讓標籤左右跳動；指示燈與標籤一起在側邊欄內框置中。
-fn nav_item(nav: NavItem, app: &App, width: usize) -> ListItem<'static> {
-    let label = nav.label();
-    let label_width = display_width(label);
-    let pad = width.saturating_sub(LOADING_DOTS_WIDTH + label_width) / 2;
+/// 指示燈固定佔用文字前方的四欄（未載入時為空白），不參與置中計算；
+/// 因此載入狀態與動畫相位都不會讓標籤左右跳動。
+fn nav_item(nav: NavItem, app: &App, text_start: usize) -> ListItem<'static> {
     let dots = if app.is_loading(nav) {
         loading_dots(app.tick)
     } else {
@@ -74,12 +78,12 @@ fn nav_item(nav: NavItem, app: &App, width: usize) -> ListItem<'static> {
         THEME.accent_style()
     };
     ListItem::new(Line::from(vec![
-        Span::raw(" ".repeat(pad)),
+        Span::raw(" ".repeat(text_start.saturating_sub(LOADING_DOTS_WIDTH))),
         Span::styled(
             format!("{dots:<width$}", width = LOADING_DOTS_WIDTH),
             dots_style,
         ),
-        Span::styled(label.to_owned(), Style::default().fg(THEME.text)),
+        Span::styled(nav.label().to_owned(), Style::default().fg(THEME.text)),
     ]))
 }
 

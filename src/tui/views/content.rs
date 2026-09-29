@@ -5,12 +5,15 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{ListItem, Paragraph, Wrap};
+use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
 
+use crate::domain::activity::ActivityGroup;
 use crate::domain::homework::{HomeworkGroup, HomeworkItem, parse_time};
 use crate::sites::attendance::FlowRecord;
-use crate::sites::lms::LmsCourse;
-use crate::tui::app::{ActivityDetailView, App, HomeworkData, LessonEntry, LmsLevel, NavItem};
+use crate::sites::lms::{ActivityKind, LmsActivity, LmsCourse};
+use crate::tui::app::{
+    ActivityDetailView, App, HomeworkData, LessonEntry, LmsLevel, NavItem, Page,
+};
 use crate::tui::theme::THEME;
 use crate::tui::views::main_view::render_list;
 
@@ -153,9 +156,9 @@ fn homework(frame: &mut Frame, area: Rect, app: &mut App) {
         return;
     };
 
-    // 分組標籤列＋載入狀態（有待核实項目時再加一行原因提示）。
+    // 分組標籤列＋載入狀態（更新失敗或有待核实項目時再加一行提示）。
     let header = homework_tabs(data, app.homework_group, app.homework.is_loading());
-    let warning = homework_warning(data);
+    let warning = homework_warning(app, data);
     let header_height = 1 + u16::from(warning.is_some());
     let [header_area, body_area] =
         Layout::vertical([Constraint::Length(header_height), Constraint::Min(3)]).areas(area);
@@ -228,8 +231,20 @@ fn homework_tabs(data: &HomeworkData, group: HomeworkGroup, loading: bool) -> Li
     Line::from(spans)
 }
 
-/// 「已确认 / 待核实」提示列：仅在存在待核实作业时出现。
-fn homework_warning(data: &HomeworkData) -> Option<Line<'static>> {
+/// 提示列：更新失敗（保留舊資料時）或「已确认 / 待核实」。
+fn homework_warning(app: &App, data: &HomeworkData) -> Option<Line<'static>> {
+    // 重新整理失敗但仍有舊資料：標題仍顯示舊清單，這裡明確告知並提示重試。
+    if let Page::Failed {
+        message,
+        stale: Some(_),
+    } = &app.homework
+    {
+        return Some(Line::from(Span::styled(
+            format!(" 更新失败：{message}（按 r 重试）"),
+            THEME.error_style(),
+        )));
+    }
+
     let unknown = data.group_count(HomeworkGroup::Unknown);
     if unknown == 0 {
         return None;
@@ -468,38 +483,13 @@ fn lms(frame: &mut Frame, area: Rect, app: &mut App) {
                     empty(frame, area, &title, Some("该课程没有活动"), false);
                 }
                 Some(_) => {
-                    let items = {
-                        let activities = app.lms.activities.ready().expect("已确认存在活动数据");
-                        activities
-                            .iter()
-                            .map(|activity| {
-                                let kind = activity.kind().label();
-                                ListItem::new(Line::from(vec![
-                                    Span::styled(format!("{kind:<6} "), THEME.muted_style()),
-                                    Span::styled(
-                                        activity.display_title(),
-                                        Style::default().fg(THEME.text),
-                                    ),
-                                    Span::styled(
-                                        format!(
-                                            "  截止 {}",
-                                            deadline_label(activity.end_time.as_deref())
-                                        ),
-                                        THEME.muted_style(),
-                                    ),
-                                    Span::styled(
-                                        if activity.submit_by_group.unwrap_or(false) {
-                                            "  小组"
-                                        } else {
-                                            ""
-                                        },
-                                        THEME.muted_style(),
-                                    ),
-                                ]))
-                            })
-                            .collect::<Vec<_>>()
-                    };
-                    render_list(frame, area, &title, items, &mut app.activity_state);
+                    let tabs = activity_tabs(&app.activity_group_counts(), app.lms.activity_group);
+                    let items = app
+                        .lms_activities_in_group()
+                        .iter()
+                        .map(|activity| activity_item(activity))
+                        .collect::<Vec<_>>();
+                    activity_list(frame, area, &title, tabs, items, &mut app.activity_state);
                 }
             }
         }
@@ -548,63 +538,145 @@ fn course_item(course: &LmsCourse) -> ListItem<'static> {
     ]))
 }
 
+/// 活動清單的單列。
+fn activity_item(activity: &LmsActivity) -> ListItem<'static> {
+    ListItem::new(Line::from(vec![
+        Span::styled(
+            format!("{:<6} ", activity.kind().label()),
+            THEME.muted_style(),
+        ),
+        Span::styled(activity.display_title(), Style::default().fg(THEME.text)),
+        Span::styled(
+            format!("  截止 {}", deadline_label(activity.end_time.as_deref())),
+            THEME.muted_style(),
+        ),
+        Span::styled(
+            if activity.submit_by_group.unwrap_or(false) {
+                "  小组"
+            } else {
+                ""
+            },
+            THEME.muted_style(),
+        ),
+    ]))
+}
+
+/// 活動分組標籤列（顯示各組計數，並以目前分組高亮）。
+fn activity_tabs(counts: &[(ActivityGroup, usize)], current: ActivityGroup) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for (index, (group, count)) in counts.iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::styled(" · ", THEME.muted_style()));
+        }
+        let style = if *group == current {
+            THEME.accent_style().add_modifier(Modifier::BOLD)
+        } else {
+            THEME.muted_style()
+        };
+        spans.push(Span::styled(format!("{} {count}", group.label()), style));
+    }
+    Line::from(spans)
+}
+
+/// 繪製帶分組標籤列的活動清單；目前分組為空時顯示提示。
+fn activity_list(
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    tabs: Line<'static>,
+    items: Vec<ListItem<'static>>,
+    state: &mut ListState,
+) {
+    let block = THEME.block(title);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let [tabs_area, list_area] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(inner);
+    frame.render_widget(Paragraph::new(tabs).style(THEME.base_style()), tabs_area);
+
+    if items.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "本组暂无活动（[ / ] 切换分组）",
+                THEME.muted_style(),
+            )))
+            .style(THEME.base_style()),
+            list_area,
+        );
+        return;
+    }
+
+    let list = List::new(items)
+        .highlight_style(THEME.highlight_style())
+        .highlight_symbol("▍")
+        .style(THEME.base_style());
+    frame.render_stateful_widget(list, list_area, state);
+}
+
 fn detail_lines(detail: &ActivityDetailView) -> Vec<Line<'static>> {
+    let mut meta = format!(
+        "类型：{}　截止：{}",
+        detail.kind.label(),
+        deadline_label(detail.end_time.as_deref())
+    );
+    if detail.kind == ActivityKind::Homework {
+        meta.push_str(&format!(
+            "　提交单位：{}",
+            if detail.submit_by_group {
+                "小组"
+            } else {
+                "个人"
+            }
+        ));
+    }
     let mut lines = vec![
         Line::from(Span::styled(
             detail.title.clone(),
             Style::default().fg(THEME.text).add_modifier(Modifier::BOLD),
         )),
-        Line::from(Span::styled(
-            format!(
-                "类型：{}　截止：{}　提交单位：{}",
-                detail.kind,
-                deadline_label(detail.end_time.as_deref()),
-                if detail.submit_by_group {
-                    "小组"
-                } else {
-                    "个人"
-                }
-            ),
-            THEME.muted_style(),
-        )),
+        Line::from(Span::styled(meta, THEME.muted_style())),
     ];
 
-    match &detail.submissions {
-        Some(submissions) if submissions.is_empty() => {
-            lines.push(Line::from(Span::styled(
-                "提交记录：暂无（视为未提交）",
-                THEME.status_style("待提交"),
-            )));
-        }
-        Some(submissions) => {
-            lines.push(Line::from(Span::styled(
-                format!("提交记录：{} 条", submissions.len()),
-                THEME.status_style("正常"),
-            )));
-            for submission in submissions.iter().take(5) {
-                let score = submission
-                    .score
-                    .as_ref()
-                    .map_or(String::new(), |score| format!("　分数：{score}"));
+    // 提交狀態只適用於作業；其他類型不顯示「待核实」。
+    if detail.kind == ActivityKind::Homework {
+        match &detail.submissions {
+            Some(submissions) if submissions.is_empty() => {
                 lines.push(Line::from(Span::styled(
-                    format!(
-                        "· {}（最新版本：{}）{score}",
-                        submission.timestamp().unwrap_or("未知时间"),
-                        if submission.is_latest_version.unwrap_or(false) {
-                            "是"
-                        } else {
-                            "否"
-                        }
-                    ),
-                    THEME.muted_style(),
+                    "提交记录：暂无（视为未提交）",
+                    THEME.status_style("待提交"),
                 )));
             }
-        }
-        None => {
-            lines.push(Line::from(Span::styled(
-                "提交记录：无法确认（待核实）",
-                THEME.status_style("待核实"),
-            )));
+            Some(submissions) => {
+                lines.push(Line::from(Span::styled(
+                    format!("提交记录：{} 条", submissions.len()),
+                    THEME.status_style("正常"),
+                )));
+                for submission in submissions.iter().take(5) {
+                    let score = submission
+                        .score
+                        .as_ref()
+                        .map_or(String::new(), |score| format!("　分数：{score}"));
+                    lines.push(Line::from(Span::styled(
+                        format!(
+                            "· {}（最新版本：{}）{score}",
+                            submission.timestamp().unwrap_or("未知时间"),
+                            if submission.is_latest_version.unwrap_or(false) {
+                                "是"
+                            } else {
+                                "否"
+                            }
+                        ),
+                        THEME.muted_style(),
+                    )));
+                }
+            }
+            None => {
+                lines.push(Line::from(Span::styled(
+                    "提交记录：无法确认（待核实）",
+                    THEME.status_style("待核实"),
+                )));
+            }
         }
     }
 

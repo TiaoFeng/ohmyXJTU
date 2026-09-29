@@ -58,6 +58,25 @@ fn parses_activities_and_kinds() {
 }
 
 #[test]
+fn classifies_server_types_case_insensitively() {
+    assert_eq!(
+        ActivityKind::from_server(" Homework "),
+        ActivityKind::Homework
+    );
+    assert_eq!(
+        ActivityKind::from_server("LECTURE_LIVE"),
+        ActivityKind::LectureLive
+    );
+    assert_eq!(
+        ActivityKind::from_server("Lecture_Live"),
+        ActivityKind::LectureLive
+    );
+    assert_eq!(ActivityKind::from_server("lesson"), ActivityKind::Lesson);
+    assert_eq!(ActivityKind::from_server("mystery"), ActivityKind::Unknown);
+    assert_eq!(ActivityKind::from_server(""), ActivityKind::Unknown);
+}
+
+#[test]
 fn parses_submission_lists() {
     let value = json!({
         "list": [

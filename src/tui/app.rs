@@ -8,11 +8,12 @@ use chrono::NaiveDate;
 use ratatui::widgets::ListState;
 
 use crate::config::AccessPolicy;
+use crate::domain::activity::{self, ActivityGroup};
 use crate::domain::homework::{HomeworkGroup, HomeworkItem};
 use crate::domain::semester::TermCode;
 use crate::session::{AccessMode, SiteKind};
 use crate::sites::attendance::{AttendanceStatus, FlowRecord};
-use crate::sites::lms::{LmsActivity, LmsCourse, LmsSubmission};
+use crate::sites::lms::{ActivityKind, LmsActivity, LmsCourse, LmsSubmission};
 use crate::task::{FailedTarget, HomeworkIssue};
 use crate::tui::text::InputLine;
 
@@ -223,15 +224,17 @@ pub struct FlowData {
 /// 活動詳情檢視資料。
 #[derive(Debug, Clone, Default)]
 pub struct ActivityDetailView {
+    /// 活動識別碼。
+    pub id: String,
     /// 標題。
     pub title: String,
-    /// 類型標籤。
-    pub kind: String,
+    /// 活動類型。
+    pub kind: ActivityKind,
     /// 截止時間。
     pub end_time: Option<String>,
     /// 是否小組作業。
     pub submit_by_group: bool,
-    /// 提交記錄；`None` 代表無法確認。
+    /// 提交記錄；`None` 代表無法確認（僅作業有提交狀態）。
     pub submissions: Option<Vec<LmsSubmission>>,
     /// 補充說明（例如無法確認提交狀態的原因）。
     pub note: Option<String>,
@@ -260,8 +263,10 @@ pub struct LmsState {
     pub detail: Page<ActivityDetailView>,
     /// 選取的課程索引。
     pub course_index: usize,
-    /// 選取的活動索引。
+    /// 選取的活動索引（相對於目前分組過濾後的清單）。
     pub activity_index: usize,
+    /// 活動列表目前顯示的分組。
+    pub activity_group: ActivityGroup,
     /// 目前層級。
     pub level: LmsLevel,
 }
@@ -487,6 +492,22 @@ impl FormState {
         )
     }
 
+    /// 清空敏感欄位（口令與密碼）；保留非敏感輸入（例如帳號）。
+    pub fn clear_secrets(&mut self) {
+        let sensitive: &[usize] = match self.kind {
+            FormKind::Setup => &[0, 1, 3, 4],
+            FormKind::Unlock => &[0],
+            FormKind::LoginRetry => &[1, 2],
+            FormKind::ChangeAccount => &[0, 2, 3],
+            FormKind::ChangePassphrase => &[0, 1, 2],
+        };
+        for index in sensitive {
+            if let Some(field) = self.fields.get_mut(*index) {
+                field.value.clear();
+            }
+        }
+    }
+
     fn new(kind: FormKind, fields: Vec<FormField>) -> Self {
         Self {
             kind,
@@ -649,14 +670,15 @@ impl SettingsState {
 }
 
 /// 畫面。
+///
+/// 根畫面只代表「底層內容」；登入互動是疊加在主畫面之上的覆蓋層
+/// （見 [`App::login`]），不會替換根畫面。
 #[derive(Debug)]
 pub enum Screen {
     /// 首次設定。
     Setup(FormState),
     /// 解鎖。
     Unlock(FormState),
-    /// 登入互動。
-    Login(Box<LoginScreen>),
     /// 主畫面。
     Main,
     /// 帳戶設定彈窗。
@@ -672,6 +694,8 @@ pub enum Screen {
 pub struct App {
     /// 目前畫面。
     pub screen: Screen,
+    /// 登入互動覆蓋層（進度、驗證碼、簡訊、失敗與重新輸入憑證）。
+    pub login: Option<Box<LoginScreen>>,
     /// 目前頁面。
     pub nav: NavItem,
     /// 課表頁。
@@ -692,6 +716,8 @@ pub struct App {
     pub site_modes: HashMap<SiteKind, AccessMode>,
     /// 驗證碼圖片路徑（顯示於狀態列）。
     pub captcha_path: Option<PathBuf>,
+    /// 等待主迴圈以系統瀏覽器開啟的網址。
+    pub pending_open: Option<String>,
     /// 暫時訊息（自動過期）。
     pub message: Option<(String, Instant)>,
     /// 是否結束程式。
@@ -723,6 +749,7 @@ impl App {
     pub fn new(access_policy: AccessPolicy) -> Self {
         Self {
             screen: Screen::Unlock(FormState::unlock()),
+            login: None,
             nav: NavItem::Schedule,
             schedule: Page::Idle,
             homework: Page::Idle,
@@ -733,6 +760,7 @@ impl App {
             access_policy,
             site_modes: HashMap::new(),
             captcha_path: None,
+            pending_open: None,
             message: None,
             quit: false,
             nav_state: ListState::default().with_selected(Some(0)),
@@ -759,7 +787,7 @@ impl App {
             NavItem::Attendance => self.attendance.ready().map_or(0, |data| data.records.len()),
             NavItem::Lms => match self.lms.level {
                 LmsLevel::Courses => self.lms.courses.ready().map_or(0, Vec::len),
-                LmsLevel::Activities => self.lms.activities.ready().map_or(0, Vec::len),
+                LmsLevel::Activities => self.lms_activities_in_group().len(),
                 LmsLevel::Detail => 0,
             },
         }
@@ -822,6 +850,22 @@ impl App {
         }
     }
 
+    /// 目前分組的活動（過濾＋穩定排序；供繪製、選取與開啟使用）。
+    pub fn lms_activities_in_group(&self) -> Vec<&LmsActivity> {
+        let Some(activities) = self.lms.activities.ready() else {
+            return Vec::new();
+        };
+        activity::grouped(activities, self.lms.activity_group)
+    }
+
+    /// 各活動分組的項目數（依顯示順序）。
+    pub fn activity_group_counts(&self) -> [(ActivityGroup, usize); ActivityGroup::ALL.len()] {
+        let Some(activities) = self.lms.activities.ready() else {
+            return ActivityGroup::ALL.map(|group| (group, 0));
+        };
+        activity::counts(activities)
+    }
+
     /// 設定目前頁面的選取索引。
     pub fn set_selection(&mut self, index: usize) {
         match self.nav {
@@ -844,7 +888,10 @@ impl App {
             FailedTarget::Courses => self.lms.courses.fail(message),
             FailedTarget::Activities => self.lms.activities.fail(message),
             FailedTarget::ActivityDetail => self.lms.detail.fail(message),
-            FailedTarget::Login | FailedTarget::Settings => {}
+            FailedTarget::Login
+            | FailedTarget::Credentials
+            | FailedTarget::ActivityOpen
+            | FailedTarget::Settings => {}
         }
     }
 

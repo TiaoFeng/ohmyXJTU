@@ -144,13 +144,17 @@ impl<'a> LmsApi<'a> {
 
     /// 活動詳情；作業會一併抓取提交記錄。
     pub fn activity(&mut self, activity_id: &str) -> AppResult<ActivityDetail> {
-        let activity = self.activity_detail(activity_id)?;
+        let activity = self.fetch_activity_detail(activity_id)?;
+        self.activity_from(activity)
+    }
 
+    /// 以既有詳情組出活動詳情（作業會一併抓取提交記錄）。
+    pub fn activity_from(&mut self, activity: LmsActivity) -> AppResult<ActivityDetail> {
         let mut note = None;
         let submissions = if activity.kind() == ActivityKind::Homework {
             // 詳情中的 submit_by_group 是權威的小組判定（簡要列表常缺少此欄位）。
             let submit_by_group = activity.submit_by_group.unwrap_or(false);
-            match self.submissions(activity_id, submit_by_group, activity.group_id.as_deref()) {
+            match self.submissions(&activity.id, submit_by_group, activity.group_id.as_deref()) {
                 Ok(list) => Some(list),
                 // 登入態失效必須向上傳播，交由統一重登流程處理。
                 Err(err) if err.needs_relogin() => return Err(err),
@@ -178,7 +182,12 @@ impl<'a> LmsApi<'a> {
     /// 只需調整此處）；小組作業一律以詳情確認的 `group_id` 查詢小組提交
     /// 記錄，缺 `group_id` 時保持「待核实」並說明原因。
     pub fn submission_summary(&mut self, activity_id: &str) -> AppResult<SubmissionSummary> {
-        let detail = self.activity_detail(activity_id)?;
+        let detail = self.fetch_activity_detail(activity_id)?;
+        self.submission_summary_for(&detail)
+    }
+
+    /// 以既有詳情計算提交摘要（個人作業可省一次提交列表請求）。
+    pub fn submission_summary_for(&mut self, detail: &LmsActivity) -> AppResult<SubmissionSummary> {
         let submit_by_group = detail.submit_by_group.unwrap_or(false);
 
         if !submit_by_group && let Some(count) = detail.user_submit_count {
@@ -189,7 +198,7 @@ impl<'a> LmsApi<'a> {
             });
         }
 
-        match self.submissions(activity_id, submit_by_group, detail.group_id.as_deref()) {
+        match self.submissions(&detail.id, submit_by_group, detail.group_id.as_deref()) {
             Ok(list) => Ok(SubmissionSummary {
                 submit_by_group,
                 count: Some(list.effective_count()),
@@ -206,8 +215,28 @@ impl<'a> LmsApi<'a> {
         }
     }
 
-    /// 取得活動詳情（不含提交記錄）。
-    fn activity_detail(&mut self, activity_id: &str) -> AppResult<LmsActivity> {
+    /// 課程內容（lesson／直播）的播放器網址。
+    ///
+    /// 由伺服器回傳（附帶存取 token），不自行拼接前端路徑；
+    /// 來源為參考實作的 `_get_lesson_player_url`。
+    pub fn lesson_player_url(&mut self, activity_id: &str) -> AppResult<String> {
+        let response = self.session.send(
+            SiteKind::Lms,
+            HttpRequest::get(format!(
+                "{BASE_URL}/api/lessons/{activity_id}/player-url?from_page=course"
+            )),
+        )?;
+        let value: Value = parse_json(&response, "查询播放地址")?;
+        value
+            .get("url")
+            .and_then(Value::as_str)
+            .filter(|url| !url.trim().is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| AppError::protocol("播放器接口未返回网址"))
+    }
+
+    /// 取得活動詳情（不含提交記錄）；供需要自行快取的呼叫端使用。
+    pub fn fetch_activity_detail(&mut self, activity_id: &str) -> AppResult<LmsActivity> {
         let response = self.session.send(
             SiteKind::Lms,
             HttpRequest::get(format!("{BASE_URL}/api/activities/{activity_id}")),

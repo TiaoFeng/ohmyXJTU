@@ -8,7 +8,7 @@ use serde::Deserialize;
 use super::super::{optional_string_or_number, string_or_number};
 
 /// 活動類型。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ActivityKind {
     /// 作業。
     Homework,
@@ -19,13 +19,14 @@ pub enum ActivityKind {
     /// 直播。
     LectureLive,
     /// 其他或未知類型。
+    #[default]
     Unknown,
 }
 
 impl ActivityKind {
-    /// 由伺服器字串對應類型。
+    /// 由伺服器字串對應類型（去除前後空白、忽略大小寫）。
     pub fn from_server(value: &str) -> Self {
-        match value.trim() {
+        match value.trim().to_ascii_lowercase().as_str() {
             "homework" => Self::Homework,
             "material" => Self::Material,
             "lesson" => Self::Lesson,

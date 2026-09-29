@@ -12,9 +12,11 @@ use crate::config::AccessPolicy;
 use crate::domain::homework::{HomeworkGroup, HomeworkInput, aggregate};
 use crate::domain::semester::TermCode;
 use crate::session::{AccessMode, SiteKind};
+use crate::sites::lms::{ActivityKind, LmsActivity};
 use crate::task::HomeworkIssue;
 use crate::tui::app::{
-    App, FormState, HomeworkData, LoginScreen, NavItem, Page, Screen, TermPickerState,
+    ActivityDetailView, App, FormState, HomeworkData, LmsLevel, LoginScreen, NavItem, Page, Screen,
+    TermPickerState,
 };
 use crate::tui::text::{InputLine, MASK_CHAR};
 
@@ -446,5 +448,151 @@ fn footer_shows_site_session_state() {
     assert!(
         text.contains("已登录 · 直连"),
         "登入後底欄應顯示訪問方式：\n{text}"
+    );
+}
+
+#[test]
+fn homework_failure_with_stale_data_shows_inline_warning() {
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Homework;
+    app.homework = Page::Ready(HomeworkData::default());
+    app.homework.fail("网络连接失败");
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(
+        text.contains("更新失败：网络连接失败（按 r 重试）"),
+        "保留舊資料時應在頁面內顯示更新失敗：\n{text}"
+    );
+}
+
+#[test]
+fn login_overlay_keeps_main_view_behind_popup() {
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Homework;
+    app.homework = Page::Ready(HomeworkData::default());
+    app.login = Some(Box::new(LoginScreen::Progress {
+        note: "正在登录考勤服务…".to_owned(),
+    }));
+
+    let render = |app: &mut App| draw(WIDTH, HEIGHT, |frame| crate::tui::views::draw(frame, app));
+
+    let first = render(&mut app);
+    let text = screen_text(first.backend());
+    assert!(text.contains("课表"), "底層側欄應保持可見：\n{text}");
+    assert!(text.contains("未登录"), "底層底欄應保持可見：\n{text}");
+    assert!(
+        text.contains("正在登录考勤服务…"),
+        "彈窗內容應顯示：\n{text}"
+    );
+
+    // 事件只更新彈窗內容：換成驗證碼畫面後，底層仍完整可見（不出現黑屏）。
+    app.login = Some(Box::new(LoginScreen::Captcha {
+        path: PathBuf::from("/tmp/captcha.png"),
+        input: InputLine::with_value("a1b2"),
+        error: None,
+    }));
+    let second = render(&mut app);
+    let text = screen_text(second.backend());
+    assert!(text.contains("课表"), "換畫面後底層仍應可見：\n{text}");
+    assert!(text.contains("a1b2"), "新彈窗內容應顯示：\n{text}");
+}
+
+/// 思源學堂測試用活動。
+fn lms_activity(id: &str, kind: &str, end: Option<&str>) -> LmsActivity {
+    LmsActivity {
+        id: id.to_owned(),
+        course_id: None,
+        kind: kind.to_owned(),
+        title: Some(format!("活动 {id}")),
+        start_time: None,
+        end_time: end.map(str::to_owned),
+        submit_by_group: None,
+        group_id: None,
+        description: None,
+        user_submit_count: None,
+        published: None,
+    }
+}
+
+#[test]
+fn draws_activity_groups_with_counts_and_empty_state() {
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Lms;
+    app.lms.level = LmsLevel::Activities;
+    app.lms.activities = Page::Ready(vec![
+        lms_activity("1", "homework", Some("2026-10-01 23:59:59")),
+        lms_activity("2", "material", None),
+    ]);
+    app.lms.activity_group = crate::domain::activity::ActivityGroup::Homework;
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(text.contains("直播 0"), "應顯示各組計數：\n{text}");
+    assert!(text.contains("作业 1"), "應顯示作業組計數：\n{text}");
+    assert!(text.contains("资料 1"), "應顯示資料組計數：\n{text}");
+    assert!(text.contains("活动 1"), "應只顯示目前分組的項目：\n{text}");
+
+    // 空組顯示提示，且不顯示其他組的項目。
+    app.lms.activity_group = crate::domain::activity::ActivityGroup::LectureLive;
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(text.contains("本组暂无活动"), "空組應顯示提示：\n{text}");
+    assert!(!text.contains("活动 1"), "空組不應顯示其他組：\n{text}");
+}
+
+#[test]
+fn activity_detail_hides_submission_section_for_non_homework() {
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Lms;
+    app.lms.level = LmsLevel::Detail;
+    app.lms.detail = Page::Ready(ActivityDetailView {
+        id: "1".to_owned(),
+        title: "直播课".to_owned(),
+        kind: ActivityKind::LectureLive,
+        end_time: Some("2026-10-01 12:00:00".to_owned()),
+        submit_by_group: false,
+        submissions: None,
+        note: None,
+    });
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(text.contains("类型：直播"), "應顯示活動類型：\n{text}");
+    assert!(!text.contains("待核实"), "非作業不應顯示待核实：\n{text}");
+    assert!(
+        !text.contains("提交记录"),
+        "非作業不應顯示提交記錄區：\n{text}"
+    );
+
+    // 作業仍顯示提交狀態（未知時為待核实）。
+    app.lms.detail = Page::Ready(ActivityDetailView {
+        id: "2".to_owned(),
+        title: "作业A".to_owned(),
+        kind: ActivityKind::Homework,
+        end_time: None,
+        submit_by_group: false,
+        submissions: None,
+        note: None,
+    });
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(
+        text.contains("提交记录：无法确认（待核实）"),
+        "作業未知提交狀態應顯示待核实：\n{text}"
     );
 }

@@ -70,6 +70,8 @@ pub struct SessionManager {
     pending: Option<(SiteKind, PendingStage)>,
     sites: HashMap<SiteKind, SiteState>,
     credentials: Option<Credentials>,
+    /// 已送出的站點請求數（診斷用；不含校園網探測）。
+    requests: usize,
 }
 
 impl SessionManager {
@@ -136,6 +138,7 @@ impl SessionManager {
             direct,
             webvpn,
             probe: None,
+            requests: 0,
             resolved: HashMap::new(),
             pending: None,
             sites: HashMap::new(),
@@ -182,6 +185,11 @@ impl SessionManager {
     /// 站點目前使用的訪問方式（尚未解析時為 `None`）。
     pub fn access_mode(&self, site: SiteKind) -> Option<AccessMode> {
         self.sites.get(&site).map(|state| state.access_mode)
+    }
+
+    /// 已送出的站點請求數（診斷用；不含校園網探測）。
+    pub fn request_count(&self) -> usize {
+        self.requests
     }
 
     /// 站點內的識別碼（例如思源學堂的使用者 ID）。
@@ -355,6 +363,7 @@ impl SessionManager {
         }
 
         let client = self.backend(mode).client.clone();
+        self.requests += 1;
         let response = client
             .send(request)
             .map_err(|err| with_site_context(err, site, mode))?;

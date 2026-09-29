@@ -30,7 +30,6 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 None,
             );
         }
-        Screen::Login(screen) => crate::tui::ui::draw_login(frame, screen),
         Screen::SettingsForm(form) => {
             let title = match form.kind {
                 crate::tui::app::FormKind::ChangeAccount => "修改账号",
@@ -45,5 +44,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             );
         }
         Screen::Main | Screen::Settings(_) | Screen::TermPicker(_) => main_view::draw(frame, app),
+    }
+
+    // 登入互動覆蓋層：底層（表單或主畫面）先完整繪製，彈窗只覆蓋自身區域，
+    // 避免整屏清空造成黑底與閃爍。
+    if let Some(screen) = &app.login {
+        crate::tui::ui::draw_login(frame, screen);
     }
 }

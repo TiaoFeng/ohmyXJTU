@@ -21,7 +21,10 @@ use crate::domain::homework::HomeworkGroup;
 use crate::error::{AppError, AppResult};
 use crate::task::{self, Event, FailedTarget, Job};
 
-use app::{App, FormState, HomeworkData, LoginScreen, Page, Screen, TermPickerState};
+use app::{
+    App, FormKind, FormState, HomeworkData, LoginScreen, Page, Screen, SettingsState,
+    TermPickerState,
+};
 use text::InputLine;
 
 /// 事件輪詢間隔。
@@ -74,6 +77,14 @@ fn main_loop(
             apply_event(app, event, jobs);
         }
 
+        // 事件要求的瀏覽器開啟：在這裡執行，錯誤以狀態訊息回報。
+        if let Some(url) = app.pending_open.take() {
+            match crate::system::browser::open_url(&url) {
+                Ok(()) => app.set_message("已在浏览器打开：如需登录请在浏览器完成登录"),
+                Err(err) => app.set_message(format!("打开网页失败：{err}")),
+            }
+        }
+
         if app.quit {
             return Ok(());
         }
@@ -84,8 +95,9 @@ fn main_loop(
 fn apply_event(app: &mut App, event: Event, jobs: &Sender<Job>) {
     match event {
         Event::VaultReady => {
-            // 憑證已就緒：直接進入主畫面（不預先登入任何站點），
-            // 由目前頁面按需觸發惰性登入。
+            // 憑證已就緒：清掉殘留的登入覆蓋層，直接進入主畫面
+            //（不預先登入任何站點），由目前頁面按需觸發惰性登入。
+            app.login = None;
             if app.is_main() {
                 // 修改帳號後回到主畫面：舊資料屬於舊帳號，強制刷新目前頁面。
                 let nav = app.nav;
@@ -97,42 +109,38 @@ fn apply_event(app: &mut App, event: Event, jobs: &Sender<Job>) {
             app.set_message("凭证已就绪");
         }
         Event::LoginProgress(note) => {
-            app.set_screen(Screen::Login(Box::new(LoginScreen::Progress { note })));
+            // 登入互動是覆蓋層：底層畫面保持不變，事件只更新彈窗內容。
+            app.login = Some(Box::new(LoginScreen::Progress { note }));
         }
         Event::LoginNeedsCaptcha(path) => {
             app.captcha_path = Some(path.clone());
-            let previous_error = match &app.screen {
-                Screen::Login(screen) => match screen.as_ref() {
-                    LoginScreen::Captcha { error, .. } => error.clone(),
-                    _ => None,
-                },
+            let previous_error = match app.login.as_deref() {
+                Some(LoginScreen::Captcha { error, .. }) => error.clone(),
                 _ => None,
             };
-            app.set_screen(Screen::Login(Box::new(LoginScreen::Captcha {
+            app.login = Some(Box::new(LoginScreen::Captcha {
                 path,
                 input: InputLine::new(),
                 error: previous_error,
-            })));
+            }));
         }
         Event::LoginNeedsMfa { phone, sent } => {
-            let (input, error) = match &app.screen {
-                Screen::Login(screen) => match screen.as_ref() {
-                    LoginScreen::Mfa { input, error, .. } => (input.clone(), error.clone()),
-                    _ => (InputLine::new(), None),
-                },
+            let (input, error) = match app.login.as_deref() {
+                Some(LoginScreen::Mfa { input, error, .. }) => (input.clone(), error.clone()),
                 _ => (InputLine::new(), None),
             };
-            app.set_screen(Screen::Login(Box::new(LoginScreen::Mfa {
+            app.login = Some(Box::new(LoginScreen::Mfa {
                 phone,
                 sent,
                 input,
                 error,
-            })));
+            }));
         }
         Event::LoginFailed(message) => {
             set_login_error(app, message);
         }
         Event::LoginSucceeded { site, mode } => {
+            app.login = None;
             match mode {
                 Some(mode) => app.set_site_mode(site, mode),
                 None => app.clear_site_mode(site),
@@ -159,6 +167,7 @@ fn apply_event(app: &mut App, event: Event, jobs: &Sender<Job>) {
         Event::Homework(update) => {
             let progress = update.progress;
             let finished = progress.is_none();
+            let elapsed = update.elapsed;
             let unfinished = update
                 .items
                 .iter()
@@ -186,7 +195,10 @@ fn apply_event(app: &mut App, event: Event, jobs: &Sender<Job>) {
                 .min(len.saturating_sub(1));
             app.homework_state.select(Some(selected));
             if finished {
-                app.set_message(format!("作业已更新：未完成 {unfinished} 项"));
+                app.set_message(format!(
+                    "作业已更新：未完成 {unfinished} 项（用时 {:.1}s）",
+                    elapsed.as_secs_f32()
+                ));
             }
             app.ensure_main();
         }
@@ -219,6 +231,16 @@ fn apply_event(app: &mut App, event: Event, jobs: &Sender<Job>) {
         Event::Activities(activities) => {
             app.lms.activities = Page::Ready(activities);
             app.updated_at.lms = Some(now_clock());
+            // 目前分組為空時，改顯示第一個有內容的分組（依顯示順序）。
+            let current = app.lms.activity_group;
+            let counts = app.activity_group_counts();
+            let current_empty = counts
+                .iter()
+                .find(|(group, _)| *group == current)
+                .is_none_or(|(_, count)| *count == 0);
+            if current_empty && let Some((group, _)) = counts.iter().find(|(_, count)| *count > 0) {
+                app.lms.activity_group = *group;
+            }
             app.activity_state.select(Some(0));
             app.ensure_main();
         }
@@ -227,10 +249,26 @@ fn apply_event(app: &mut App, event: Event, jobs: &Sender<Job>) {
             app.updated_at.lms = Some(now_clock());
             app.ensure_main();
         }
+        Event::OpenUrl(url) => {
+            // 實際啟動瀏覽器交由主迴圈執行（測試不觸發外部程序）。
+            app.pending_open = Some(url);
+            app.set_message("正在打开浏览器…");
+        }
         Event::AccountUpdated => {
+            // 修改帳號成功：離開表單；資料由隨後的事件重新載入。
+            if matches!(app.screen, Screen::SettingsForm(_)) {
+                app.set_screen(Screen::Main);
+            }
             app.set_message("账号已更新");
         }
         Event::PassphraseUpdated => {
+            // 修改口令成功：離開處理中狀態並回到設定選單。
+            if matches!(
+                &app.screen,
+                Screen::SettingsForm(form) if form.kind == FormKind::ChangePassphrase
+            ) {
+                app.set_screen(Screen::Settings(SettingsState::open(app.access_policy)));
+            }
             app.set_message("加密口令已更新");
         }
         Event::AccessPolicyUpdated(policy) => {
@@ -270,15 +308,19 @@ fn apply_event(app: &mut App, event: Event, jobs: &Sender<Job>) {
                         _ => {}
                     }
                 }
-                _ => {
-                    // 資料任務失敗：若因重登而停在登入進度畫面，回到主畫面。
-                    if matches!(
-                        &app.screen,
-                        Screen::Login(screen)
-                            if matches!(screen.as_ref(), LoginScreen::Progress { .. })
-                    ) {
-                        app.set_screen(Screen::Main);
+                FailedTarget::Credentials => {
+                    // 憑證操作失敗：留在可編輯表單就地顯示錯誤；敏感欄位清空、帳號保留。
+                    match &mut app.screen {
+                        Screen::Setup(form) | Screen::Unlock(form) | Screen::SettingsForm(form) => {
+                            form.busy = false;
+                            form.error = Some(text.clone());
+                            form.clear_secrets();
+                        }
+                        _ => {}
                     }
+                }
+                _ => {
+                    // 資料任務失敗：只標記對應頁面，不影響登入覆蓋層或根畫面。
                 }
             }
             app.set_message(text);
@@ -293,18 +335,12 @@ fn now_clock() -> String {
 
 /// 顯示登入錯誤：憑證表單就地顯示，其餘登入畫面回到失敗畫面。
 fn set_login_error(app: &mut App, message: String) {
-    let mut next = None;
-    if let Screen::Login(screen) = &mut app.screen {
-        match screen.as_mut() {
-            LoginScreen::Credentials { form, .. } => {
-                form.busy = false;
-                form.error = Some(message);
-            }
-            _ => next = Some(Screen::Login(Box::new(LoginScreen::Failed { message }))),
+    match app.login.as_deref_mut() {
+        Some(LoginScreen::Credentials { form, .. }) => {
+            form.busy = false;
+            form.error = Some(message);
         }
-    }
-    if let Some(screen) = next {
-        app.set_screen(screen);
+        _ => app.login = Some(Box::new(LoginScreen::Failed { message })),
     }
 }
 

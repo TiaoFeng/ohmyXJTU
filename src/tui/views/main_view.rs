@@ -101,8 +101,10 @@ fn hints(app: &App) -> String {
         }
         NavItem::Lms => match app.lms.level {
             LmsLevel::Courses => text.push_str("  enter 进入课程"),
-            LmsLevel::Activities => text.push_str("  enter 查看详情  esc 返回课程"),
-            LmsLevel::Detail => text.push_str("  esc 返回活动"),
+            LmsLevel::Activities => {
+                text.push_str("  [ ] 分组  enter 查看详情  o 打开网页  esc 返回课程");
+            }
+            LmsLevel::Detail => text.push_str("  o 打开网页  esc 返回活动"),
         },
         _ => {
             if app.schedule_detail {

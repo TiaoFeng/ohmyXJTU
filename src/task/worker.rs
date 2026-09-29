@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 use chrono::{Local, NaiveDate};
 use zeroize::Zeroizing;
 
+use crate::auth::webvpn;
 use crate::auth::{AccountType, LoginDriver, LoginReply};
 use crate::config::{AccessPolicy, Config};
 use crate::credentials::{Credentials, Vault};
@@ -32,7 +33,8 @@ use crate::error::{AppError, AppResult};
 use crate::session::{AccessMode, LoginStage, SessionManager, SiteKind};
 use crate::sites::attendance::{AttendanceApi, AttendanceSite};
 use crate::sites::lms::{
-    ActivityKind, LmsActivity, LmsApi, LmsCourse, LmsSite, submission_failure_note,
+    self, ActivityKind, LmsActivity, LmsApi, LmsCourse, LmsSite, SubmissionSummary,
+    submission_failure_note,
 };
 use crate::tui::app::{ActivityDetailView, FlowData, LessonEntry, ScheduleData};
 
@@ -103,6 +105,13 @@ pub enum Job {
         /// 活動識別碼。
         activity_id: String,
     },
+    /// 開啟活動網頁（`o`）：解析目標網址後以系統瀏覽器開啟。
+    OpenActivity {
+        /// 活動識別碼。
+        activity_id: String,
+        /// 活動類型（決定網址來源）。
+        kind: ActivityKind,
+    },
     /// 記住使用者選擇的學期，並重新載入作業。
     SetHomeworkTerm {
         /// 學期代碼（`YYYY-YYYY+1-T`）。
@@ -144,6 +153,7 @@ impl Job {
             Self::LoadCourses { .. }
             | Self::LoadActivities { .. }
             | Self::LoadActivityDetail { .. } => "思源学堂".to_owned(),
+            Self::OpenActivity { .. } => "打开活动".to_owned(),
             Self::SetHomeworkTerm { .. } => "学期选择".to_owned(),
             Self::ChangeAccount { .. } => "修改账号".to_owned(),
             Self::ChangePassphrase { .. } => "修改口令".to_owned(),
@@ -162,6 +172,7 @@ impl Job {
                 | Self::LoadCourses { .. }
                 | Self::LoadActivities { .. }
                 | Self::LoadActivityDetail { .. }
+                | Self::OpenActivity { .. }
         )
     }
 
@@ -175,6 +186,9 @@ impl Job {
             Self::LoadActivities { course_id, .. } => Some(DataKey::Activities(course_id.clone())),
             Self::LoadActivityDetail { activity_id } => {
                 Some(DataKey::ActivityDetail(activity_id.clone()))
+            }
+            Self::OpenActivity { activity_id, .. } => {
+                Some(DataKey::OpenActivity(activity_id.clone()))
             }
             _ => None,
         }
@@ -190,6 +204,7 @@ enum DataKey {
     Courses,
     Activities(String),
     ActivityDetail(String),
+    OpenActivity(String),
 }
 
 /// 背景回報的事件。
@@ -245,6 +260,8 @@ pub enum Event {
     Activities(Vec<LmsActivity>),
     /// 活動詳情。
     ActivityDetail(Box<ActivityDetailView>),
+    /// 已解析的活動網址（依訪問模式改寫完成，等待介面以瀏覽器開啟）。
+    OpenUrl(String),
     /// 帳號已更新。
     AccountUpdated,
     /// 加密口令已更新。
@@ -279,9 +296,13 @@ pub enum FailedTarget {
     Activities,
     /// 思源學堂活動詳情。
     ActivityDetail,
+    /// 開啟活動網頁（不動任何頁面）。
+    ActivityOpen,
     /// 登入流程（驗證碼、簡訊、重試）。
     Login,
-    /// 帳戶設定與憑證操作。
+    /// 憑證操作（建立保險庫、解鎖、修改帳號或口令）。
+    Credentials,
+    /// 帳戶設定（訪問模式等）。
     Settings,
 }
 
@@ -304,6 +325,10 @@ pub struct HomeworkUpdate {
     pub issues: Vec<HomeworkIssue>,
     /// 載入進度（已完成課程數, 課程總數）；`None` 表示已載入完成。
     pub progress: Option<(usize, usize)>,
+    /// 本次載入已花費的時間（診斷用）。
+    pub elapsed: Duration,
+    /// 本次載入已送出的 HTTP 請求數（診斷用）。
+    pub requests: usize,
 }
 
 /// 「待核实」作業的共同原因彙總（同一原因只列一次）。
@@ -386,6 +411,10 @@ struct HomeworkRunner {
     stage: HomeworkStage,
     /// 是否略過快取。
     force: bool,
+    /// 本次載入開始時間（統計用）。
+    started: Instant,
+    /// 本次載入開始前的請求計數（統計用）。
+    requests_baseline: usize,
 }
 
 impl HomeworkRunner {
@@ -395,7 +424,7 @@ impl HomeworkRunner {
     }
 
     /// 目前的載入更新（完成時 `progress` 為 `None`）。
-    fn update(&self) -> HomeworkUpdate {
+    fn update(&self, elapsed: Duration, requests: usize) -> HomeworkUpdate {
         let now = Local::now().fixed_offset();
         let progress = if matches!(self.stage, HomeworkStage::Done) {
             None
@@ -414,6 +443,8 @@ impl HomeworkRunner {
             items: homework::aggregate(&self.inputs, now),
             issues: homework_issues(&self.inputs),
             progress,
+            elapsed,
+            requests,
         }
     }
 }
@@ -448,6 +479,8 @@ fn homework_issues(inputs: &[HomeworkInput]) -> Vec<HomeworkIssue> {
 struct LmsCache {
     courses: Option<(Vec<LmsCourse>, usize, Instant)>,
     activities: HashMap<String, (Vec<LmsActivity>, usize, Instant)>,
+    details: HashMap<String, (LmsActivity, Instant)>,
+    summaries: HashMap<String, (SubmissionSummary, Instant)>,
 }
 
 impl LmsCache {
@@ -455,6 +488,8 @@ impl LmsCache {
     fn clear(&mut self) {
         self.courses = None;
         self.activities.clear();
+        self.details.clear();
+        self.summaries.clear();
     }
 
     /// 取課程快取（有效期內且非強制刷新時）。
@@ -486,6 +521,36 @@ impl LmsCache {
             course_id.to_owned(),
             (activities.to_vec(), skipped, Instant::now()),
         );
+    }
+
+    /// 取活動詳情快取（有效期內且非強制刷新時）。
+    fn detail(&self, activity_id: &str, force: bool) -> Option<LmsActivity> {
+        if force {
+            return None;
+        }
+        let (detail, at) = self.details.get(activity_id)?;
+        (at.elapsed() < LMS_CACHE_TTL).then(|| detail.clone())
+    }
+
+    /// 寫入活動詳情快取。
+    fn store_detail(&mut self, activity_id: &str, detail: &LmsActivity) {
+        self.details
+            .insert(activity_id.to_owned(), (detail.clone(), Instant::now()));
+    }
+
+    /// 取提交摘要快取（有效期內且非強制刷新時）。
+    fn summary(&self, activity_id: &str, force: bool) -> Option<SubmissionSummary> {
+        if force {
+            return None;
+        }
+        let (summary, at) = self.summaries.get(activity_id)?;
+        (at.elapsed() < LMS_CACHE_TTL).then(|| summary.clone())
+    }
+
+    /// 寫入提交摘要快取。
+    fn store_summary(&mut self, activity_id: &str, summary: &SubmissionSummary) {
+        self.summaries
+            .insert(activity_id.to_owned(), (summary.clone(), Instant::now()));
     }
 }
 
@@ -633,7 +698,8 @@ impl Worker {
             | Job::LoadFlow { .. }
             | Job::LoadCourses { .. }
             | Job::LoadActivities { .. }
-            | Job::LoadActivityDetail { .. } => Ok(()),
+            | Job::LoadActivityDetail { .. }
+            | Job::OpenActivity { .. } => Ok(()),
         }
     }
 
@@ -930,6 +996,9 @@ impl Worker {
             Job::LoadActivityDetail { activity_id } => {
                 Event::ActivityDetail(Box::new(self.load_activity_detail(activity_id)?))
             }
+            Job::OpenActivity { activity_id, kind } => {
+                Event::OpenUrl(self.open_activity_url(activity_id, *kind)?)
+            }
             _ => return Ok(None),
         };
         Ok(Some(event))
@@ -1086,8 +1155,7 @@ impl Worker {
                 return;
             }
             if matches!(runner.stage, HomeworkStage::Done) {
-                let update = runner.update();
-                self.emit(Event::Homework(update));
+                self.emit_homework(&runner);
                 return;
             }
             if let Err(err) = self.homework_step(&mut runner) {
@@ -1099,6 +1167,8 @@ impl Worker {
 
     /// 準備作業載入：判定學期、過濾課程並回報首批進度。
     fn begin_homework(&mut self, force: bool) -> AppResult<Option<HomeworkRunner>> {
+        let started = Instant::now();
+        let requests_baseline = self.request_count();
         let (courses, skipped_data) = self.lms_courses(force)?;
         if skipped_data > 0 {
             self.emit(Event::Notice(format!(
@@ -1117,6 +1187,8 @@ impl Worker {
                 items: Vec::new(),
                 issues: Vec::new(),
                 progress: None,
+                elapsed: started.elapsed(),
+                requests: self.request_count().saturating_sub(requests_baseline),
             }));
             return Ok(None);
         }
@@ -1177,9 +1249,10 @@ impl Worker {
             inputs: Vec::new(),
             stage,
             force,
+            started,
+            requests_baseline,
         };
-        let update = runner.update();
-        self.emit(Event::Homework(update));
+        self.emit_homework(&runner);
         Ok(Some(runner))
     }
 
@@ -1218,15 +1291,14 @@ impl Worker {
                     .current_course()
                     .cloned()
                     .ok_or_else(|| AppError::protocol("课程索引越界"))?;
-                let input = self.homework_input(&course, &activity)?;
+                let input = self.homework_input(&course, &activity, runner.force)?;
                 runner.inputs.push(input);
 
                 runner.activity_index += 1;
                 if runner.activity_index >= runner.activities.len() {
                     runner.stage = HomeworkStage::AdvanceCourse;
                 }
-                let update = runner.update();
-                self.emit(Event::Homework(update));
+                self.emit_homework(runner);
             }
             HomeworkStage::AdvanceCourse => {
                 runner.course_index += 1;
@@ -1237,8 +1309,7 @@ impl Worker {
                 } else {
                     HomeworkStage::Activities
                 };
-                let update = runner.update();
-                self.emit(Event::Homework(update));
+                self.emit_homework(runner);
             }
             HomeworkStage::Done => {}
         }
@@ -1250,6 +1321,7 @@ impl Worker {
         &mut self,
         course: &LmsCourse,
         activity: &LmsActivity,
+        force: bool,
     ) -> AppResult<HomeworkInput> {
         let mut input = HomeworkInput {
             course_id: course.id.clone(),
@@ -1262,9 +1334,7 @@ impl Worker {
             note: None,
         };
 
-        let session = self.session_mut()?;
-        let mut api = LmsApi::new(session);
-        match api.submission_summary(&activity.id) {
+        match self.lms_submission_summary(&activity.id, force) {
             Ok(summary) => {
                 input.submit_by_group = summary.submit_by_group;
                 input.submission_count = summary.count;
@@ -1341,14 +1411,46 @@ impl Worker {
         Ok((activities, skipped))
     }
 
-    fn load_activity_detail(&mut self, activity_id: &str) -> AppResult<ActivityDetailView> {
+    /// 活動詳情（記憶體內快取先行）。
+    fn lms_activity_detail(&mut self, activity_id: &str, force: bool) -> AppResult<LmsActivity> {
+        if let Some(cached) = self.cache.detail(activity_id, force) {
+            return Ok(cached);
+        }
         let session = self.session_mut()?;
         let mut api = LmsApi::new(session);
-        let detail = api.activity(activity_id)?;
+        let detail = api.fetch_activity_detail(activity_id)?;
+        self.cache.store_detail(activity_id, &detail);
+        Ok(detail)
+    }
+
+    /// 作業提交摘要（快取先行；詳情先行確定小組）。
+    fn lms_submission_summary(
+        &mut self,
+        activity_id: &str,
+        force: bool,
+    ) -> AppResult<SubmissionSummary> {
+        if let Some(cached) = self.cache.summary(activity_id, force) {
+            return Ok(cached);
+        }
+        let detail = self.lms_activity_detail(activity_id, force)?;
+        let session = self.session_mut()?;
+        let mut api = LmsApi::new(session);
+        let summary = api.submission_summary_for(&detail)?;
+        self.cache.store_summary(activity_id, &summary);
+        Ok(summary)
+    }
+
+    fn load_activity_detail(&mut self, activity_id: &str) -> AppResult<ActivityDetailView> {
+        let activity = self.lms_activity_detail(activity_id, false)?;
+        let session = self.session_mut()?;
+        let mut api = LmsApi::new(session);
+        let detail = api.activity_from(activity)?;
+        let kind = detail.activity.kind();
 
         Ok(ActivityDetailView {
+            id: detail.activity.id.clone(),
             title: detail.activity.display_title(),
-            kind: detail.activity.kind().label().to_owned(),
+            kind,
             end_time: detail.activity.end_time,
             submit_by_group: detail.activity.submit_by_group.unwrap_or(false),
             submissions: detail.submissions.map(|list| list.list),
@@ -1356,7 +1458,65 @@ impl Worker {
         })
     }
 
+    /// 解析「開啟活動網頁」的目標網址（WebVPN 模式自動改址）。
+    ///
+    /// 課程內容與直播優先使用伺服器回傳的播放器網址；作業、資料等其他
+    /// 類型使用思源學堂首頁（前端路由未經驗證，不拼接自造路徑）。
+    fn open_activity_url(&mut self, activity_id: &str, kind: ActivityKind) -> AppResult<String> {
+        let mut url = lms::LOGIN_URL.to_owned();
+        if matches!(kind, ActivityKind::Lesson | ActivityKind::LectureLive) {
+            match self.lesson_player_url(activity_id) {
+                Ok(player_url) => url = player_url,
+                Err(err) if err.needs_relogin() => return Err(err),
+                Err(err) => {
+                    self.emit(Event::Notice(format!(
+                        "无法获取播放地址，已改为打开思源学堂首页：{err}"
+                    )));
+                }
+            }
+        }
+        self.rewrite_for_mode(url)
+    }
+
+    /// 課程內容的播放器網址（由伺服器回傳，附帶存取 token）。
+    fn lesson_player_url(&mut self, activity_id: &str) -> AppResult<String> {
+        let session = self.session_mut()?;
+        let mut api = LmsApi::new(session);
+        api.lesson_player_url(activity_id)
+    }
+
+    /// WebVPN 模式下改寫校內網址；其他訪問模式或非校內站點原樣回傳。
+    fn rewrite_for_mode(&self, url: String) -> AppResult<String> {
+        let webvpn_mode = matches!(
+            self.session
+                .as_ref()
+                .and_then(|session| session.access_mode(SiteKind::Lms)),
+            Some(AccessMode::WebVpn)
+        );
+        if webvpn_mode && webvpn::should_rewrite(&url) {
+            return webvpn::to_webvpn_url(&url);
+        }
+        Ok(url)
+    }
+
     // ── 工具 ─────────────────────────────────────────────
+
+    /// 目前會話已送出的請求數（診斷用）。
+    fn request_count(&self) -> usize {
+        self.session
+            .as_ref()
+            .map_or(0, SessionManager::request_count)
+    }
+
+    /// 發送一次作業載入更新（附耗時與本次載入已送出的請求數）。
+    fn emit_homework(&self, runner: &HomeworkRunner) {
+        let update = runner.update(
+            runner.started.elapsed(),
+            self.request_count()
+                .saturating_sub(runner.requests_baseline),
+        );
+        self.emit(Event::Homework(update));
+    }
 
     fn session_mut(&mut self) -> AppResult<&mut SessionManager> {
         self.session
@@ -1377,7 +1537,8 @@ fn site_of(job: &Job) -> Option<SiteKind> {
         Job::LoadHomework { .. }
         | Job::LoadCourses { .. }
         | Job::LoadActivities { .. }
-        | Job::LoadActivityDetail { .. } => Some(SiteKind::Lms),
+        | Job::LoadActivityDetail { .. }
+        | Job::OpenActivity { .. } => Some(SiteKind::Lms),
         _ => None,
     }
 }
@@ -1391,12 +1552,17 @@ fn failed_target_of(job: &Job) -> FailedTarget {
         Job::LoadCourses { .. } => FailedTarget::Courses,
         Job::LoadActivities { .. } => FailedTarget::Activities,
         Job::LoadActivityDetail { .. } => FailedTarget::ActivityDetail,
+        Job::OpenActivity { .. } => FailedTarget::ActivityOpen,
         Job::SubmitCaptcha(_)
         | Job::RefreshCaptcha
         | Job::SendMfaCode
         | Job::VerifyMfaCode(_)
         | Job::RetryLogin
         | Job::RetryWithAccount { .. } => FailedTarget::Login,
+        Job::CreateVault { .. }
+        | Job::Unlock { .. }
+        | Job::ChangeAccount { .. }
+        | Job::ChangePassphrase { .. } => FailedTarget::Credentials,
         _ => FailedTarget::Settings,
     }
 }

@@ -6,6 +6,7 @@
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use ::rsa::pkcs8::EncodePublicKey as _;
 use ::rsa::{RsaPrivateKey, RsaPublicKey};
@@ -239,6 +240,30 @@ fn rejects_wrong_passphrase_without_touching_the_vault() {
     assert!(
         harness.saw(|event| matches!(event, Event::Failed { .. })),
         "应当回报失败事件"
+    );
+}
+
+#[test]
+fn unlock_failure_reports_credentials_target() {
+    let mut harness = harness(fake_flow(0));
+
+    let result = harness.dispatch(Job::Unlock {
+        passphrase: "wrong-passphrase".to_owned(),
+    });
+
+    assert!(
+        matches!(result, Err(AppError::WrongPassphrase)),
+        "口令错误时应拒绝任务，实际：{result:?}"
+    );
+    assert!(
+        harness.saw(|event| matches!(
+            event,
+            Event::Failed {
+                target: FailedTarget::Credentials,
+                ..
+            }
+        )),
+        "解锁失败应归为凭证操作，让界面回到解锁表单"
     );
 }
 
@@ -480,6 +505,11 @@ impl FakeHomeworkSite {
                     "semesterName": name,
                     "startDate": "2026-09-07",
                 }]
+            })));
+        }
+        if url.contains("/player-url") {
+            return Ok(json(serde_json::json!({
+                "url": "https://lms.xjtu.edu.cn/lesson/player?token=abc"
             })));
         }
         for (course_id, payload) in &self.activities {
@@ -1030,5 +1060,345 @@ fn group_homework_without_group_id_stays_unknown_with_reason() {
             .iter()
             .any(|url| url.contains("/submission_list")),
         "缺少 group_id 时不得请求提交列表"
+    );
+}
+
+#[test]
+fn activity_detail_for_material_skips_submission_request() {
+    let site = Arc::new(FakeHomeworkSite {
+        seen: Arc::new(Mutex::new(Vec::new())),
+        courses: serde_json::json!({ "courses": [] }),
+        activities: Vec::new(),
+        details: vec![(
+            "77",
+            serde_json::json!({ "id": "77", "type": "material", "title": "课件",
+                "end_time": "2026-10-01 12:00:00" }),
+        )],
+        expire_first_submission: false,
+        submissions: AtomicUsize::new(0),
+        attendance_term: None,
+    });
+
+    let system = Arc::clone(&site);
+    let mut harness = harness(move |request| system.handle(request));
+    harness.login_lms_only();
+
+    harness
+        .dispatch(Job::LoadActivityDetail {
+            activity_id: "77".to_owned(),
+        })
+        .expect("載入詳情");
+
+    let seen = site.urls();
+    assert!(
+        seen.iter().any(|url| url.ends_with("/api/activities/77")),
+        "應請求活動詳情：{seen:?}"
+    );
+    assert!(
+        !seen.iter().any(|url| url.contains("/submission_list")),
+        "非作業不得查詢提交記錄：{seen:?}"
+    );
+    assert!(
+        harness.saw(|event| matches!(
+            event,
+            Event::ActivityDetail(detail)
+                if detail.kind == lms::ActivityKind::Material && detail.submissions.is_none()
+        )),
+        "應回報資料類型的詳情且不帶提交狀態"
+    );
+}
+
+#[test]
+fn activity_detail_for_homework_queries_submission_list() {
+    let site = Arc::new(FakeHomeworkSite {
+        seen: Arc::new(Mutex::new(Vec::new())),
+        courses: serde_json::json!({ "courses": [] }),
+        activities: Vec::new(),
+        details: vec![(
+            "11",
+            serde_json::json!({ "id": "11", "type": "homework", "title": "第 3 次作业",
+                "end_time": "2026-10-01 23:59:59", "submit_by_group": false,
+                "user_submit_count": 0 }),
+        )],
+        expire_first_submission: false,
+        submissions: AtomicUsize::new(0),
+        attendance_term: None,
+    });
+
+    let system = Arc::clone(&site);
+    let mut harness = harness(move |request| system.handle(request));
+    harness.login_lms_only();
+
+    harness
+        .dispatch(Job::LoadActivityDetail {
+            activity_id: "11".to_owned(),
+        })
+        .expect("載入詳情");
+
+    let seen = site.urls();
+    assert!(
+        seen.iter()
+            .any(|url| url.contains("/students/42/submission_list")),
+        "作業詳情應查詢個人提交記錄：{seen:?}"
+    );
+    assert!(
+        harness.saw(|event| matches!(
+            event,
+            Event::ActivityDetail(detail)
+                if detail.kind == lms::ActivityKind::Homework && detail.submissions.is_some()
+        )),
+        "作業詳情應帶提交記錄"
+    );
+}
+
+#[test]
+fn opening_lesson_activity_uses_server_player_url() {
+    let site = Arc::new(FakeHomeworkSite {
+        seen: Arc::new(Mutex::new(Vec::new())),
+        courses: serde_json::json!({ "courses": [] }),
+        activities: Vec::new(),
+        details: Vec::new(),
+        expire_first_submission: false,
+        submissions: AtomicUsize::new(0),
+        attendance_term: None,
+    });
+
+    let system = Arc::clone(&site);
+    let mut harness = harness(move |request| system.handle(request));
+    harness.login_lms_only();
+
+    harness
+        .dispatch(Job::OpenActivity {
+            activity_id: "23".to_owned(),
+            kind: lms::ActivityKind::Lesson,
+        })
+        .expect("打开活动");
+
+    let seen = site.urls();
+    assert!(
+        seen.iter()
+            .any(|url| url.contains("/api/lessons/23/player-url")),
+        "課程內容應查詢播放器接口：{seen:?}"
+    );
+    assert!(
+        harness.saw(|event| matches!(
+            event,
+            Event::OpenUrl(url) if url == "https://lms.xjtu.edu.cn/lesson/player?token=abc"
+        )),
+        "應回報伺服器提供的播放地址"
+    );
+}
+
+#[test]
+fn opening_homework_activity_opens_lms_home() {
+    let site = Arc::new(FakeHomeworkSite {
+        seen: Arc::new(Mutex::new(Vec::new())),
+        courses: serde_json::json!({ "courses": [] }),
+        activities: Vec::new(),
+        details: Vec::new(),
+        expire_first_submission: false,
+        submissions: AtomicUsize::new(0),
+        attendance_term: None,
+    });
+
+    let system = Arc::clone(&site);
+    let mut harness = harness(move |request| system.handle(request));
+    harness.login_lms_only();
+
+    harness
+        .dispatch(Job::OpenActivity {
+            activity_id: "11".to_owned(),
+            kind: lms::ActivityKind::Homework,
+        })
+        .expect("打开活动");
+
+    let seen = site.urls();
+    assert!(
+        !seen.iter().any(|url| url.contains("/player-url")),
+        "作業不得查詢播放器接口：{seen:?}"
+    );
+    assert!(
+        harness.saw(|event| matches!(
+            event,
+            Event::OpenUrl(url) if url == "https://lms.xjtu.edu.cn"
+        )),
+        "作業應開啟思源學堂首頁"
+    );
+}
+
+#[test]
+fn opening_lesson_in_webvpn_mode_rewrites_url() {
+    let site = Arc::new(FakeHomeworkSite {
+        seen: Arc::new(Mutex::new(Vec::new())),
+        courses: serde_json::json!({ "courses": [] }),
+        activities: Vec::new(),
+        details: Vec::new(),
+        expire_first_submission: false,
+        submissions: AtomicUsize::new(0),
+        attendance_term: None,
+    });
+
+    let system = Arc::clone(&site);
+    let mut harness = harness(move |request| system.handle(request));
+    harness
+        .worker
+        .session
+        .as_mut()
+        .expect("会话已建立")
+        .mark_logged_in(SiteKind::Lms, AccessMode::WebVpn, Vec::new());
+
+    harness
+        .dispatch(Job::OpenActivity {
+            activity_id: "23".to_owned(),
+            kind: lms::ActivityKind::Lesson,
+        })
+        .expect("打开活动");
+
+    assert!(
+        harness.saw(|event| matches!(
+            event,
+            Event::OpenUrl(url) if url.starts_with("https://webvpn.xjtu.edu.cn/")
+        )),
+        "WebVPN 模式下應回報改寫後的網址"
+    );
+}
+
+#[test]
+fn opening_lesson_without_player_url_falls_back_to_home() {
+    let mut harness = harness(|request| {
+        let url = request.url.clone();
+        if url.contains("/player-url") {
+            return Ok(HttpResponse::new(500, url.as_str(), b"oops".to_vec()));
+        }
+        panic!("未预期的请求：{url}");
+    });
+    harness.login_lms_only();
+
+    harness
+        .dispatch(Job::OpenActivity {
+            activity_id: "23".to_owned(),
+            kind: lms::ActivityKind::Lesson,
+        })
+        .expect("打开活动");
+
+    let events = harness.drain_events();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Notice(message) if message.contains("无法获取播放地址")
+        )),
+        "取不到播放地址时应告知使用者"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::OpenUrl(url) if url == "https://lms.xjtu.edu.cn"
+        )),
+        "應回退到思源學堂首頁"
+    );
+}
+
+/// 單課程單作業的假站點（詳情直接提供提交次數，不查提交列表）。
+fn cached_homework_site() -> Arc<FakeHomeworkSite> {
+    Arc::new(FakeHomeworkSite {
+        seen: Arc::new(Mutex::new(Vec::new())),
+        courses: serde_json::json!({ "courses": [
+            { "id": "1", "name": "编译原理", "semester": { "code": "2026-1" } },
+        ]}),
+        activities: vec![(
+            "1",
+            serde_json::json!({ "activities": [
+                { "id": "11", "type": "homework", "title": "作业A",
+                  "end_time": "2026-10-01 23:59:59" },
+            ]}),
+        )],
+        details: vec![(
+            "11",
+            serde_json::json!({ "id": "11", "type": "homework", "title": "作业A",
+                "end_time": "2026-10-01 23:59:59", "submit_by_group": false,
+                "user_submit_count": 2 }),
+        )],
+        expire_first_submission: false,
+        submissions: AtomicUsize::new(0),
+        attendance_term: None,
+    })
+}
+
+#[test]
+fn homework_second_load_reuses_detail_and_summary_caches() {
+    let site = cached_homework_site();
+    let system = Arc::clone(&site);
+    let mut harness = harness(move |request| system.handle(request));
+    harness.login_lms_only();
+    harness.worker.config.homework_term = Some("2026-2027-1".to_owned());
+
+    harness
+        .dispatch(Job::LoadHomework { force: false })
+        .expect("首次加载");
+    let first = site.urls().len();
+
+    harness
+        .dispatch(Job::LoadHomework { force: false })
+        .expect("第二次加载");
+
+    let second = site.urls();
+    assert_eq!(second.len(), first, "第二次載入應全面命中快取：{second:?}");
+
+    let updates = homework_updates(&mut harness);
+    let last = updates.last().expect("最终更新");
+    assert_eq!(last.requests, 0, "命中快取時不應再送請求");
+    assert_eq!(last.items.len(), 1);
+    assert_eq!(last.items[0].state, HomeworkState::Completed);
+}
+
+#[test]
+fn homework_forced_refresh_refetches_details() {
+    let site = cached_homework_site();
+    let system = Arc::clone(&site);
+    let mut harness = harness(move |request| system.handle(request));
+    harness.login_lms_only();
+    harness.worker.config.homework_term = Some("2026-2027-1".to_owned());
+
+    harness
+        .dispatch(Job::LoadHomework { force: true })
+        .expect("首次加载");
+    harness
+        .dispatch(Job::LoadHomework { force: true })
+        .expect("强制刷新");
+
+    let seen = site.urls();
+    assert_eq!(
+        seen.iter()
+            .filter(|url| url.ends_with("/api/activities/11"))
+            .count(),
+        2,
+        "強制刷新應重新取得活動詳情：{seen:?}"
+    );
+
+    let updates = homework_updates(&mut harness);
+    let last = updates.last().expect("最终更新");
+    assert!(last.requests >= 3, "強制刷新應重取課程／活動／詳情");
+}
+
+#[test]
+fn homework_reports_requests_and_elapsed() {
+    let site = cached_homework_site();
+    let system = Arc::clone(&site);
+    let mut harness = harness(move |request| system.handle(request));
+    harness.login_lms_only();
+    harness.worker.config.homework_term = Some("2026-2027-1".to_owned());
+
+    let before = site.urls().len();
+    harness
+        .dispatch(Job::LoadHomework { force: false })
+        .expect("加载");
+    let after = site.urls().len();
+
+    let updates = homework_updates(&mut harness);
+    let last = updates.last().expect("最终更新");
+    assert_eq!(last.requests, after - before, "統計請求數應與實際相符");
+    assert!(
+        last.elapsed <= Duration::from_secs(60),
+        "耗時統計應為合理值"
     );
 }

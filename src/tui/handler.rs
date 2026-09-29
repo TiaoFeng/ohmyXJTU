@@ -5,6 +5,7 @@ use std::sync::mpsc::Sender;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::credentials::Credentials;
+use crate::sites::lms::ActivityKind;
 use crate::task::Job;
 use crate::tui::app::{
     App, FormKind, FormState, LmsLevel, LoginScreen, NavItem, Screen, SettingsState,
@@ -52,19 +53,28 @@ pub fn handle_key(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
         }
     }
 
+    // 登入覆蓋層開啟時（進度、驗證碼、簡訊、失敗、重新輸入憑證），
+    // 所有按鍵都交給登入畫面處理，底層畫面維持不變。
+    if app.login.is_some() {
+        handle_login(app, key, jobs);
+        return;
+    }
+
     match app.screen {
         Screen::Setup(_) | Screen::Unlock(_) | Screen::SettingsForm(_) => {
             handle_form(app, key, jobs);
         }
-        Screen::Login(_) => handle_login(app, key, jobs),
         Screen::Settings(_) => handle_settings(app, key, jobs),
         Screen::TermPicker(_) => handle_term_picker(app, key, jobs),
         Screen::Main => handle_main(app, key, jobs),
     }
 }
 
-/// `Ctrl+P`：開啟或關閉帳戶設定。
+/// `Ctrl+P`：開啟或關閉帳戶設定（登入覆蓋層開啟時不生效）。
 fn toggle_settings(app: &mut App) {
+    if app.login.is_some() {
+        return;
+    }
     match app.screen {
         Screen::Settings(_) | Screen::TermPicker(_) => app.set_screen(Screen::Main),
         Screen::Main => app.set_screen(Screen::Settings(SettingsState::open(app.access_policy))),
@@ -75,6 +85,10 @@ fn toggle_settings(app: &mut App) {
 // ── 表單 ─────────────────────────────────────────────
 
 fn handle_form(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
+    // 送出中：忽略所有輸入，避免重複提交。
+    if form_mut(app).is_some_and(|form| form.busy) {
+        return;
+    }
     let kind = form_mut(app).map(|form| form.kind);
 
     match key.code {
@@ -205,19 +219,14 @@ fn submit_form(app: &mut App, jobs: &Sender<Job>) {
         }
     };
 
-    match app.screen {
-        Screen::Setup(_) | Screen::Unlock(_) => {
-            app.set_screen(Screen::Login(Box::new(LoginScreen::Progress {
-                note: "正在处理凭证…".to_owned(),
-            })));
-        }
-        Screen::SettingsForm(_) => {
-            if let Some(form) = form_mut(app) {
-                form.busy = true;
-                form.error = None;
-            }
-        }
-        _ => {}
+    // 憑證操作：留在原表單顯示處理中；成功與失敗都由事件回到表單或主畫面。
+    if matches!(
+        app.screen,
+        Screen::Setup(_) | Screen::Unlock(_) | Screen::SettingsForm(_)
+    ) && let Some(form) = form_mut(app)
+    {
+        form.busy = true;
+        form.error = None;
     }
     let _ = jobs.send(job);
 }
@@ -275,12 +284,13 @@ impl FormValues {
 }
 
 fn form_mut(app: &mut App) -> Option<&mut FormState> {
+    if let Some(screen) = app.login.as_mut()
+        && let LoginScreen::Credentials { form, .. } = screen.as_mut()
+    {
+        return Some(form);
+    }
     match &mut app.screen {
         Screen::Setup(form) | Screen::Unlock(form) | Screen::SettingsForm(form) => Some(form),
-        Screen::Login(screen) => match screen.as_mut() {
-            LoginScreen::Credentials { form, .. } => Some(form),
-            _ => None,
-        },
         _ => None,
     }
 }
@@ -290,7 +300,7 @@ fn form_mut(app: &mut App) -> Option<&mut FormState> {
 fn handle_login(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
     let mut action: Option<LoginAction> = None;
 
-    if let Screen::Login(screen) = &mut app.screen {
+    if let Some(screen) = app.login.as_mut() {
         match screen.as_mut() {
             LoginScreen::Progress { .. } => {
                 if key.code == KeyCode::Char('q') {
@@ -351,15 +361,15 @@ fn handle_login(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
     match action {
         Some(LoginAction::Quit) => app.quit = true,
         Some(LoginAction::Retry) => {
-            app.set_screen(Screen::Login(Box::new(LoginScreen::Progress {
+            app.login = Some(Box::new(LoginScreen::Progress {
                 note: "正在重试登录…".to_owned(),
-            })));
+            }));
             let _ = jobs.send(Job::RetryLogin);
         }
         Some(LoginAction::EditAccount) => open_credentials_form(app),
         Some(LoginAction::BackToFailed) => {
             let message = login_message(app);
-            app.set_screen(Screen::Login(Box::new(LoginScreen::Failed { message })));
+            app.login = Some(Box::new(LoginScreen::Failed { message }));
         }
         Some(LoginAction::SubmitCredentials) => submit_login_credentials(app, jobs),
         Some(LoginAction::SubmitCaptcha(code)) => {
@@ -380,13 +390,10 @@ fn handle_login(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
 
 /// 目前登入畫面的失敗訊息（供回復上一層或帶入表單）。
 fn login_message(app: &App) -> String {
-    match &app.screen {
-        Screen::Login(screen) => match screen.as_ref() {
-            LoginScreen::Failed { message } | LoginScreen::Credentials { message, .. } => {
-                message.clone()
-            }
-            _ => String::new(),
-        },
+    match app.login.as_deref() {
+        Some(LoginScreen::Failed { message } | LoginScreen::Credentials { message, .. }) => {
+            message.clone()
+        }
         _ => String::new(),
     }
 }
@@ -394,10 +401,10 @@ fn login_message(app: &App) -> String {
 /// 開啟「重新輸入账号密码」表單，並帶上原本的失敗訊息。
 fn open_credentials_form(app: &mut App) {
     let message = login_message(app);
-    app.set_screen(Screen::Login(Box::new(LoginScreen::Credentials {
+    app.login = Some(Box::new(LoginScreen::Credentials {
         form: FormState::login_retry(),
         message,
-    })));
+    }));
 }
 
 /// 送出重新輸入的憑證；驗證失敗時把訊息寫回表單，不送出任務。
@@ -521,8 +528,9 @@ fn handle_main(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
             let nav = app.nav;
             request(app, jobs, nav, true);
         }
-        KeyCode::Char('[') => change_homework_group(app, -1),
-        KeyCode::Char(']') => change_homework_group(app, 1),
+        KeyCode::Char('[') => change_group(app, -1),
+        KeyCode::Char(']') => change_group(app, 1),
+        KeyCode::Char('o') => open_activity(app, jobs),
         KeyCode::Char('s') => open_term_picker(app),
         KeyCode::Char('n') => change_flow_page(app, jobs, 1),
         KeyCode::Char('p') => change_flow_page(app, jobs, -1),
@@ -530,18 +538,53 @@ fn handle_main(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
     }
 }
 
-/// 切換作業分組（`[`／`]`）。
-fn change_homework_group(app: &mut App, delta: i32) {
-    if app.nav != NavItem::Homework {
+/// 切換分組（`[`／`]`）：作業頁切作業分組、思源學堂活動頁切活動分組。
+fn change_group(app: &mut App, delta: i32) {
+    if app.nav == NavItem::Homework {
+        app.homework_group = if delta < 0 {
+            app.homework_group.previous()
+        } else {
+            app.homework_group.next()
+        };
+        // 切換分組後重設選取，避免索引越界。
+        app.set_selection(0);
         return;
     }
-    app.homework_group = if delta < 0 {
-        app.homework_group.previous()
-    } else {
-        app.homework_group.next()
+    if app.nav == NavItem::Lms && app.lms.level == LmsLevel::Activities {
+        app.lms.activity_group = if delta < 0 {
+            app.lms.activity_group.previous()
+        } else {
+            app.lms.activity_group.next()
+        };
+        app.set_selection(0);
+    }
+}
+
+/// 開啟目前活動的網頁（`o`；思源學堂活動與詳情層）。
+fn open_activity(app: &mut App, jobs: &Sender<Job>) {
+    if app.nav != NavItem::Lms {
+        return;
+    }
+    let target = match app.lms.level {
+        LmsLevel::Activities => {
+            let selected = app.page_selection();
+            app.lms_activities_in_group()
+                .get(selected)
+                .map(|activity| (activity.id.clone(), activity.kind()))
+        }
+        LmsLevel::Detail => app
+            .lms
+            .detail
+            .ready()
+            .map(|detail| (detail.id.clone(), detail.kind)),
+        LmsLevel::Courses => None,
     };
-    // 切換分組後重設選取，避免索引越界。
-    app.set_selection(0);
+    let Some((activity_id, kind)) = target else {
+        app.set_message("请先选择要打开的活动");
+        return;
+    };
+    app.set_message("正在解析活动网页…");
+    let _ = jobs.send(Job::OpenActivity { activity_id, kind });
 }
 
 /// 開啟學期選擇器（作業頁按 `s`）。
@@ -627,17 +670,21 @@ fn activate(app: &mut App, jobs: &Sender<Job>) {
             }
             LmsLevel::Activities => {
                 let selected = app.page_selection();
-                let Some(activity_id) = app
-                    .lms
-                    .activities
-                    .ready()
-                    .and_then(|activities| activities.get(selected))
-                    .map(|activity| activity.id.clone())
-                else {
-                    return;
+                let (activity_id, kind) = {
+                    let items = app.lms_activities_in_group();
+                    let Some(activity) = items.get(selected) else {
+                        return;
+                    };
+                    (activity.id.clone(), activity.kind())
                 };
                 app.lms.activity_index = selected;
-                app.lms.detail.start_loading("正在加载活动详情与提交记录…");
+                app.lms
+                    .detail
+                    .start_loading(if kind == ActivityKind::Homework {
+                        "正在加载活动详情与提交记录…"
+                    } else {
+                        "正在加载活动详情…"
+                    });
                 app.lms.level = LmsLevel::Detail;
                 let _ = jobs.send(Job::LoadActivityDetail { activity_id });
             }

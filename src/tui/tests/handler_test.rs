@@ -5,9 +5,12 @@ use std::sync::mpsc::{Sender, channel};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::config::AccessPolicy;
+use crate::domain::activity::ActivityGroup;
+use crate::sites::lms::{ActivityKind, LmsActivity};
 use crate::task::Job;
 use crate::tui::app::{
-    App, FormKind, FormState, LoginScreen, NavItem, Page, ScheduleData, Screen, SettingsState,
+    ActivityDetailView, App, FormKind, FormState, LmsLevel, LoginScreen, NavItem, Page,
+    ScheduleData, Screen, SettingsState,
 };
 
 use super::handle_key;
@@ -55,7 +58,10 @@ fn setup_form_creates_vault() {
         }
         other => panic!("应为创建凭证任务，实际为 {other:?}"),
     }
-    assert!(matches!(app.screen, Screen::Login(_)));
+    let Screen::Setup(form) = &app.screen else {
+        panic!("提交后应停留在设定表单");
+    };
+    assert!(form.busy, "提交后应显示处理中");
 }
 
 #[test]
@@ -118,7 +124,10 @@ fn unlock_form_sends_unlock_job() {
         rx.try_recv(),
         Ok(Job::Unlock { passphrase }) if passphrase == "secret123"
     ));
-    assert!(matches!(app.screen, Screen::Login(_)));
+    let Screen::Unlock(form) = &app.screen else {
+        panic!("提交后应停留在解锁表单");
+    };
+    assert!(form.busy, "提交后应显示处理中");
 }
 
 #[test]
@@ -132,6 +141,26 @@ fn unlock_form_requires_passphrase() {
         panic!("应停留在解锁画面");
     };
     assert_eq!(form.error.as_deref(), Some("请输入加密口令"));
+}
+
+#[test]
+fn busy_form_ignores_input_until_reply() {
+    let (jobs, rx) = channel();
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Setup(FormState::setup()));
+
+    fill_setup(&mut app, &jobs, "secret123", "secret123", "pw-12345");
+    press(&mut app, &jobs, KeyCode::Enter);
+    assert!(matches!(rx.try_recv(), Ok(Job::CreateVault { .. })));
+
+    // 送出後忽略輸入與重複提交。
+    press(&mut app, &jobs, KeyCode::Char('x'));
+    press(&mut app, &jobs, KeyCode::Enter);
+    assert!(rx.try_recv().is_err(), "處理中不應重複送出");
+    let Screen::Setup(form) = &app.screen else {
+        panic!("应停留在设定表单");
+    };
+    assert_eq!(form.value("账号"), "3120000001", "處理中輸入不應被改動");
 }
 
 #[test]
@@ -322,13 +351,11 @@ fn settings_opens_account_forms() {
 fn login_captcha_submission_sends_job() {
     let (jobs, rx) = channel();
     let mut app = App::new(AccessPolicy::Auto);
-    app.set_screen(Screen::Login(Box::new(
-        crate::tui::app::LoginScreen::Captcha {
-            path: std::path::PathBuf::from("/tmp/captcha.png"),
-            input: crate::tui::text::InputLine::new(),
-            error: None,
-        },
-    )));
+    app.login = Some(Box::new(crate::tui::app::LoginScreen::Captcha {
+        path: std::path::PathBuf::from("/tmp/captcha.png"),
+        input: crate::tui::text::InputLine::new(),
+        error: None,
+    }));
 
     type_text(&mut app, &jobs, "a1b2");
     press(&mut app, &jobs, KeyCode::Enter);
@@ -345,12 +372,12 @@ fn login_captcha_submission_sends_job() {
 fn login_mfa_requires_code_then_sends() {
     let (jobs, rx) = channel();
     let mut app = App::new(AccessPolicy::Auto);
-    app.set_screen(Screen::Login(Box::new(crate::tui::app::LoginScreen::Mfa {
+    app.login = Some(Box::new(crate::tui::app::LoginScreen::Mfa {
         phone: Some("138****8888".to_owned()),
         sent: true,
         input: crate::tui::text::InputLine::new(),
         error: None,
-    })));
+    }));
 
     // 空輸入按 enter 不應送出。
     press(&mut app, &jobs, KeyCode::Enter);
@@ -373,21 +400,22 @@ fn quitting_sets_flag() {
     assert!(app.quit);
 }
 
-/// 登入失敗畫面。
+/// 登入失敗畫面（覆蓋在空的主畫面上）。
 fn failed_app(message: &str) -> App {
     let mut app = App::new(AccessPolicy::Auto);
-    app.set_screen(Screen::Login(Box::new(LoginScreen::Failed {
+    app.set_screen(Screen::Main);
+    app.login = Some(Box::new(LoginScreen::Failed {
         message: message.to_owned(),
-    })));
+    }));
     app
 }
 
 /// 目前登入憑證表單（測試輔助）。
 fn credentials_form(app: &App) -> &FormState {
-    let Screen::Login(screen) = &app.screen else {
+    let Some(screen) = app.login.as_deref() else {
         panic!("应停留在登录画面");
     };
-    let LoginScreen::Credentials { form, .. } = screen.as_ref() else {
+    let LoginScreen::Credentials { form, .. } = screen else {
         panic!("应处于凭证表单");
     };
     form
@@ -401,8 +429,8 @@ fn failed_screen_retries_with_saved_credentials_or_quits() {
     press(&mut app, &jobs, KeyCode::Enter);
     assert!(matches!(rx.try_recv(), Ok(Job::RetryLogin)));
     assert!(
-        matches!(app.screen, Screen::Login(_)),
-        "重試時應顯示進度畫面"
+        matches!(app.login.as_deref(), Some(LoginScreen::Progress { .. })),
+        "重試時應顯示進度覆蓋層"
     );
 
     press(&mut app, &jobs, KeyCode::Char('q'));
@@ -428,15 +456,44 @@ fn failed_screen_opens_credentials_form() {
 
     // esc 回到失敗畫面，並保留原本的錯誤訊息。
     press(&mut app, &jobs, KeyCode::Esc);
-    match &app.screen {
-        Screen::Login(screen) => match screen.as_ref() {
-            LoginScreen::Failed { message } => {
-                assert_eq!(message, "登录失败：用户名或密码错误");
-            }
-            other => panic!("应回到失败画面，实际为 {other:?}"),
-        },
-        _ => panic!("应停留在登录画面"),
+    match app.login.as_deref() {
+        Some(LoginScreen::Failed { message }) => {
+            assert_eq!(message, "登录失败：用户名或密码错误");
+        }
+        other => panic!("应回到失败画面，实际为 {other:?}"),
     }
+}
+
+#[test]
+fn login_overlay_takes_keys_and_keeps_underlying_screen() {
+    let (jobs, _rx) = channel();
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.login = Some(Box::new(LoginScreen::Captcha {
+        path: std::path::PathBuf::from("/tmp/captcha.png"),
+        input: crate::tui::text::InputLine::new(),
+        error: None,
+    }));
+
+    // 主畫面按鍵（右鍵切頁）在覆蓋層開啟時不生效。
+    press(&mut app, &jobs, KeyCode::Right);
+    assert_eq!(app.nav, NavItem::Schedule, "覆蓋層開啟時不應切換頁面");
+    assert!(matches!(app.screen, Screen::Main), "底層畫面維持不變");
+
+    // 輸入進驗證碼框。
+    type_text(&mut app, &jobs, "9f9f");
+    let Some(LoginScreen::Captcha { input, .. }) = app.login.as_deref() else {
+        panic!("应停留在验证码画面");
+    };
+    assert_eq!(input.value(), "9f9f");
+
+    // Ctrl+P 在覆蓋層開啟時不應在底層打開設定。
+    handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        &jobs,
+    );
+    assert!(matches!(app.screen, Screen::Main), "覆蓋層期間不應開啟設定");
 }
 
 #[test]
@@ -458,6 +515,118 @@ fn bracket_keys_switch_homework_group_only_on_homework_page() {
     app.nav = NavItem::Schedule;
     press(&mut app, &jobs, KeyCode::Char(']'));
     assert_eq!(app.homework_group, HomeworkGroup::Completed);
+}
+
+/// 思源學堂測試用活動。
+fn lms_activity(id: &str, kind: &str) -> LmsActivity {
+    LmsActivity {
+        id: id.to_owned(),
+        course_id: None,
+        kind: kind.to_owned(),
+        title: Some(format!("活动 {id}")),
+        start_time: None,
+        end_time: None,
+        submit_by_group: None,
+        group_id: None,
+        description: None,
+        user_submit_count: None,
+        published: None,
+    }
+}
+
+#[test]
+fn bracket_keys_switch_activity_group_on_lms_activities() {
+    let (jobs, rx) = channel();
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Lms;
+    app.lms.level = LmsLevel::Activities;
+    app.lms.activities = Page::Ready(vec![
+        lms_activity("1", "lesson"),
+        lms_activity("2", "homework"),
+    ]);
+    app.activity_state.select(Some(1));
+
+    // 直播（空組）→ 課程內容：選取重設、不發任務。
+    press(&mut app, &jobs, KeyCode::Char(']'));
+    assert_eq!(app.lms.activity_group, ActivityGroup::Lesson);
+    assert_eq!(app.page_selection(), 0);
+    assert!(rx.try_recv().is_err(), "切換分組不應送出網路任務");
+
+    press(&mut app, &jobs, KeyCode::Char(']'));
+    assert_eq!(app.lms.activity_group, ActivityGroup::Homework);
+    press(&mut app, &jobs, KeyCode::Char('['));
+    assert_eq!(app.lms.activity_group, ActivityGroup::Lesson);
+
+    // 其他層級不生效。
+    app.lms.level = LmsLevel::Courses;
+    press(&mut app, &jobs, KeyCode::Char(']'));
+    assert_eq!(app.lms.activity_group, ActivityGroup::Lesson);
+}
+
+#[test]
+fn o_key_sends_open_activity_for_selected_item() {
+    let (jobs, rx) = channel();
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Lms;
+    app.lms.level = LmsLevel::Activities;
+    app.lms.activity_group = ActivityGroup::Homework;
+    app.lms.activities = Page::Ready(vec![
+        lms_activity("1", "lesson"),
+        lms_activity("2", "homework"),
+    ]);
+
+    // 過濾後清單的第一項為作業 2。
+    press(&mut app, &jobs, KeyCode::Char('o'));
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(Job::OpenActivity { activity_id, kind })
+            if activity_id == "2" && kind == ActivityKind::Homework
+    ));
+
+    // 詳情層沿用目前活動。
+    app.lms.level = LmsLevel::Detail;
+    app.lms.detail = Page::Ready(ActivityDetailView {
+        id: "2".to_owned(),
+        title: "作业".to_owned(),
+        kind: ActivityKind::Homework,
+        end_time: None,
+        submit_by_group: false,
+        submissions: None,
+        note: None,
+    });
+    press(&mut app, &jobs, KeyCode::Char('o'));
+    assert!(
+        matches!(rx.try_recv(), Ok(Job::OpenActivity { activity_id, .. }) if activity_id == "2")
+    );
+
+    // 其他頁面不生效。
+    app.nav = NavItem::Schedule;
+    press(&mut app, &jobs, KeyCode::Char('o'));
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn enter_on_lms_activities_uses_filtered_selection() {
+    let (jobs, rx) = channel();
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Lms;
+    app.lms.level = LmsLevel::Activities;
+    app.lms.activity_group = ActivityGroup::Homework;
+    app.lms.activities = Page::Ready(vec![
+        lms_activity("1", "lesson"),
+        lms_activity("2", "homework"),
+    ]);
+
+    press(&mut app, &jobs, KeyCode::Enter);
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(Job::LoadActivityDetail { activity_id }) if activity_id == "2"
+    ));
+    assert_eq!(app.lms.level, LmsLevel::Detail);
+    assert!(app.lms.detail.is_loading(), "應切換到詳情載入中");
 }
 
 #[test]

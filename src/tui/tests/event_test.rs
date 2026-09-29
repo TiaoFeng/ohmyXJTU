@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 use std::sync::mpsc::channel;
+use std::time::Duration;
 
 use crate::config::AccessPolicy;
 use crate::domain::homework::{HomeworkGroup, HomeworkInput, HomeworkState, aggregate};
@@ -40,18 +41,16 @@ fn captcha_event_resets_input_but_keeps_error() {
         &mut app,
         Event::LoginNeedsCaptcha(PathBuf::from("/tmp/captcha-1.png")),
     );
-    let Screen::Login(screen) = &app.screen else {
-        panic!("应进入登录画面");
-    };
-    assert!(matches!(screen.as_ref(), LoginScreen::Captcha { .. }));
+    assert!(
+        matches!(app.login.as_deref(), Some(LoginScreen::Captcha { .. })),
+        "應顯示驗證碼覆蓋層"
+    );
     assert_eq!(
         app.captcha_path.as_deref(),
         Some(std::path::Path::new("/tmp/captcha-1.png"))
     );
 
-    if let Screen::Login(screen) = &mut app.screen
-        && let LoginScreen::Captcha { input, error, .. } = screen.as_mut()
-    {
+    if let Some(LoginScreen::Captcha { input, error, .. }) = app.login.as_deref_mut() {
         input.set("a1b2");
         *error = Some("验证码错误".to_owned());
     }
@@ -62,11 +61,8 @@ fn captcha_event_resets_input_but_keeps_error() {
         Event::LoginNeedsCaptcha(PathBuf::from("/tmp/captcha-2.png")),
     );
 
-    let Screen::Login(screen) = &app.screen else {
-        panic!("应进入登录画面");
-    };
-    match screen.as_ref() {
-        LoginScreen::Captcha { input, error, path } => {
+    match app.login.as_deref() {
+        Some(LoginScreen::Captcha { input, error, path }) => {
             assert_eq!(error.as_deref(), Some("验证码错误"), "應保留上一次的錯誤");
             assert!(input.is_empty(), "換圖後舊驗證碼應清空");
             assert_eq!(path, &PathBuf::from("/tmp/captcha-2.png"));
@@ -85,9 +81,7 @@ fn mfa_event_preserves_typed_code() {
             sent: false,
         },
     );
-    if let Screen::Login(screen) = &mut app.screen
-        && let LoginScreen::Mfa { input, .. } = screen.as_mut()
-    {
+    if let Some(LoginScreen::Mfa { input, .. }) = app.login.as_deref_mut() {
         input.set("123456");
     }
 
@@ -100,11 +94,8 @@ fn mfa_event_preserves_typed_code() {
         },
     );
 
-    let Screen::Login(screen) = &app.screen else {
-        panic!("应进入登录画面");
-    };
-    match screen.as_ref() {
-        LoginScreen::Mfa { input, sent, .. } => {
+    match app.login.as_deref() {
+        Some(LoginScreen::Mfa { input, sent, .. }) => {
             assert!(*sent);
             assert_eq!(input.value(), "123456");
         }
@@ -115,9 +106,10 @@ fn mfa_event_preserves_typed_code() {
 #[test]
 fn login_success_returns_to_main_and_updates_site_mode() {
     let mut app = app();
-    app.set_screen(Screen::Login(Box::new(LoginScreen::Progress {
+    app.set_screen(Screen::Main);
+    app.login = Some(Box::new(LoginScreen::Progress {
         note: "正在登录…".to_owned(),
-    })));
+    }));
     apply_event(
         &mut app,
         Event::LoginSucceeded {
@@ -125,6 +117,7 @@ fn login_success_returns_to_main_and_updates_site_mode() {
             mode: Some(AccessMode::Direct),
         },
     );
+    assert!(app.login.is_none(), "登入成功後應關閉覆蓋層");
     assert!(matches!(app.screen, Screen::Main));
     assert_eq!(app.message_text(), Some("登录成功"));
     // 目前頁面為課表（考勤站點）：底欄顯示實際訪問方式。
@@ -202,21 +195,27 @@ fn homework_event_updates_groups_and_counts() {
             items,
             issues: Vec::new(),
             progress: None,
+            elapsed: Duration::from_millis(1200),
+            requests: 7,
         }),
     );
 
     let data = app.homework.ready().expect("应有作业资料");
     assert_eq!(data.group_count(HomeworkGroup::Unfinished), 1);
     assert_eq!(data.group_count(HomeworkGroup::Completed), 0);
-    assert_eq!(app.message_text(), Some("作业已更新：未完成 1 项"));
+    assert_eq!(
+        app.message_text(),
+        Some("作业已更新：未完成 1 项（用时 1.2s）")
+    );
 }
 
 #[test]
-fn data_failure_returns_to_main_and_marks_target_page() {
+fn data_failure_marks_target_page_without_touching_login_overlay() {
     let mut app = app();
-    app.set_screen(Screen::Login(Box::new(LoginScreen::Progress {
+    app.set_screen(Screen::Main);
+    app.login = Some(Box::new(LoginScreen::Progress {
         note: "正在登录…".to_owned(),
-    })));
+    }));
     app.schedule.start_loading("正在加载…");
 
     apply_event(
@@ -228,17 +227,19 @@ fn data_failure_returns_to_main_and_marks_target_page() {
         },
     );
 
-    // 資料任務失敗：離開「正在登录…」回到主畫面，失敗標記只落在課表頁。
+    // 資料任務失敗：失敗標記只落在課表頁；底層畫面與登入覆蓋層皆不變。
     assert!(matches!(app.screen, Screen::Main));
+    assert!(app.login.is_some(), "資料失敗不應關閉或替換登入覆蓋層");
     assert!(matches!(app.schedule, Page::Failed { .. }));
 }
 
 #[test]
-fn login_failure_switches_to_failed_screen() {
+fn login_failure_shows_failed_overlay() {
     let mut app = app();
-    app.set_screen(Screen::Login(Box::new(LoginScreen::Progress {
+    app.set_screen(Screen::Main);
+    app.login = Some(Box::new(LoginScreen::Progress {
         note: "正在登录…".to_owned(),
-    })));
+    }));
 
     apply_event(
         &mut app,
@@ -249,10 +250,11 @@ fn login_failure_switches_to_failed_screen() {
         },
     );
 
-    match &app.screen {
-        Screen::Login(screen) => assert!(matches!(screen.as_ref(), LoginScreen::Failed { .. })),
-        _ => panic!("应停留在登录画面并显示失败原因"),
-    }
+    assert!(
+        matches!(app.login.as_deref(), Some(LoginScreen::Failed { .. })),
+        "登入失敗應在覆蓋層顯示失敗畫面"
+    );
+    assert!(matches!(app.screen, Screen::Main), "底層畫面維持不變");
 }
 
 #[test]
@@ -286,6 +288,93 @@ fn settings_failure_keeps_popup_and_draft() {
         app.access_policy,
         AccessPolicy::Auto,
         "失败时不得更新已生效值"
+    );
+}
+
+#[test]
+fn credential_failure_restores_unlock_form_with_error() {
+    let mut app = app();
+    let mut form = FormState::unlock();
+    form.fields[0].value.set("secret123");
+    form.busy = true;
+    app.set_screen(Screen::Unlock(form));
+
+    apply_event(
+        &mut app,
+        Event::Failed {
+            what: "解锁凭证".to_owned(),
+            message: "加密口令错误".to_owned(),
+            target: FailedTarget::Credentials,
+        },
+    );
+
+    let Screen::Unlock(form) = &app.screen else {
+        panic!("應留在解鎖表單");
+    };
+    assert!(!form.busy, "失敗後應解除處理中");
+    assert_eq!(form.error.as_deref(), Some("解锁凭证失败：加密口令错误"));
+    assert!(form.fields[0].value.is_empty(), "口令欄位應清空");
+}
+
+#[test]
+fn credential_failure_keeps_setup_account_but_clears_secrets() {
+    let mut app = app();
+    let mut form = FormState::setup();
+    form.fields[0].value.set("secret123");
+    form.fields[1].value.set("secret123");
+    form.fields[2].value.set("3120000001");
+    form.fields[3].value.set("pw-12345");
+    form.fields[4].value.set("pw-12345");
+    form.busy = true;
+    app.set_screen(Screen::Setup(form));
+
+    apply_event(
+        &mut app,
+        Event::Failed {
+            what: "创建凭证".to_owned(),
+            message: "凭证文件写入失败".to_owned(),
+            target: FailedTarget::Credentials,
+        },
+    );
+
+    let Screen::Setup(form) = &app.screen else {
+        panic!("應留在設定表單");
+    };
+    assert!(!form.busy);
+    assert!(form.error.is_some());
+    assert_eq!(form.value("账号"), "3120000001", "帳號欄位應保留");
+    assert!(form.value("密码").is_empty(), "密碼欄位應清空");
+    assert!(form.value("加密口令").is_empty(), "口令欄位應清空");
+}
+
+#[test]
+fn passphrase_updated_returns_to_settings_list() {
+    let mut app = app();
+    let mut form = FormState::change_passphrase();
+    form.busy = true;
+    app.set_screen(Screen::SettingsForm(form));
+
+    apply_event(&mut app, Event::PassphraseUpdated);
+
+    assert!(
+        matches!(app.screen, Screen::Settings(_)),
+        "成功後應回到設定選單"
+    );
+    assert_eq!(app.message_text(), Some("加密口令已更新"));
+}
+
+#[test]
+fn account_updated_leaves_form_for_main() {
+    let mut app = app();
+    let mut form = FormState::change_account();
+    form.busy = true;
+    app.set_screen(Screen::SettingsForm(form));
+
+    apply_event(&mut app, Event::AccountUpdated);
+
+    assert!(
+        matches!(app.screen, Screen::Main),
+        "修改帳號成功後應離開表單"
     );
 }
 
@@ -331,13 +420,12 @@ fn notice_event_only_sets_message() {
 /// 帶著已輸入內容的憑證表單。
 fn credentials_app(typed: &str) -> App {
     let mut app = app();
-    app.set_screen(Screen::Login(Box::new(LoginScreen::Credentials {
+    app.set_screen(Screen::Main);
+    app.login = Some(Box::new(LoginScreen::Credentials {
         form: FormState::login_retry(),
         message: "登录失败：用户名或密码错误".to_owned(),
-    })));
-    if let Screen::Login(screen) = &mut app.screen
-        && let LoginScreen::Credentials { form, .. } = screen.as_mut()
-    {
+    }));
+    if let Some(LoginScreen::Credentials { form, .. }) = app.login.as_deref_mut() {
         form.busy = true;
         form.fields[0].value.set(typed);
     }
@@ -353,11 +441,8 @@ fn login_failed_stays_on_credentials_form() {
         Event::LoginFailed("登录失败：用户名或密码错误".to_owned()),
     );
 
-    let Screen::Login(screen) = &app.screen else {
-        panic!("应停留在登录画面");
-    };
-    match screen.as_ref() {
-        LoginScreen::Credentials { form, .. } => {
+    match app.login.as_deref() {
+        Some(LoginScreen::Credentials { form, .. }) => {
             assert_eq!(
                 form.error.as_deref(),
                 Some("登录失败：用户名或密码错误"),
@@ -387,11 +472,8 @@ fn task_failure_stays_on_credentials_form() {
         },
     );
 
-    let Screen::Login(screen) = &app.screen else {
-        panic!("应停留在登录画面");
-    };
-    match screen.as_ref() {
-        LoginScreen::Credentials { form, .. } => {
+    match app.login.as_deref() {
+        Some(LoginScreen::Credentials { form, .. }) => {
             assert_eq!(
                 form.error.as_deref(),
                 Some("重新输入账户失败：口令错误或凭证文件已损坏")
@@ -402,6 +484,21 @@ fn task_failure_stays_on_credentials_form() {
         other => panic!("应停留在凭证表单，实际为 {other:?}"),
     }
     assert!(app.message_text().is_some(), "狀態列仍應顯示錯誤");
+}
+
+#[test]
+fn open_url_event_queues_browser_open() {
+    let mut app = app();
+    apply_event(
+        &mut app,
+        Event::OpenUrl("https://lms.xjtu.edu.cn".to_owned()),
+    );
+    assert_eq!(
+        app.pending_open.as_deref(),
+        Some("https://lms.xjtu.edu.cn"),
+        "網址應交給主迴圈開啟"
+    );
+    assert!(app.message_text().is_some(), "應顯示進行中提示");
 }
 
 #[test]

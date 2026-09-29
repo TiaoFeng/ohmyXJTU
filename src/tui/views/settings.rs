@@ -4,7 +4,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Clear, Paragraph};
+use ratatui::widgets::Paragraph;
 
 use crate::tui::app::{App, SettingsState};
 use crate::tui::theme::THEME;
@@ -12,11 +12,7 @@ use crate::tui::theme::THEME;
 /// 繪製設定選單。
 pub fn draw(frame: &mut Frame, app: &App, state: SettingsState) {
     let area = crate::tui::ui::centered_rect(frame.area(), 60, 12);
-    frame.render_widget(Clear, area);
-
-    let block = THEME.popup_block("账户设置");
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    let inner = crate::tui::ui::popup_surface(frame, area, "账户设置");
 
     let chunks = Layout::vertical([Constraint::Min(5), Constraint::Length(2)]).split(inner);
 

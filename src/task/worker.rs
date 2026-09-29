@@ -234,6 +234,12 @@ pub enum Event {
     },
     /// 會話已全部重置（解鎖、換帳號或切換訪問模式）：介面清除站點登入狀態。
     SessionsCleared,
+    /// 進行中的資料載入已被取消（換帳號或切換訪問模式）：
+    /// 介面解除該頁的載入中狀態，保留已取得的資料。
+    LoadingCancelled {
+        /// 被取消任務所屬的介面位置。
+        target: FailedTarget,
+    },
     /// 站點登入態已失效，即將重新登入。
     SessionExpired {
         /// 站點。
@@ -254,8 +260,8 @@ pub enum Event {
     },
     /// 考勤流水資料。
     Flow(Box<FlowData>),
-    /// 課程列表。
-    Courses(Vec<LmsCourse>),
+    /// 課程列表（含當前學期提示）。
+    Courses(CoursesData),
     /// 課程活動列表。
     Activities(Vec<LmsActivity>),
     /// 活動詳情。
@@ -306,6 +312,15 @@ pub enum FailedTarget {
     Settings,
 }
 
+/// 課程列表與當前學期（供介面分區顯示）。
+#[derive(Debug)]
+pub struct CoursesData {
+    /// 課程清單（伺服器原始順序）。
+    pub courses: Vec<LmsCourse>,
+    /// 判定出的當前學期；`None` 表示無法判定（介面不分區）。
+    pub current_term: Option<TermCode>,
+}
+
 /// 作業頁的一次載入更新（部分結果或最終結果）。
 #[derive(Debug)]
 pub struct HomeworkUpdate {
@@ -323,6 +338,8 @@ pub struct HomeworkUpdate {
     pub items: Vec<HomeworkItem>,
     /// 提交狀態無法確認的原因彙總（依項數遞減）。
     pub issues: Vec<HomeworkIssue>,
+    /// 因活動列表查詢失敗（非認證、非連線層錯誤）而略過的課程數。
+    pub courses_failed: usize,
     /// 載入進度（已完成課程數, 課程總數）；`None` 表示已載入完成。
     pub progress: Option<(usize, usize)>,
     /// 本次載入已花費的時間（診斷用）。
@@ -372,6 +389,8 @@ struct Worker {
     generation: u64,
     /// 思源學堂課程／活動快取。
     cache: LmsCache,
+    /// 本會話曾查得的考勤學期（供課程分區使用，不重複請求）。
+    known_term: Option<TermCode>,
 }
 
 /// 作業載入的步進階段。
@@ -407,6 +426,8 @@ struct HomeworkRunner {
     activity_index: usize,
     /// 已彙總的輸入。
     inputs: Vec<HomeworkInput>,
+    /// 活動列表查詢失敗而略過的課程數。
+    failed_courses: usize,
     /// 目前階段。
     stage: HomeworkStage,
     /// 是否略過快取。
@@ -442,6 +463,7 @@ impl HomeworkRunner {
             term_options: self.term_options.clone(),
             items: homework::aggregate(&self.inputs, now),
             issues: homework_issues(&self.inputs),
+            courses_failed: self.failed_courses,
             progress,
             elapsed,
             requests,
@@ -572,6 +594,7 @@ pub fn spawn(config: Config, vault: Vault) -> AppResult<(Sender<Job>, Receiver<E
         pending_data: VecDeque::new(),
         generation: 0,
         cache: LmsCache::default(),
+        known_term: None,
     };
 
     thread::Builder::new()
@@ -974,6 +997,11 @@ impl Worker {
             return;
         }
         if generation != self.generation {
+            // 控制任務（換帳號、切換訪問模式）已使本任務失效：
+            // 通知介面解除載入中狀態，避免頁面停留在永久的「載入中」。
+            self.emit(Event::LoadingCancelled {
+                target: failed_target_of(&job),
+            });
             return;
         }
 
@@ -1090,6 +1118,8 @@ impl Worker {
 
         let (monday, sunday) = schedule::week_window(today);
         let records = api.records_between(monday, sunday)?;
+        // 記錄本會話得知的學期，供思源學堂課程分區使用（不重複查詢考勤）。
+        self.known_term = TermCode::parse(&term);
 
         let skipped = courses
             .iter()
@@ -1152,6 +1182,9 @@ impl Worker {
                 self.emit(Event::Notice(
                     "账号或访问模式已变更，已取消进行中的作业加载".to_owned(),
                 ));
+                self.emit(Event::LoadingCancelled {
+                    target: FailedTarget::Homework,
+                });
                 return;
             }
             if matches!(runner.stage, HomeworkStage::Done) {
@@ -1186,6 +1219,7 @@ impl Worker {
                 term_options: Vec::new(),
                 items: Vec::new(),
                 issues: Vec::new(),
+                courses_failed: 0,
                 progress: None,
                 elapsed: started.elapsed(),
                 requests: self.request_count().saturating_sub(requests_baseline),
@@ -1247,6 +1281,7 @@ impl Worker {
             activities: Vec::new(),
             activity_index: 0,
             inputs: Vec::new(),
+            failed_courses: 0,
             stage,
             force,
             started,
@@ -1264,22 +1299,33 @@ impl Worker {
                     .current_course()
                     .map(|course| course.id.clone())
                     .ok_or_else(|| AppError::protocol("课程索引越界"))?;
-                let (activities, skipped) = self.lms_activities(&course_id, runner.force)?;
-                if skipped > 0 {
-                    self.emit(Event::Notice(format!(
-                        "已跳过 {skipped} 项无法解析的思源学堂数据"
-                    )));
+                match self.lms_activities(&course_id, runner.force) {
+                    Ok((activities, skipped)) => {
+                        if skipped > 0 {
+                            self.emit(Event::Notice(format!(
+                                "已跳过 {skipped} 项无法解析的思源学堂数据"
+                            )));
+                        }
+                        runner.activities = activities
+                            .into_iter()
+                            .filter(|activity| activity.kind() == ActivityKind::Homework)
+                            .collect();
+                        runner.activity_index = 0;
+                        runner.stage = if runner.activities.is_empty() {
+                            HomeworkStage::AdvanceCourse
+                        } else {
+                            HomeworkStage::Submission
+                        };
+                    }
+                    // 登入態失效與連線層錯誤向上傳播（重登、路由回退或最終失敗）。
+                    Err(err) if !is_recoverable(&err) => return Err(err),
+                    // 單門課程的活動列表失敗：略過該課程，其餘課程照常載入，
+                    // 並在彙總中以數量提示（不將整批標為失敗）。
+                    Err(_) => {
+                        runner.failed_courses += 1;
+                        runner.stage = HomeworkStage::AdvanceCourse;
+                    }
                 }
-                runner.activities = activities
-                    .into_iter()
-                    .filter(|activity| activity.kind() == ActivityKind::Homework)
-                    .collect();
-                runner.activity_index = 0;
-                runner.stage = if runner.activities.is_empty() {
-                    HomeworkStage::AdvanceCourse
-                } else {
-                    HomeworkStage::Submission
-                };
             }
             HomeworkStage::Submission => {
                 let activity = runner
@@ -1349,13 +1395,18 @@ impl Worker {
 
     /// 嘗試由考勤系統取得當前學期；未登入或查詢失敗時回傳 `None`（不觸發登入）。
     fn attendance_term(&mut self) -> Option<TermCode> {
-        let session = self.session.as_mut()?;
-        if !session.is_logged_in(SiteKind::Attendance) {
-            return None;
-        }
-        let mut api = AttendanceApi::new(session);
-        let semester = api.current_semester().ok()?;
-        TermCode::parse(&semester.term_name())
+        let term = {
+            let session = self.session.as_mut()?;
+            if !session.is_logged_in(SiteKind::Attendance) {
+                return None;
+            }
+            let mut api = AttendanceApi::new(session);
+            let semester = api.current_semester().ok()?;
+            TermCode::parse(&semester.term_name())?
+        };
+        // 記住本會話得知的學期，供思源學堂課程分區使用（不重複請求）。
+        self.known_term = Some(term);
+        Some(term)
     }
 
     fn load_flow(&mut self, page: u32) -> AppResult<FlowData> {
@@ -1371,9 +1422,23 @@ impl Worker {
         })
     }
 
-    fn load_courses(&mut self, force: bool) -> AppResult<Vec<LmsCourse>> {
+    fn load_courses(&mut self, force: bool) -> AppResult<CoursesData> {
         let (courses, _) = self.lms_courses(force)?;
-        Ok(courses)
+        Ok(CoursesData {
+            courses,
+            current_term: self.current_term_hint(),
+        })
+    }
+
+    /// 目前已能確定的本學期（不觸發任何網路請求）：
+    /// 本會話曾查得的考勤學期 → 使用者記住的學期 → 無法判定。
+    fn current_term_hint(&self) -> Option<TermCode> {
+        self.known_term.or_else(|| {
+            self.config
+                .homework_term
+                .as_deref()
+                .and_then(TermCode::parse)
+        })
     }
 
     fn load_activities(&mut self, course_id: &str, force: bool) -> AppResult<Vec<LmsActivity>> {

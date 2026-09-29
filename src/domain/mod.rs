@@ -2,6 +2,7 @@
 
 pub mod activity;
 pub mod attendance_match;
+pub mod course_list;
 pub mod homework;
 pub mod schedule;
 pub mod semester;

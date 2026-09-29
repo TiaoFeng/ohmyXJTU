@@ -4,7 +4,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 
 use crate::tui::app::{FormState, LoginScreen};
 use crate::tui::text::InputLine;
@@ -29,6 +29,20 @@ pub fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
         width,
         height,
     }
+}
+
+/// 繪製不透明彈窗表面：清除底層 → 以 surface 底色鋪滿整塊 → 畫粉色邊框。
+///
+/// 回傳內框區域。所有彈窗（表單、設定、學期選擇器、登入覆蓋層）共用此契約，
+/// 保證框線逐列連續且底層文字不會穿透；不可只依賴底層恰好沒有文字。
+pub fn popup_surface(frame: &mut Frame, area: Rect, title: &str) -> Rect {
+    frame.render_widget(Clear, area);
+    // 先以彈窗底色鋪滿整個矩形，再畫邊框。
+    frame.render_widget(Block::default().style(THEME.surface_style()), area);
+    let block = THEME.popup_block(title);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    inner
 }
 
 /// 輸入框的可見內容與游標欄位（水平捲動，含寬字元）。
@@ -120,11 +134,7 @@ pub fn draw_form(frame: &mut Frame, form: &FormState, title: &str, hint: &str, n
     let note_rows = u16::from(note.is_some()) * 2;
     let content_height = u16::try_from(form.fields.len()).unwrap_or(0) * 2 + note_rows + 6;
     let area = centered_rect(frame.area(), 76, content_height);
-    frame.render_widget(Clear, area);
-
-    let block = THEME.popup_block(title);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    let inner = popup_surface(frame, area, title);
 
     let mut constraints: Vec<Constraint> = Vec::new();
     if note.is_some() {
@@ -288,10 +298,7 @@ pub fn draw_login(frame: &mut Frame, screen: &LoginScreen) {
         84,
         u16::try_from(lines.len()).unwrap_or(1) + field_rows + 6,
     );
-    frame.render_widget(Clear, area);
-    let block = THEME.popup_block(title);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    let inner = popup_surface(frame, area, title);
 
     let chunks = Layout::vertical([
         Constraint::Min(1),

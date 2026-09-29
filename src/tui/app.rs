@@ -267,6 +267,8 @@ pub struct LmsState {
     pub activity_index: usize,
     /// 活動列表目前顯示的分組。
     pub activity_group: ActivityGroup,
+    /// 課程列表的當前學期（供分區顯示；`None` 表示無法判定）。
+    pub courses_term: Option<TermCode>,
     /// 目前層級。
     pub level: LmsLevel,
 }
@@ -288,6 +290,8 @@ pub struct HomeworkData {
     pub items: Vec<HomeworkItem>,
     /// 「待核实」作業的共同原因彙總（依項數遞減）。
     pub issues: Vec<HomeworkIssue>,
+    /// 活動列表查詢失敗而略過的課程數。
+    pub courses_failed: usize,
     /// 載入進度（完成, 總數）；`None` 表示載入完成。
     pub progress: Option<(usize, usize)>,
 }
@@ -811,20 +815,25 @@ impl App {
         }
     }
 
-    /// 下一個項目。
+    /// 下一個項目（非空清單首尾循環）。
     pub fn select_next(&mut self) {
         let len = self.page_len();
         if len == 0 {
             return;
         }
-        let next = (self.page_selection() + 1).min(len - 1);
-        self.set_selection(next);
+        // 先將可能過期的索引正規化，再取下一個（尾端回到開頭）。
+        let current = self.page_selection().min(len - 1);
+        self.set_selection((current + 1) % len);
     }
 
-    /// 上一個項目。
+    /// 上一個項目（非空清單首尾循環）。
     pub fn select_previous(&mut self) {
-        let current = self.page_selection();
-        self.set_selection(current.saturating_sub(1));
+        let len = self.page_len();
+        if len == 0 {
+            return;
+        }
+        let current = self.page_selection().min(len - 1);
+        self.set_selection((current + len - 1) % len);
     }
 
     /// 記錄站點登入成功時的訪問方式。
@@ -892,6 +901,34 @@ impl App {
             | FailedTarget::Credentials
             | FailedTarget::ActivityOpen
             | FailedTarget::Settings => {}
+        }
+    }
+
+    /// 解除載入中狀態（進行中的載入被取消時）。
+    ///
+    /// 保留已取得的部分資料（轉為就緒），沒有資料時回到未載入。
+    pub fn cancel_loading(&mut self, target: FailedTarget) {
+        match target {
+            FailedTarget::Schedule => Self::settle_loading(&mut self.schedule),
+            FailedTarget::Homework => Self::settle_loading(&mut self.homework),
+            FailedTarget::Flow => Self::settle_loading(&mut self.attendance),
+            FailedTarget::Courses => Self::settle_loading(&mut self.lms.courses),
+            FailedTarget::Activities => Self::settle_loading(&mut self.lms.activities),
+            FailedTarget::ActivityDetail => Self::settle_loading(&mut self.lms.detail),
+            FailedTarget::Login
+            | FailedTarget::Credentials
+            | FailedTarget::ActivityOpen
+            | FailedTarget::Settings => {}
+        }
+    }
+
+    /// 將載入中的頁面收斂為終態（保留已取得的資料）。
+    fn settle_loading<T>(page: &mut Page<T>) {
+        if let Page::Loading { stale, .. } = page {
+            *page = match stale.take() {
+                Some(value) => Page::Ready(value),
+                None => Page::Idle,
+            };
         }
     }
 

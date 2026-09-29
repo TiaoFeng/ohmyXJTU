@@ -9,9 +9,10 @@ use crate::domain::homework::{HomeworkGroup, HomeworkInput, HomeworkState, aggre
 use crate::domain::semester::{TermCode, TermSource};
 use crate::session::{AccessMode, SiteKind};
 use crate::sites::lms::LmsCourse;
-use crate::task::{Event, FailedTarget, HomeworkUpdate};
+use crate::task::{CoursesData, Event, FailedTarget, HomeworkUpdate};
 use crate::tui::app::{
-    App, FlowData, FormState, LoginScreen, NavItem, Page, ScheduleData, Screen, SettingsState,
+    App, FlowData, FormState, HomeworkData, LoginScreen, NavItem, Page, ScheduleData, Screen,
+    SettingsState,
 };
 
 use super::apply_event as apply_event_with_jobs;
@@ -153,16 +154,24 @@ fn data_events_fill_pages() {
 
     apply_event(
         &mut app,
-        Event::Courses(vec![LmsCourse {
-            id: "42".to_owned(),
-            name: "编译原理".to_owned(),
-            course_code: None,
-            instructors: Vec::new(),
-            semester: None,
-            academic_year: None,
-        }]),
+        Event::Courses(CoursesData {
+            courses: vec![LmsCourse {
+                id: "42".to_owned(),
+                name: "编译原理".to_owned(),
+                course_code: None,
+                instructors: Vec::new(),
+                semester: None,
+                academic_year: None,
+            }],
+            current_term: Some(TermCode::parse("2026-2027-1").expect("学期")),
+        }),
     );
     assert_eq!(app.lms.courses.ready().map(Vec::len), Some(1));
+    assert_eq!(
+        app.lms.courses_term,
+        Some(TermCode::parse("2026-2027-1").expect("学期")),
+        "課程事件應帶入當前學期提示"
+    );
     assert!(app.message_text().is_some());
 }
 
@@ -194,6 +203,7 @@ fn homework_event_updates_groups_and_counts() {
             term_options: Vec::new(),
             items,
             issues: Vec::new(),
+            courses_failed: 0,
             progress: None,
             elapsed: Duration::from_millis(1200),
             requests: 7,
@@ -538,4 +548,82 @@ fn session_state_is_tracked_per_site() {
     // 解鎖、換帳號或切換訪問模式：全部清除。
     apply_event(&mut app, Event::SessionsCleared);
     assert_eq!(app.session_label(), "未登录");
+}
+
+#[test]
+fn homework_partial_updates_keep_page_loading_until_terminal() {
+    let mut app = app();
+    let update = |progress: Option<(usize, usize)>| {
+        Event::Homework(HomeworkUpdate {
+            term_label: Some("2026-2027 学年 第 1 学期".to_owned()),
+            term_source: Some(TermSource::Attendance),
+            courses_included: 2,
+            courses_skipped: 0,
+            term_options: Vec::new(),
+            items: Vec::new(),
+            issues: Vec::new(),
+            courses_failed: 0,
+            progress,
+            elapsed: Duration::from_millis(100),
+            requests: 1,
+        })
+    };
+
+    apply_event(&mut app, update(Some((0, 2))));
+    assert!(app.homework.is_loading(), "部分結果仍屬載入中");
+    assert!(app.homework.ready().is_some(), "部分結果應可顯示");
+    assert!(
+        app.homework
+            .note()
+            .is_some_and(|note| note.contains("已完成 0/2")),
+        "載入說明應帶進度：{:?}",
+        app.homework.note()
+    );
+
+    apply_event(&mut app, update(None));
+    assert!(!app.homework.is_loading(), "終態應結束載入");
+    assert!(
+        app.homework
+            .ready()
+            .is_some_and(|data| data.items.is_empty()),
+        "終態資料應就緒"
+    );
+}
+
+#[test]
+fn loading_cancelled_settles_page_without_losing_partial_data() {
+    let mut app = app();
+    app.homework.start_loading("正在汇总作业…");
+    apply_event(
+        &mut app,
+        Event::LoadingCancelled {
+            target: FailedTarget::Homework,
+        },
+    );
+    assert!(app.homework.is_idle(), "沒有資料時取消應回到未載入");
+
+    app.homework = Page::Loading {
+        note: "正在汇总作业（已完成 1/2 门课程，累计 0 项）…".to_owned(),
+        stale: Some(HomeworkData {
+            term_label: None,
+            term_source: None,
+            courses_included: 2,
+            courses_skipped: 0,
+            term_options: Vec::new(),
+            items: Vec::new(),
+            issues: Vec::new(),
+            courses_failed: 0,
+            progress: Some((1, 2)),
+        }),
+    };
+    apply_event(
+        &mut app,
+        Event::LoadingCancelled {
+            target: FailedTarget::Homework,
+        },
+    );
+    assert!(
+        matches!(app.homework, Page::Ready(_)),
+        "已有部分資料時取消應保留資料"
+    );
 }

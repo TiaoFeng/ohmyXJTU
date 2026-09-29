@@ -4,7 +4,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Clear, Paragraph, Wrap};
+use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::tui::app::TermPickerState;
 use crate::tui::theme::THEME;
@@ -12,11 +12,7 @@ use crate::tui::theme::THEME;
 /// 繪製學期選擇器。
 pub fn draw(frame: &mut Frame, state: &TermPickerState) {
     let area = crate::tui::ui::centered_rect(frame.area(), 62, 16);
-    frame.render_widget(Clear, area);
-
-    let block = THEME.popup_block("选择学期");
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    let inner = crate::tui::ui::popup_surface(frame, area, "选择学期");
 
     let chunks = Layout::vertical([
         Constraint::Length(2),

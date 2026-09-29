@@ -7,18 +7,21 @@ use std::path::PathBuf;
 
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
+use ratatui::style::Color;
 
 use crate::config::AccessPolicy;
-use crate::domain::homework::{HomeworkGroup, HomeworkInput, aggregate};
+use crate::domain::homework::{HomeworkGroup, HomeworkInput, HomeworkItem, aggregate};
 use crate::domain::semester::TermCode;
 use crate::session::{AccessMode, SiteKind};
-use crate::sites::lms::{ActivityKind, LmsActivity};
+use crate::sites::attendance::FlowRecord;
+use crate::sites::lms::{ActivityKind, LmsActivity, LmsCourse};
 use crate::task::HomeworkIssue;
 use crate::tui::app::{
-    ActivityDetailView, App, FormState, HomeworkData, LmsLevel, LoginScreen, NavItem, Page, Screen,
-    TermPickerState,
+    ActivityDetailView, App, FlowData, FormState, HomeworkData, LmsLevel, LoginScreen, NavItem,
+    Page, Screen, SettingsState, TermPickerState,
 };
 use crate::tui::text::{InputLine, MASK_CHAR};
+use crate::tui::theme::THEME;
 
 use super::*;
 
@@ -298,6 +301,7 @@ fn draws_homework_groups_and_switches_them() {
         term_options: Vec::new(),
         items,
         issues: Vec::new(),
+        courses_failed: 0,
         progress: Some((1, 2)),
     });
 
@@ -405,6 +409,7 @@ fn draws_homework_unknown_warning_with_reason() {
             reason: "无法确认提交状态：思源学堂用户信息解析失败".to_owned(),
             count: 1,
         }],
+        courses_failed: 0,
         progress: None,
     });
 
@@ -594,5 +599,393 @@ fn activity_detail_hides_submission_section_for_non_homework() {
     assert!(
         text.contains("提交记录：无法确认（待核实）"),
         "作業未知提交狀態應顯示待核实：\n{text}"
+    );
+}
+
+fn flow_record(id: &str, place: Option<&str>, time: Option<&str>, effective: bool) -> FlowRecord {
+    FlowRecord {
+        id: id.to_owned(),
+        classroom_name: place.map(str::to_owned),
+        collect_time: time.map(str::to_owned),
+        effective,
+    }
+}
+
+#[test]
+fn flow_rows_align_status_column_and_show_semantic_colors() {
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Attendance;
+    app.attendance = Page::Ready(FlowData {
+        records: vec![
+            flow_record("1", Some("主楼A101"), Some("2026-09-29 08:00:00"), true),
+            flow_record(
+                "2",
+                Some("西迁博物馆报告厅"),
+                Some("2026-09-29 09:00:00"),
+                false,
+            ),
+            flow_record("3", None, Some("2026-09-29 10:00:00"), true),
+        ],
+        page: 1,
+        total_pages: 1,
+        total: 3,
+    });
+    // 選取第三列（空地點），避免高亮樣式覆蓋前兩列的狀態色。
+    app.flow_state.select(Some(2));
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let backend = terminal.backend();
+
+    let (short_y, short_row) = find_row(backend, "主楼A101");
+    let (long_y, long_row) = find_row(backend, "西迁博物馆报告厅");
+    let (_, empty_row) = find_row(backend, "（无地点）");
+
+    let short_col = column_of(&short_row, "有效");
+    let long_col = column_of(&long_row, "未匹配");
+    let empty_col = column_of(&empty_row, "有效");
+    assert_eq!(
+        short_col, long_col,
+        "地点长度不得影响状态列起点：\n{short_row}\n{long_row}"
+    );
+    assert_eq!(short_col, empty_col, "空地点不得影响状态列起点");
+
+    assert_eq!(
+        backend.buffer()[(short_col, short_y)].fg,
+        THEME.green,
+        "有效應為成功綠"
+    );
+    assert_eq!(
+        backend.buffer()[(long_col, long_y)].fg,
+        THEME.yellow,
+        "未匹配應為警告黃"
+    );
+}
+
+#[test]
+fn flow_rows_degrade_on_narrow_terminal() {
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Attendance;
+    app.attendance = Page::Ready(FlowData {
+        records: vec![flow_record(
+            "1",
+            Some("西迁博物馆报告厅"),
+            Some("2026-09-29 08:00:00"),
+            true,
+        )],
+        page: 1,
+        total_pages: 1,
+        total: 1,
+    });
+
+    let terminal = draw(64, HEIGHT, |frame| crate::tui::views::draw(frame, &mut app));
+    let text = screen_text(terminal.backend());
+    assert!(text.contains('…'), "窄畫面應以省略號截斷地點：\n{text}");
+    assert!(text.contains("有效"), "狀態仍應可見：\n{text}");
+}
+
+fn homework_data(items: Vec<HomeworkItem>, progress: Option<(usize, usize)>) -> HomeworkData {
+    HomeworkData {
+        term_label: Some("2026-2027 学年 第 1 学期".to_owned()),
+        term_source: Some("考勤系统"),
+        courses_included: 2,
+        courses_skipped: 0,
+        term_options: Vec::new(),
+        items,
+        issues: Vec::new(),
+        courses_failed: 0,
+        progress,
+    }
+}
+
+#[test]
+fn homework_empty_states_distinguish_loading_and_terminal() {
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Homework;
+
+    // 載入中（0 項）：應顯示進度說明，不得顯示為失敗或空結果。
+    app.homework = Page::Loading {
+        note: "正在汇总作业（已完成 0/2 门课程，累计 0 项）…".to_owned(),
+        stale: Some(homework_data(Vec::new(), Some((0, 2)))),
+    };
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(
+        text.contains("已完成 0/2 门课程"),
+        "載入中應顯示進度：\n{text}"
+    );
+    assert!(!text.contains("加载失败"), "載入中不得顯示失敗：\n{text}");
+    assert!(
+        !text.contains("没有未完成的作业"),
+        "載入中不得顯示空結果：\n{text}"
+    );
+
+    // 終態空：明確顯示「本学期暂无作业」，而不是失敗。
+    app.homework = Page::Ready(homework_data(Vec::new(), None));
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(
+        text.contains("本学期暂无作业"),
+        "終態空應顯示明確空狀態：\n{text}"
+    );
+    assert!(!text.contains("加载失败"), "空結果不得顯示為失敗：\n{text}");
+}
+
+#[test]
+fn homework_shows_failed_course_count() {
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Homework;
+    let mut data = homework_data(Vec::new(), None);
+    data.courses_failed = 1;
+    app.homework = Page::Ready(data);
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(
+        text.contains("1 门课程查询失败"),
+        "應顯示略過的課程數：\n{text}"
+    );
+    assert!(text.contains("按 r 重试"), "應提示可重試：\n{text}");
+}
+
+fn lms_course(id: &str, code: Option<&str>) -> LmsCourse {
+    LmsCourse {
+        id: id.to_owned(),
+        name: format!("课程{id}"),
+        course_code: None,
+        instructors: Vec::new(),
+        semester: code.map(|code| crate::sites::lms::models::LmsSemester {
+            id: None,
+            code: Some(code.to_owned()),
+            name: None,
+            real_name: None,
+        }),
+        academic_year: None,
+    }
+}
+
+#[test]
+fn lms_courses_partition_current_term_first() {
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Lms;
+    app.lms.level = LmsLevel::Courses;
+    app.lms.courses = Page::Ready(vec![
+        lms_course("1", Some("2025-2")), // 歷史
+        lms_course("2", Some("2026-1")), // 當前學期
+        lms_course("3", None),           // 學期未知
+    ]);
+    app.lms.courses_term = Some(TermCode::parse("2026-2027-1").expect("学期"));
+    // 選取未知課程，避免高亮樣式覆蓋其他列的顏色斷言。
+    app.course_state.select(Some(2));
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let backend = terminal.backend();
+    let text = screen_text(backend);
+    assert!(
+        text.contains("当前学期 · 2026-2027 学年 第 1 学期"),
+        "應顯示當前學期分區：\n{text}"
+    );
+    assert!(text.contains("历史课程"), "應顯示歷史分區：\n{text}");
+    assert!(text.contains("学期未知"), "應顯示未知分區：\n{text}");
+
+    let (current_y, _) = find_row(backend, "课程2");
+    let (history_y, history_row) = find_row(backend, "课程1");
+    let (unknown_y, _) = find_row(backend, "课程3");
+    assert!(
+        current_y < history_y && history_y < unknown_y,
+        "順序應為當前學期 → 歷史 → 未知：\n{text}"
+    );
+
+    // 歷史課程以較淺灰色呈現；當前學期課程維持一般文字色。
+    let history_col = column_of(&history_row, "课程1");
+    assert_eq!(
+        backend.buffer()[(history_col, history_y)].fg,
+        THEME.muted,
+        "歷史課程應為淺灰：\n{text}"
+    );
+    let (_, current_row) = find_row(backend, "课程2");
+    let current_col = column_of(&current_row, "课程2");
+    assert_eq!(
+        backend.buffer()[(current_col, current_y)].fg,
+        THEME.text,
+        "當前學期課程應維持一般文字色：\n{text}"
+    );
+}
+
+/// 斷言彈窗矩形：左右邊框逐列、下緣逐欄連續；上緣可能被標題（含空白填充）佔用，
+/// 只驗證顏色；整個彈窗必須為不透明 surface 底色。
+fn assert_popup_borders(backend: &TestBackend, popup: Rect) {
+    let buffer = backend.buffer();
+    for y in popup.y + 1..popup.y + popup.height - 1 {
+        for x in [popup.x, popup.x + popup.width - 1] {
+            let cell = &buffer[(x, y)];
+            assert_ne!(cell.symbol(), " ", "邊框不得被打斷：(x={x}, y={y})");
+            assert_eq!(cell.fg, THEME.accent, "邊框顏色：(x={x}, y={y})");
+        }
+    }
+    for x in popup.x + 1..popup.x + popup.width - 1 {
+        let cell = &buffer[(x, popup.y + popup.height - 1)];
+        assert_ne!(cell.symbol(), " ", "下緣不得被打斷：(x={x})");
+        assert_eq!(cell.fg, THEME.accent, "下緣顏色：(x={x})");
+    }
+    for x in popup.x + 1..popup.x + popup.width - 1 {
+        let cell = &buffer[(x, popup.y)];
+        // 上緣由粉色邊框與藍色標題組成；寬字元的尾隨格會被重置為空白。
+        let symbol = cell.symbol();
+        assert!(
+            symbol == " " || cell.fg == THEME.accent || cell.fg == THEME.blue,
+            "上緣不得殘留底層文字：(x={x}) symbol={symbol:?}"
+        );
+    }
+    for y in popup.y..popup.y + popup.height {
+        for x in popup.x..popup.x + popup.width {
+            let cell = &buffer[(x, y)];
+            // 不透明＝沒有任何底層底色露出：底色只能是彈窗 surface、選取列 accent，
+            // 或寬字元（標題）被 ratatui 重置且不獨立顯示的尾隨格。
+            let continuation = cell.symbol() == " " && cell.fg == Color::Reset;
+            assert!(
+                continuation || cell.bg == THEME.surface || cell.bg == THEME.accent,
+                "彈窗必須不透明：(x={x}, y={y}) symbol={:?} bg={:?}",
+                cell.symbol(),
+                cell.bg
+            );
+        }
+    }
+}
+
+#[test]
+fn popup_surface_is_opaque_over_text_background() {
+    let popup = centered_rect(Rect::new(0, 0, WIDTH, HEIGHT), 60, 12);
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        // 滿版文字背景：彈窗覆蓋後不得有任何字元穿透。
+        let full = frame.area();
+        let lines: Vec<Line> = (0..full.height)
+            .map(|_| Line::from("思源学堂课程活动作业考勤流水课表甲乙丙丁戊己庚辛壬癸"))
+            .collect();
+        frame.render_widget(Paragraph::new(lines).style(THEME.base_style()), full);
+        popup_surface(frame, popup, "测试弹窗");
+    });
+
+    assert_popup_borders(terminal.backend(), popup);
+
+    // 彈窗內部不得殘留底層文字。
+    let buffer = terminal.backend().buffer();
+    for y in popup.y + 1..popup.y + popup.height - 1 {
+        for x in popup.x + 1..popup.x + popup.width - 1 {
+            assert_eq!(
+                buffer[(x, y)].symbol(),
+                " ",
+                "彈窗內部不得有底層文字：(x={x}, y={y})"
+            );
+        }
+    }
+}
+
+#[test]
+fn settings_popup_stays_continuous_over_dense_content() {
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Lms;
+    app.lms.level = LmsLevel::Courses;
+    app.lms.courses = Page::Ready(
+        (1..=12)
+            .map(|index| lms_course(&index.to_string(), Some("2026-1")))
+            .collect(),
+    );
+    app.set_screen(Screen::Settings(SettingsState::open(app.access_policy)));
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    assert_popup_borders(
+        terminal.backend(),
+        centered_rect(Rect::new(0, 0, WIDTH, HEIGHT), 60, 12),
+    );
+}
+
+#[test]
+fn popup_redraw_is_stable_across_frames() {
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.set_screen(Screen::Settings(SettingsState::open(app.access_policy)));
+
+    let snapshot = |app: &mut App| {
+        let terminal = draw(WIDTH, HEIGHT, |frame| crate::tui::views::draw(frame, app));
+        let popup = centered_rect(Rect::new(0, 0, WIDTH, HEIGHT), 60, 12);
+        let buffer = terminal.backend().buffer();
+        let mut cells = Vec::new();
+        for y in popup.y..popup.y + popup.height {
+            for x in popup.x..popup.x + popup.width {
+                let cell = &buffer[(x, y)];
+                cells.push((cell.symbol().to_owned(), cell.fg, cell.bg));
+            }
+        }
+        cells
+    };
+
+    let first = snapshot(&mut app);
+    let second = snapshot(&mut app);
+    assert_eq!(first, second, "連續兩幀的彈窗內容必須一致");
+}
+
+#[test]
+fn popup_fits_minimal_terminal_size() {
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.set_screen(Screen::Settings(SettingsState::open(app.access_policy)));
+
+    let terminal = draw(MIN_WIDTH, MIN_HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    assert_popup_borders(
+        terminal.backend(),
+        centered_rect(Rect::new(0, 0, MIN_WIDTH, MIN_HEIGHT), 60, 12),
+    );
+}
+
+#[test]
+fn term_picker_and_login_overlays_keep_continuous_borders() {
+    // 學期選擇器。
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.set_screen(Screen::TermPicker(TermPickerState::new(
+        vec![TermCode::parse("2026-2027-1").expect("学期")],
+        None,
+        "考勤不可用".to_owned(),
+    )));
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    assert_popup_borders(
+        terminal.backend(),
+        centered_rect(Rect::new(0, 0, WIDTH, HEIGHT), 62, 16),
+    );
+
+    // 登入覆蓋層（進度畫面：1 行內容 + 6 行固定高度）。
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.login = Some(Box::new(LoginScreen::Progress {
+        note: "正在登录…".to_owned(),
+    }));
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    assert_popup_borders(
+        terminal.backend(),
+        centered_rect(Rect::new(0, 0, WIDTH, HEIGHT), 84, 7),
     );
 }

@@ -83,3 +83,30 @@ fn zero_width_window_is_safe() {
     let line = InputLine::with_value("abc");
     assert_eq!(input_window(&line, 0), (String::new(), 0));
 }
+
+#[test]
+fn measures_display_width() {
+    assert_eq!(display_width("abc"), 3);
+    assert_eq!(display_width("中文"), 4);
+    assert_eq!(display_width("中a"), 3);
+    assert_eq!(display_width(""), 0);
+}
+
+#[test]
+fn truncates_by_display_width() {
+    assert_eq!(truncate_display("abc", 3), "abc");
+    assert_eq!(truncate_display("中文", 4), "中文");
+    assert_eq!(truncate_display("中文中文", 5), "中文…");
+    assert_eq!(display_width(&truncate_display("中文中文", 5)), 5);
+    assert_eq!(truncate_display("abc", 1), "…");
+    assert_eq!(truncate_display("ab", 0), "");
+}
+
+#[test]
+fn pads_and_fits_by_display_width() {
+    assert_eq!(pad_display("中文", 6), "中文  ");
+    assert_eq!(pad_display("中文", 4), "中文");
+    assert_eq!(pad_display("abcdef", 3), "abcdef");
+    assert_eq!(fit_display("中文中文中文", 9), "中文中文…");
+    assert_eq!(fit_display("中文中文中文", 8), "中文中… ");
+}

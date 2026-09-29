@@ -66,6 +66,7 @@ impl ThreadWorker {
             pending_data: VecDeque::new(),
             generation: 0,
             cache: LmsCache::default(),
+            known_term: None,
         };
 
         let handle = thread::spawn(move || worker.run());
@@ -176,6 +177,15 @@ fn control_jobs_interrupt_homework_between_steps() {
     assert!(
         worker.wait_event(|event| matches!(event, Event::Notice(text) if text.contains("已取消"))),
         "代际变更后应取消剩余查询"
+    );
+    assert!(
+        worker.wait_event(|event| matches!(
+            event,
+            Event::LoadingCancelled {
+                target: FailedTarget::Homework
+            }
+        )),
+        "取消后应通知介面解除载入中状态"
     );
 
     let seen = seen.lock().expect("lock").clone();

@@ -147,6 +147,7 @@ impl Harness {
                 pending_data: VecDeque::new(),
                 generation: 0,
                 cache: LmsCache::default(),
+                known_term: None,
             },
             events: event_rx,
             vault,
@@ -1400,5 +1401,115 @@ fn homework_reports_requests_and_elapsed() {
     assert!(
         last.elapsed <= Duration::from_secs(60),
         "耗時統計應為合理值"
+    );
+}
+
+#[test]
+fn homework_continues_after_single_course_activity_failure() {
+    let site = Arc::new(FakeHomeworkSite {
+        seen: Arc::new(Mutex::new(Vec::new())),
+        courses: serde_json::json!({ "courses": [
+            { "id": "1", "name": "编译原理", "semester": { "code": "2026-1" } },
+            { "id": "2", "name": "操作系统", "semester": { "code": "2026-1" } },
+        ]}),
+        activities: vec![
+            // 第一門課的活動列表格式錯誤（非認證、非連線層）：應只略過該課程。
+            ("1", serde_json::json!({ "activities": "oops" })),
+            (
+                "2",
+                serde_json::json!({ "activities": [
+                    { "id": "21", "type": "homework", "title": "作业B" },
+                ]}),
+            ),
+        ],
+        details: vec![(
+            "21",
+            serde_json::json!({ "id": "21", "type": "homework", "title": "作业B",
+                "submit_by_group": false }),
+        )],
+        expire_first_submission: false,
+        submissions: AtomicUsize::new(0),
+        attendance_term: Some(("2026-2027", "第一学期")),
+    });
+
+    let system = Arc::clone(&site);
+    let mut harness = harness(move |request| system.handle(request));
+    harness.login_both_sites();
+
+    harness
+        .dispatch(Job::LoadHomework { force: false })
+        .expect("单门课程失败不应终结整批");
+
+    let events = harness.drain_events();
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::Failed { .. })),
+        "可恢复的课程失败不得报成页面失败：{events:#?}"
+    );
+    let last = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Homework(update) => Some(update),
+            _ => None,
+        })
+        .next_back()
+        .expect("应有最终更新");
+    assert!(last.progress.is_none(), "应抵达终态");
+    assert_eq!(last.courses_failed, 1, "应记录略过的课程数");
+    assert_eq!(last.items.len(), 1, "其余课程的作业仍应汇总");
+    assert_eq!(last.items[0].title, "作业B");
+}
+
+#[test]
+fn courses_event_carries_current_term_hint() {
+    let site = Arc::new(FakeHomeworkSite {
+        seen: Arc::new(Mutex::new(Vec::new())),
+        courses: serde_json::json!({ "courses": [
+            { "id": "1", "name": "编译原理", "semester": { "code": "2026-1" } },
+        ]}),
+        activities: Vec::new(),
+        details: Vec::new(),
+        expire_first_submission: false,
+        submissions: AtomicUsize::new(0),
+        attendance_term: None,
+    });
+
+    let system = Arc::clone(&site);
+    let mut harness = harness(move |request| system.handle(request));
+    harness.login_lms_only();
+
+    // 無考勤學期、也無記憶學期：無法判定，不得猜測。
+    harness
+        .dispatch(Job::LoadCourses { force: false })
+        .expect("加载课程");
+    let first = harness
+        .drain_events()
+        .into_iter()
+        .find_map(|event| match event {
+            Event::Courses(data) => Some(data),
+            _ => None,
+        })
+        .expect("应有课程事件");
+    assert_eq!(first.current_term, None, "无来源时不应猜测学期");
+    assert_eq!(first.courses.len(), 1);
+
+    // 使用者記住的學期可作為提示（零額外請求）。
+    harness.worker.config.homework_term = Some("2026-2027-1".to_owned());
+    harness
+        .dispatch(Job::LoadCourses { force: true })
+        .expect("加载课程");
+    let second = harness
+        .drain_events()
+        .into_iter()
+        .find_map(|event| match event {
+            Event::Courses(data) => Some(data),
+            _ => None,
+        })
+        .expect("应有课程事件");
+    assert_eq!(
+        second.current_term,
+        TermCode::parse("2026-2027-1"),
+        "应复用使用者记忆的学期"
     );
 }

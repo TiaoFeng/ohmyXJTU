@@ -84,13 +84,15 @@ impl Theme {
     }
 
     /// 狀態標籤的顏色。
+    ///
+    /// 「有效」為成功綠；「未匹配」與不確定狀態（待核实／未知）為警告黃，
+    /// 兩者在列表與詳情中必須明顯可辨。
     pub fn status_style(self, label: &str) -> Style {
         let color = match label {
-            "正常" => self.green,
-            "迟到" => self.yellow,
+            "正常" | "已完成" | "有效" => self.green,
+            "迟到" | "未匹配" | "待核实" | "未知" => self.yellow,
             "缺勤" | "逾期" => self.red,
             "请假" => self.blue,
-            "已完成" => self.green,
             "待考勤" | "待提交" => self.accent,
             "不考勤" => self.muted,
             _ => self.yellow,
@@ -122,3 +124,7 @@ impl Theme {
             .style(self.surface_style())
     }
 }
+
+#[cfg(test)]
+#[path = "tests/theme_test.rs"]
+mod theme_test;

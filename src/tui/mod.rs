@@ -158,6 +158,10 @@ fn apply_event(app: &mut App, event: Event, jobs: &Sender<Job>) {
         Event::SessionExpired { site } => {
             app.clear_site_mode(site);
         }
+        Event::LoadingCancelled { target } => {
+            // 進行中的載入被取消：解除載入中狀態，保留已取得的部分資料。
+            app.cancel_loading(target);
+        }
         Event::Schedule(data) => {
             app.schedule = Page::Ready(*data);
             app.updated_at.schedule = Some(now_clock());
@@ -181,12 +185,23 @@ fn apply_event(app: &mut App, event: Event, jobs: &Sender<Job>) {
                 term_options: update.term_options,
                 items: update.items,
                 issues: update.issues,
+                courses_failed: update.courses_failed,
                 progress,
             };
             app.term_options = data.term_options.clone();
             app.updated_at.homework = Some(now_clock());
             let len = data.group_count(app.homework_group);
-            app.homework = Page::Ready(data);
+            app.homework = match progress {
+                // 部分結果：頁面維持載入中（資料持續可顯示），終態才轉為就緒。
+                Some((done, total)) => Page::Loading {
+                    note: format!(
+                        "正在汇总作业（已完成 {done}/{total} 门课程，累计 {} 项）…",
+                        data.items.len()
+                    ),
+                    stale: Some(data),
+                },
+                None => Page::Ready(data),
+            };
             // 夾取選取索引，避免分組內容變動後越界。
             let selected = app
                 .homework_state
@@ -219,9 +234,10 @@ fn apply_event(app: &mut App, event: Event, jobs: &Sender<Job>) {
             app.flow_state.select(Some(0));
             app.ensure_main();
         }
-        Event::Courses(courses) => {
-            let count = courses.len();
-            app.lms.courses = Page::Ready(courses);
+        Event::Courses(data) => {
+            let count = data.courses.len();
+            app.lms.courses_term = data.current_term;
+            app.lms.courses = Page::Ready(data.courses);
             app.updated_at.lms = Some(now_clock());
             app.course_state.select(Some(0));
             app.lms.level = app::LmsLevel::Courses;

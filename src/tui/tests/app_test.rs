@@ -3,7 +3,8 @@
 use chrono::NaiveDate;
 
 use super::*;
-use crate::sites::attendance::AttendanceStatus;
+use crate::sites::attendance::{AttendanceStatus, FlowRecord};
+use crate::sites::lms::LmsCourse;
 
 fn lesson(sections: &str) -> LessonEntry {
     LessonEntry {
@@ -48,17 +49,76 @@ fn navigates_pages_in_a_loop() {
 }
 
 #[test]
-fn selection_is_clamped_to_page_length() {
+fn selection_wraps_around_page_length() {
     let mut app = app_with_schedule(3);
     assert_eq!(app.page_len(), 3);
 
     app.select_previous();
-    assert_eq!(app.page_selection(), 0, "在第一项上不应越界");
+    assert_eq!(app.page_selection(), 2, "在第一项上应循环到最后一项");
 
     app.select_next();
+    assert_eq!(app.page_selection(), 0, "在最后一项上应循环回第一项");
+}
+
+#[test]
+fn selection_normalizes_stale_index_before_wrapping() {
+    let mut app = app_with_schedule(3);
+    // 越界索引在畫面上一律夾到最後一項；移動應從該可見位置出發。
+    app.schedule_state.select(Some(9));
     app.select_next();
+    assert_eq!(app.page_selection(), 0, "應從可見的最後一項循環回開頭");
+
+    app.schedule_state.select(Some(9));
+    app.select_previous();
+    assert_eq!(app.page_selection(), 1, "應從可見的最後一項往前一項");
+}
+
+#[test]
+fn selection_stays_on_single_item_page() {
+    let mut app = app_with_schedule(1);
     app.select_next();
-    assert_eq!(app.page_selection(), 2, "在最后一项上不应越界");
+    assert_eq!(app.page_selection(), 0);
+    app.select_previous();
+    assert_eq!(app.page_selection(), 0);
+}
+
+#[test]
+fn selection_wraps_across_lms_courses_and_flow_pages() {
+    let mut app = App::new(AccessPolicy::Auto);
+    app.nav = NavItem::Lms;
+    app.lms.courses = Page::Ready(vec![course("1"), course("2")]);
+    app.select_previous();
+    assert_eq!(app.page_selection(), 1, "课程層应循环到最后一门");
+
+    app.nav = NavItem::Attendance;
+    app.attendance = Page::Ready(FlowData {
+        records: vec![flow_record("1"), flow_record("2"), flow_record("3")],
+        page: 1,
+        total_pages: 1,
+        total: 3,
+    });
+    app.select_previous();
+    assert_eq!(app.page_selection(), 2, "流水頁应循环到最后一笔");
+}
+
+fn course(id: &str) -> LmsCourse {
+    LmsCourse {
+        id: id.to_owned(),
+        name: format!("课程{id}"),
+        course_code: None,
+        instructors: Vec::new(),
+        semester: None,
+        academic_year: None,
+    }
+}
+
+fn flow_record(id: &str) -> FlowRecord {
+    FlowRecord {
+        id: id.to_owned(),
+        classroom_name: Some("主楼A101".to_owned()),
+        collect_time: Some("08:00".to_owned()),
+        effective: true,
+    }
 }
 
 #[test]

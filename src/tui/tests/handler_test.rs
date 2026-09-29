@@ -6,7 +6,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::config::AccessPolicy;
 use crate::domain::activity::ActivityGroup;
-use crate::sites::lms::{ActivityKind, LmsActivity};
+use crate::sites::lms::{ActivityKind, LmsActivity, LmsCourse};
 use crate::task::Job;
 use crate::tui::app::{
     ActivityDetailView, App, FormKind, FormState, LmsLevel, LoginScreen, NavItem, Page,
@@ -627,6 +627,47 @@ fn enter_on_lms_activities_uses_filtered_selection() {
     ));
     assert_eq!(app.lms.level, LmsLevel::Detail);
     assert!(app.lms.detail.is_loading(), "應切換到詳情載入中");
+}
+
+fn course_with_term(id: &str, code: Option<&str>) -> LmsCourse {
+    LmsCourse {
+        id: id.to_owned(),
+        name: format!("课程{id}"),
+        course_code: None,
+        instructors: Vec::new(),
+        semester: code.map(|code| crate::sites::lms::models::LmsSemester {
+            id: None,
+            code: Some(code.to_owned()),
+            name: None,
+            real_name: None,
+        }),
+        academic_year: None,
+    }
+}
+
+#[test]
+fn enter_on_lms_courses_uses_real_index_after_partition_headers() {
+    let (jobs, rx) = channel();
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Lms;
+    app.lms.level = LmsLevel::Courses;
+    app.lms.courses = Page::Ready(vec![
+        course_with_term("1", Some("2025-2")), // 歷史（列模型中有標題列）
+        course_with_term("2", Some("2026-1")), // 當前學期
+    ]);
+    app.lms.courses_term =
+        Some(crate::domain::semester::TermCode::parse("2026-2027-1").expect("学期"));
+
+    // 選取真實索引 0 的歷史課程：即使列模型插入了標題列，也必須開啟正確課程。
+    app.course_state.select(Some(0));
+    press(&mut app, &jobs, KeyCode::Enter);
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(Job::LoadActivities { course_id, .. }) if course_id == "1"
+    ));
+    assert_eq!(app.lms.course_index, 0);
+    assert_eq!(app.lms.level, LmsLevel::Activities);
 }
 
 #[test]

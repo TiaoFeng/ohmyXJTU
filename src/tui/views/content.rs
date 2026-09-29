@@ -8,12 +8,14 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::domain::activity::ActivityGroup;
+use crate::domain::course_list::{self, CourseRow};
 use crate::domain::homework::{HomeworkGroup, HomeworkItem, parse_time};
 use crate::sites::attendance::FlowRecord;
-use crate::sites::lms::{ActivityKind, LmsActivity, LmsCourse};
+use crate::sites::lms::{ActivityKind, LmsActivity};
 use crate::tui::app::{
     ActivityDetailView, App, HomeworkData, LessonEntry, LmsLevel, NavItem, Page,
 };
+use crate::tui::text::fit_display;
 use crate::tui::theme::THEME;
 use crate::tui::views::main_view::render_list;
 
@@ -174,17 +176,7 @@ fn homework(frame: &mut Frame, area: Rect, app: &mut App) {
     let (items, detail) = {
         let data = app.homework.ready().expect("已确认存在作业数据");
         if data.group_count(app.homework_group) == 0 {
-            empty(
-                frame,
-                body_area,
-                &title,
-                Some(match app.homework_group {
-                    HomeworkGroup::Unfinished => "没有未完成的作业",
-                    HomeworkGroup::Completed => "没有已完成的作业",
-                    HomeworkGroup::Unknown => "没有待核实的作业",
-                }),
-                false,
-            );
+            empty_homework(frame, body_area, &title, app, data);
             return;
         }
         let visible = data.group_items(app.homework_group);
@@ -200,6 +192,31 @@ fn homework(frame: &mut Frame, area: Rect, app: &mut App) {
     if let (Some(area), Some(lines)) = (detail_area, detail) {
         detail_panel(frame, area, "作业详情", lines);
     }
+}
+
+/// 作業清單為空時的提示：載入中顯示進度，終態才是「沒有…」或「本学期暂无作业」。
+///
+/// 不經 [`empty`]：該函式將非載入中的文字視為失敗訊息，會讓空結果看起來像載入失敗。
+fn empty_homework(frame: &mut Frame, area: Rect, title: &str, app: &App, data: &HomeworkData) {
+    let message = if app.homework.is_loading() {
+        app.homework.note().unwrap_or("正在汇总作业…").to_owned()
+    } else if data.items.is_empty() {
+        "本学期暂无作业".to_owned()
+    } else {
+        match app.homework_group {
+            HomeworkGroup::Unfinished => "没有未完成的作业",
+            HomeworkGroup::Completed => "没有已完成的作业",
+            HomeworkGroup::Unknown => "没有待核实的作业",
+        }
+        .to_owned()
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(message, THEME.muted_style())))
+            .block(THEME.block(title))
+            .style(THEME.base_style())
+            .wrap(Wrap { trim: true }),
+        area,
+    );
 }
 
 /// 作業分組標籤列。
@@ -246,21 +263,35 @@ fn homework_warning(app: &App, data: &HomeworkData) -> Option<Line<'static>> {
     }
 
     let unknown = data.group_count(HomeworkGroup::Unknown);
-    if unknown == 0 {
+    if unknown == 0 && data.courses_failed == 0 {
         return None;
     }
-    let confirmed = data.items.len() - unknown;
-    let reason = data
-        .issues
-        .first()
-        .map_or("具体原因见条目详情", |issue| issue.reason.as_str());
-    Some(Line::from(vec![
-        Span::styled(
+    let mut spans = Vec::new();
+    if unknown > 0 {
+        let confirmed = data.items.len() - unknown;
+        let reason = data
+            .issues
+            .first()
+            .map_or("具体原因见条目详情", |issue| issue.reason.as_str());
+        spans.push(Span::styled(
             format!(" 已确认 {confirmed} / 待核实 {unknown}："),
             THEME.accent_style(),
-        ),
-        Span::styled(format!("{reason}（按 r 重试）"), THEME.muted_style()),
-    ]))
+        ));
+        spans.push(Span::styled(
+            format!("{reason}（按 r 重试）"),
+            THEME.muted_style(),
+        ));
+    }
+    if data.courses_failed > 0 {
+        if !spans.is_empty() {
+            spans.push(Span::styled("；", THEME.muted_style()));
+        }
+        spans.push(Span::styled(
+            format!("{} 门课程查询失败（按 r 重试）", data.courses_failed),
+            THEME.error_style(),
+        ));
+    }
+    Some(Line::from(spans))
 }
 
 fn homework_item(item: &HomeworkItem) -> ListItem<'static> {
@@ -358,7 +389,13 @@ fn flow(frame: &mut Frame, area: Rect, app: &mut App) {
             let (items, detail) = {
                 let data = app.attendance.ready().expect("已确认存在流水数据");
                 let index = app.page_selection().min(data.records.len() - 1);
-                let items = data.records.iter().map(flow_item).collect::<Vec<_>>();
+                // 清單有邊框：內容寬度需扣除左右框線，狀態欄才能對齊。
+                let columns = flow_columns(usize::from(list_area.width.saturating_sub(2)));
+                let items = data
+                    .records
+                    .iter()
+                    .map(|record| flow_item(record, columns))
+                    .collect::<Vec<_>>();
                 let detail = app.flow_detail.then(|| flow_lines(&data.records[index]));
                 (items, detail)
             };
@@ -370,22 +407,53 @@ fn flow(frame: &mut Frame, area: Rect, app: &mut App) {
     }
 }
 
-fn flow_item(record: &FlowRecord) -> ListItem<'static> {
+/// 流水清單的時間／地點欄寬（單位為終端顯示欄）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FlowColumns {
+    /// 時間欄寬。
+    time: usize,
+    /// 地點欄寬。
+    place: usize,
+}
+
+/// 依可用寬度決定欄寬：先縮地點、再縮時間，下限分別為 8／14 欄。
+///
+/// 極窄畫面維持下限，超出的部分交由清單自然裁切；狀態欄因此固定起點。
+fn flow_columns(available: usize) -> FlowColumns {
+    const TIME_DEFAULT: usize = 20;
+    const PLACE_DEFAULT: usize = 16;
+    const TIME_MIN: usize = 14;
+    const PLACE_MIN: usize = 8;
+    // 「未匹配」的顯示寬度（3 個全角字）。
+    const STATUS: usize = 6;
+    // 時間與地點、地點與狀態之間的空白。
+    const GAPS: usize = 2;
+
+    let place = available
+        .saturating_sub(TIME_DEFAULT + STATUS + GAPS)
+        .clamp(PLACE_MIN, PLACE_DEFAULT);
+    let time = if place <= PLACE_MIN {
+        available
+            .saturating_sub(place + STATUS + GAPS)
+            .clamp(TIME_MIN, TIME_DEFAULT)
+    } else {
+        TIME_DEFAULT
+    };
+    FlowColumns { time, place }
+}
+
+fn flow_item(record: &FlowRecord, columns: FlowColumns) -> ListItem<'static> {
+    let time = fit_display(
+        record.collect_time.as_deref().unwrap_or("（无时间）"),
+        columns.time,
+    );
+    let place = fit_display(
+        record.classroom_name.as_deref().unwrap_or("（无地点）"),
+        columns.place,
+    );
     ListItem::new(Line::from(vec![
-        Span::styled(
-            format!(
-                "{:<20} ",
-                record.collect_time.as_deref().unwrap_or("（无时间）")
-            ),
-            Style::default().fg(THEME.text),
-        ),
-        Span::styled(
-            format!(
-                "{:<16} ",
-                record.classroom_name.as_deref().unwrap_or("（无地点）")
-            ),
-            THEME.muted_style(),
-        ),
+        Span::styled(format!("{time} "), Style::default().fg(THEME.text)),
+        Span::styled(format!("{place} "), THEME.muted_style()),
         Span::styled(
             flow_status_label(record),
             THEME.status_style(flow_status_label(record)),
@@ -451,11 +519,12 @@ fn lms(frame: &mut Frame, area: Rect, app: &mut App) {
                     empty(frame, area, &title, Some("没有课程"), false);
                 }
                 Some(_) => {
-                    let items = {
+                    let rows = {
                         let courses = app.lms.courses.ready().expect("已确认存在课程数据");
-                        courses.iter().map(course_item).collect::<Vec<_>>()
+                        course_list::course_rows(courses, app.lms.courses_term)
                     };
-                    render_list(frame, area, &title, items, &mut app.course_state);
+                    let items = rows.iter().map(course_row_item).collect::<Vec<_>>();
+                    render_course_list(frame, area, &title, items, &mut app.course_state, &rows);
                 }
             }
         }
@@ -521,21 +590,56 @@ fn lms(frame: &mut Frame, area: Rect, app: &mut App) {
     }
 }
 
-fn course_item(course: &LmsCourse) -> ListItem<'static> {
-    ListItem::new(Line::from(vec![
-        Span::styled(
-            course.name.clone(),
-            Style::default().fg(THEME.text).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("  {}", course.instructor_names()),
+/// 課程列（歷史課程用較淺灰色，標題列不可選取）。
+fn course_row_item(row: &CourseRow<'_>) -> ListItem<'static> {
+    match row {
+        CourseRow::Header(text) => ListItem::new(Line::from(Span::styled(
+            format!("  {text}"),
             THEME.muted_style(),
-        ),
-        Span::styled(
-            format!("  {}", course.semester_label()),
-            THEME.muted_style(),
-        ),
-    ]))
+        ))),
+        CourseRow::Course {
+            course, historical, ..
+        } => {
+            let name_style = if *historical {
+                THEME.muted_style()
+            } else {
+                Style::default().fg(THEME.text).add_modifier(Modifier::BOLD)
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(course.name.clone(), name_style),
+                Span::styled(
+                    format!("  {}", course.instructor_names()),
+                    THEME.muted_style(),
+                ),
+                Span::styled(
+                    format!("  {}", course.semester_label()),
+                    THEME.muted_style(),
+                ),
+            ]))
+        }
+    }
+}
+
+/// 繪製課程清單：`state` 以「原始課程索引」為準，繪製時映射到含標題列的視覺位置。
+///
+/// 標題列不可選取；捲動位移沿用原 state 並在繪製後寫回。
+fn render_course_list(
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    items: Vec<ListItem<'static>>,
+    state: &mut ListState,
+    rows: &[CourseRow<'_>],
+) {
+    let mut visual = ListState::default();
+    visual.select(
+        state
+            .selected()
+            .and_then(|index| course_list::visual_index(rows, index)),
+    );
+    *visual.offset_mut() = state.offset();
+    render_list(frame, area, title, items, &mut visual);
+    *state.offset_mut() = visual.offset();
 }
 
 /// 活動清單的單列。
@@ -776,3 +880,7 @@ fn title_suffix(updated: Option<&String>, loading: bool) -> String {
     }
     suffix
 }
+
+#[cfg(test)]
+#[path = "tests/content_test.rs"]
+mod content_test;

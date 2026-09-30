@@ -10,8 +10,8 @@ use crate::domain::homework::{HomeworkInput, aggregate};
 use crate::sites::lms::{ActivityKind, LmsActivity, LmsCourse};
 use crate::task::Job;
 use crate::tui::app::{
-    ActivityDetailView, App, FormKind, FormState, HomeworkData, LmsLevel, LoginScreen, NavItem,
-    Page, ScheduleData, Screen, SettingsState,
+    ActivityDetailView, AgreementState, App, FormKind, FormState, HomeworkData, LmsLevel,
+    LoginScreen, NavItem, Page, ScheduleData, Screen, SettingsState,
 };
 
 use super::handle_key;
@@ -812,4 +812,134 @@ fn credentials_form_validates_before_sending() {
     assert!(credentials_form(&app).error.is_none());
     type_text(&mut app, &jobs, "x");
     assert_eq!(credentials_form(&app).fields[0].value.value(), "3120000001");
+}
+
+// ── 用户协议閱讀門 ───────────────────────────────────
+
+/// 建立帶協議閱讀門的 App（底層為主畫面）。
+fn app_with_agreement() -> App {
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.agreement = Some(Box::new(AgreementState::new()));
+    app
+}
+
+/// 目前協議狀態。
+fn agreement_state(app: &App) -> &AgreementState {
+    app.agreement.as_deref().expect("協议閱讀門应开启")
+}
+
+#[test]
+fn agreement_gate_blocks_settings_and_main_shortcuts() {
+    let (jobs, _rx) = channel();
+    let mut app = app_with_agreement();
+
+    // Ctrl+P 不開啟設定。
+    handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        &jobs,
+    );
+    assert!(
+        matches!(app.screen, Screen::Main),
+        "協議開啟時 ctrl+p 不作用"
+    );
+
+    // Ctrl+U 不清空底層表單。
+    app.set_screen(Screen::Setup(FormState::setup()));
+    if let Screen::Setup(form) = &mut app.screen {
+        form.fields[0].value.set("secret");
+    }
+    handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+        &jobs,
+    );
+    if let Screen::Setup(form) = &app.screen {
+        assert_eq!(
+            form.fields[0].value.value(),
+            "secret",
+            "ctrl+u 不得穿透協議畫面"
+        );
+    }
+
+    // 主畫面快捷鍵不作用：`s` 不開學期選擇器、`]` 不切換分組。
+    app.set_screen(Screen::Main);
+    let group = app.homework_group;
+    press(&mut app, &jobs, KeyCode::Char('s'));
+    press(&mut app, &jobs, KeyCode::Char(']'));
+    assert!(matches!(app.screen, Screen::Main), "協議開啟時 s 不作用");
+    assert_eq!(app.homework_group, group, "協議開啟時 ] 不作用");
+}
+
+#[test]
+fn agreement_scroll_keys_move_document() {
+    let (jobs, _rx) = channel();
+    let mut app = app_with_agreement();
+    app.agreement.as_mut().expect("閱讀門").sync_layout(10, 50);
+
+    press(&mut app, &jobs, KeyCode::Char('j'));
+    assert_eq!(agreement_state(&app).scroll(), 1);
+    press(&mut app, &jobs, KeyCode::Char('k'));
+    assert_eq!(agreement_state(&app).scroll(), 0);
+    press(&mut app, &jobs, KeyCode::PageDown);
+    assert_eq!(agreement_state(&app).scroll(), 10);
+    press(&mut app, &jobs, KeyCode::Char(' '));
+    assert_eq!(agreement_state(&app).scroll(), 20);
+    press(&mut app, &jobs, KeyCode::PageUp);
+    assert_eq!(agreement_state(&app).scroll(), 10);
+    press(&mut app, &jobs, KeyCode::Char('g'));
+    assert_eq!(agreement_state(&app).scroll(), 0);
+    press(&mut app, &jobs, KeyCode::Char('G'));
+    assert_eq!(agreement_state(&app).scroll(), 40);
+}
+
+#[test]
+fn agreement_enter_requires_bottom_and_sends_once() {
+    let (jobs, rx) = channel();
+    let mut app = app_with_agreement();
+    app.agreement.as_mut().expect("閱讀門").sync_layout(10, 50);
+
+    // 未讀到底部：enter 不送任務。
+    press(&mut app, &jobs, KeyCode::Enter);
+    assert!(rx.try_recv().is_err(), "未到底部不得送出同意");
+    assert!(!agreement_state(&app).saving);
+
+    // 跳到結尾後送出一次同意。
+    press(&mut app, &jobs, KeyCode::End);
+    press(&mut app, &jobs, KeyCode::Enter);
+    match rx.try_recv() {
+        Ok(Job::AcceptAgreement) => {}
+        other => panic!("应为同意协议任务，实际为 {other:?}"),
+    }
+    assert!(agreement_state(&app).saving, "送出后应进入保存中");
+
+    // 保存中：重複 enter 不再送出，esc 也不退出。
+    press(&mut app, &jobs, KeyCode::Enter);
+    assert!(rx.try_recv().is_err(), "保存中不得重复送出");
+    press(&mut app, &jobs, KeyCode::Esc);
+    assert!(!app.quit, "保存中忽略退出键");
+}
+
+#[test]
+fn agreement_quit_keys_exit_without_accepting() {
+    let (jobs, rx) = channel();
+    let mut app = app_with_agreement();
+
+    press(&mut app, &jobs, KeyCode::Char('q'));
+    assert!(app.quit, "q 應直接退出");
+    assert!(rx.try_recv().is_err(), "退出不得送出同意");
+
+    let mut app = app_with_agreement();
+    press(&mut app, &jobs, KeyCode::Esc);
+    assert!(app.quit, "esc 應直接退出");
+    assert!(rx.try_recv().is_err(), "退出不得送出同意");
+
+    let mut app = app_with_agreement();
+    handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        &jobs,
+    );
+    assert!(app.quit, "ctrl+c 一律可退出");
 }

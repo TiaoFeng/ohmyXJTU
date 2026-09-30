@@ -673,6 +673,109 @@ impl SettingsState {
     }
 }
 
+/// 用户协议閱讀門狀態。
+///
+/// 捲動位置以「換行後的文件列」為單位；視窗高度與總列數由繪製流程回寫
+/// （與課程清單的 offset 寫回同一模式），讓按鍵處理能在不重算版面的情況下
+/// 夾取位置並判定是否已讀到底部。
+#[derive(Debug, Default)]
+pub struct AgreementState {
+    /// 目前捲動列。
+    scroll: u16,
+    /// 上次繪製的可見高度（列）。
+    viewport: u16,
+    /// 上次繪製的總列數。
+    total: u16,
+    /// 是否曾捲到最底部（黏性：捲回上方後仍可確認）。
+    reached_bottom: bool,
+    /// 同意是否正在保存。
+    pub saving: bool,
+    /// 上次保存失敗的訊息。
+    pub error: Option<String>,
+}
+
+impl AgreementState {
+    /// 建立閱讀門狀態（從文件開頭開始）。
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 目前捲動列（供繪製）。
+    pub fn scroll(&self) -> u16 {
+        self.scroll
+    }
+
+    /// 已閱讀比例（0..=100；版面未知時為 0）。
+    pub fn progress(&self) -> u16 {
+        if self.total == 0 {
+            return 0;
+        }
+        let read = self.scroll.saturating_add(self.viewport).min(self.total);
+        u16::try_from(u32::from(read) * 100 / u32::from(self.total)).unwrap_or(100)
+    }
+
+    /// 是否可確認同意（已讀到底部且不在保存中）。
+    pub fn can_confirm(&self) -> bool {
+        self.reached_bottom && !self.saving
+    }
+
+    /// 繪製後回寫版面資訊：夾取捲動位置並更新「已讀到底部」。
+    pub fn sync_layout(&mut self, viewport: u16, total: u16) {
+        self.viewport = viewport;
+        self.total = total;
+        self.scroll = self.scroll.min(self.max_scroll());
+        self.note_bottom();
+    }
+
+    /// 捲動 `delta` 列（正為向下；超出範圍即夾取）。
+    pub fn scroll_by(&mut self, delta: i32) {
+        let next = i64::from(self.scroll) + i64::from(delta);
+        self.scroll = u16::try_from(next.clamp(0, i64::from(self.max_scroll()))).unwrap_or(0);
+        self.note_bottom();
+    }
+
+    /// 翻頁（`pages` 為 +1／-1）。
+    pub fn page_by(&mut self, pages: i32) {
+        let step = i32::from(self.viewport).max(1);
+        self.scroll_by(pages.saturating_mul(step));
+    }
+
+    /// 回到文件開頭。
+    pub fn to_top(&mut self) {
+        self.scroll = 0;
+    }
+
+    /// 跳到文件結尾。
+    pub fn to_bottom(&mut self) {
+        self.scroll = self.max_scroll();
+        self.note_bottom();
+    }
+
+    /// 進入保存中狀態（清除舊錯誤）。
+    pub fn start_saving(&mut self) {
+        self.saving = true;
+        self.error = None;
+    }
+
+    /// 保存失敗：解除保存中並顯示錯誤。
+    pub fn fail(&mut self, message: String) {
+        self.saving = false;
+        self.error = Some(message);
+    }
+
+    /// 最大捲動列（總列數小於視窗時為 0）。
+    fn max_scroll(&self) -> u16 {
+        self.total.saturating_sub(self.viewport)
+    }
+
+    /// 目前位置是否已達底部；達到後記錄為黏性狀態。
+    fn note_bottom(&mut self) {
+        if self.total > 0 && self.scroll >= self.max_scroll() {
+            self.reached_bottom = true;
+        }
+    }
+}
+
 /// 畫面。
 ///
 /// 根畫面只代表「底層內容」；登入互動是疊加在主畫面之上的覆蓋層
@@ -700,6 +803,8 @@ pub struct App {
     pub screen: Screen,
     /// 登入互動覆蓋層（進度、驗證碼、簡訊、失敗與重新輸入憑證）。
     pub login: Option<Box<LoginScreen>>,
+    /// 用户协议閱讀門（首次啟動或協議改版後；開啟時獨占畫面與按鍵）。
+    pub agreement: Option<Box<AgreementState>>,
     /// 目前頁面。
     pub nav: NavItem,
     /// 課表頁。
@@ -756,6 +861,7 @@ impl App {
         Self {
             screen: Screen::Unlock(FormState::unlock()),
             login: None,
+            agreement: None,
             nav: NavItem::Schedule,
             schedule: Page::Idle,
             homework: Page::Idle,
@@ -906,7 +1012,8 @@ impl App {
             FailedTarget::Login
             | FailedTarget::Credentials
             | FailedTarget::ActivityOpen
-            | FailedTarget::Settings => {}
+            | FailedTarget::Settings
+            | FailedTarget::Agreement => {}
         }
     }
 
@@ -924,7 +1031,8 @@ impl App {
             FailedTarget::Login
             | FailedTarget::Credentials
             | FailedTarget::ActivityOpen
-            | FailedTarget::Settings => {}
+            | FailedTarget::Settings
+            | FailedTarget::Agreement => {}
         }
     }
 

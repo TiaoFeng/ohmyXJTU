@@ -17,8 +17,8 @@ use crate::sites::attendance::FlowRecord;
 use crate::sites::lms::{ActivityKind, LmsActivity, LmsCourse};
 use crate::task::HomeworkIssue;
 use crate::tui::app::{
-    ActivityDetailView, App, FlowData, FormState, HomeworkData, LessonEntry, LmsLevel, LoginScreen,
-    NavItem, Page, ScheduleData, Screen, SettingsState, TermPickerState,
+    ActivityDetailView, AgreementState, App, FlowData, FormState, HomeworkData, LessonEntry,
+    LmsLevel, LoginScreen, NavItem, Page, ScheduleData, Screen, SettingsState, TermPickerState,
 };
 use crate::tui::text::{InputLine, MASK_CHAR};
 use crate::tui::theme::THEME;
@@ -1585,5 +1585,87 @@ fn login_overlay_visible_when_terminal_is_large_enough() {
     assert!(
         text.contains("正在登录"),
         "足夠大時應顯示登入彈窗：\n{text}"
+    );
+}
+
+#[test]
+fn agreement_overlay_covers_screen_and_shows_document() {
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Setup(FormState::setup()));
+    app.agreement = Some(Box::new(AgreementState::new()));
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    let title = format!("用户协议（ohmyXJTU）v{}", crate::privacy::VERSION);
+
+    assert!(text.contains(&title), "標題應含版本：\n{text}");
+    assert!(text.contains("欢迎您使用"), "應顯示協議開頭：\n{text}");
+    assert!(
+        text.contains("请阅读至最底部"),
+        "頁腳應提示閱讀進度：\n{text}"
+    );
+    assert!(
+        !text.contains("首次使用：设置加密口令与账号"),
+        "底層表單不得露出：\n{text}"
+    );
+
+    assert_popup_borders(terminal.backend(), Rect::new(0, 0, WIDTH, HEIGHT));
+}
+
+#[test]
+fn agreement_footer_activates_after_reaching_bottom() {
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.agreement = Some(Box::new(AgreementState::new()));
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(
+        text.contains("请阅读至最底部"),
+        "初始應提示捲到底部：\n{text}"
+    );
+    assert!(
+        !text.contains("同意并继续"),
+        "未讀完不得出現確認按鈕：\n{text}"
+    );
+
+    // 跳到結尾後重繪：出現確認按鈕。
+    app.agreement.as_mut().expect("閱讀門").to_bottom();
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(
+        text.contains("[ 同意并继续 ]"),
+        "到底部後應出現確認按鈕：\n{text}"
+    );
+    assert!(text.contains("enter 同意并继续"), "應提示確認鍵：\n{text}");
+    assert!(!text.contains("请阅读至最底部"));
+}
+
+#[test]
+fn agreement_failure_is_shown_in_footer() {
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    let mut state = AgreementState::new();
+    state.fail("写入配置文件失败".to_owned());
+    app.agreement = Some(Box::new(state));
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let (y, row) = find_row(terminal.backend(), "保存失败");
+    assert!(
+        row.contains("保存失败：写入配置文件失败（按 enter 重试）"),
+        "{row}"
+    );
+    assert_eq!(
+        terminal.backend().buffer()[(1, y)].fg,
+        THEME.red,
+        "錯誤訊息應以紅色顯示"
     );
 }

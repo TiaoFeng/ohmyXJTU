@@ -135,6 +135,8 @@ pub enum Job {
     },
     /// 切換訪問策略。
     SetAccessPolicy(AccessPolicy),
+    /// 記錄使用者已同意的用户协议版本。
+    AcceptAgreement,
     /// 結束工作執行緒。
     Shutdown,
 }
@@ -160,6 +162,7 @@ impl Job {
             Self::ChangeAccount { .. } => "修改账号".to_owned(),
             Self::ChangePassphrase { .. } => "修改口令".to_owned(),
             Self::SetAccessPolicy(_) => "访问模式".to_owned(),
+            Self::AcceptAgreement => "用户协议".to_owned(),
             Self::Shutdown => String::new(),
         }
     }
@@ -276,6 +279,8 @@ pub enum Event {
     PassphraseUpdated,
     /// 訪問策略已更新。
     AccessPolicyUpdated(AccessPolicy),
+    /// 使用者已同意本版用户协议（版本已寫入設定檔）。
+    AgreementAccepted,
     /// 提示訊息（例如有資料因格式問題被跳過）。
     Notice(String),
     /// 任務失敗。
@@ -312,6 +317,8 @@ pub enum FailedTarget {
     Credentials,
     /// 帳戶設定（訪問模式等）。
     Settings,
+    /// 用户协议閱讀門（顯示與同意）。
+    Agreement,
 }
 
 /// 課程列表與當前學期（供介面分區顯示）。
@@ -723,6 +730,7 @@ impl Worker {
             Job::ChangePassphrase { old, new } => self.change_passphrase(&old, &new),
             Job::SetAccessPolicy(policy) => self.set_access_policy(policy),
             Job::SetHomeworkTerm { term } => self.set_homework_term(&term),
+            Job::AcceptAgreement => self.accept_agreement(),
             Job::Shutdown => Ok(()),
             // 資料任務由 [`Self::run_data_job`] 負責。
             Job::LoadSchedule
@@ -818,6 +826,18 @@ impl Worker {
         // 連線與登入態已重建：介面清除站點登入狀態。
         self.emit(Event::SessionsCleared);
         self.emit(Event::AccessPolicyUpdated(policy));
+        Ok(())
+    }
+
+    /// 記錄使用者已同意的用户协议版本；寫入失敗時不變更已保存的版本。
+    fn accept_agreement(&mut self) -> AppResult<()> {
+        let previous = self.config.privacy_version.clone();
+        self.config.privacy_version = Some(crate::privacy::VERSION.to_owned());
+        if let Err(err) = self.config.save() {
+            self.config.privacy_version = previous;
+            return Err(err);
+        }
+        self.emit(Event::AgreementAccepted);
         Ok(())
     }
 
@@ -1659,6 +1679,7 @@ fn failed_target_of(job: &Job) -> FailedTarget {
         Job::LoadActivities { .. } => FailedTarget::Activities,
         Job::LoadActivityDetail { .. } => FailedTarget::ActivityDetail,
         Job::OpenActivity { .. } => FailedTarget::ActivityOpen,
+        Job::AcceptAgreement => FailedTarget::Agreement,
         Job::SubmitCaptcha(_)
         | Job::RefreshCaptcha
         | Job::SendMfaCode

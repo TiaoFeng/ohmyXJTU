@@ -192,3 +192,91 @@ fn animation_tick_advances_for_loading_dots() {
     app.advance_tick();
     assert_eq!(app.tick, 2);
 }
+
+// ── 用户协议閱讀門 ───────────────────────────────────
+
+#[test]
+fn agreement_requires_reaching_bottom_before_confirming() {
+    let mut state = AgreementState::new();
+    assert!(!state.can_confirm(), "版面未知时不得确认");
+
+    state.sync_layout(10, 50);
+    state.scroll_by(5);
+    assert_eq!(state.scroll(), 5);
+    assert!(!state.can_confirm(), "尚未到底部不得确认");
+
+    state.scroll_by(1000);
+    assert_eq!(state.scroll(), 40, "捲动应夹取到最大位置");
+    assert!(state.can_confirm(), "到底部后可确认");
+
+    // 黏性：讀到底部後捲回上方不應失去確認資格。
+    state.scroll_by(-1000);
+    assert_eq!(state.scroll(), 0);
+    assert!(state.can_confirm());
+}
+
+#[test]
+fn agreement_confirms_when_document_fits_viewport() {
+    let mut state = AgreementState::new();
+    state.sync_layout(30, 20);
+    assert!(state.can_confirm(), "整份文件可见即视为已读完");
+    assert_eq!(state.progress(), 100);
+}
+
+#[test]
+fn agreement_ignores_scroll_before_first_layout() {
+    let mut state = AgreementState::new();
+    state.scroll_by(10);
+    state.page_by(1);
+    state.to_bottom();
+    assert_eq!(state.scroll(), 0, "版面未知时不得捲动");
+    assert!(!state.can_confirm(), "版面未知时不得确认");
+    assert_eq!(state.progress(), 0);
+}
+
+#[test]
+fn agreement_reclamps_after_resize() {
+    let mut state = AgreementState::new();
+    state.sync_layout(10, 50);
+    state.to_bottom();
+    assert_eq!(state.scroll(), 40);
+
+    // 視窗變高：最大捲动位置縮小，位置應被夾取。
+    state.sync_layout(45, 50);
+    assert_eq!(state.scroll(), 5);
+    assert!(state.can_confirm());
+
+    // 視窗比文件更高：回到頂端且仍視為讀完。
+    state.sync_layout(60, 50);
+    assert_eq!(state.scroll(), 0);
+    assert!(state.can_confirm());
+}
+
+#[test]
+fn agreement_pages_by_viewport() {
+    let mut state = AgreementState::new();
+    state.sync_layout(10, 50);
+    state.page_by(1);
+    assert_eq!(state.scroll(), 10);
+    state.page_by(-1);
+    assert_eq!(state.scroll(), 0);
+    state.to_bottom();
+    state.to_top();
+    assert_eq!(state.scroll(), 0);
+}
+
+#[test]
+fn agreement_saving_blocks_confirm_and_failure_recovers() {
+    let mut state = AgreementState::new();
+    state.sync_layout(10, 50);
+    state.to_bottom();
+    assert!(state.can_confirm());
+
+    state.start_saving();
+    assert!(!state.can_confirm(), "保存中不得重复确认");
+
+    state.fail("写入配置文件失败".to_owned());
+    assert!(!state.saving);
+    assert_eq!(state.error.as_deref(), Some("写入配置文件失败"));
+    assert!(state.can_confirm(), "失败后可重试确认");
+}

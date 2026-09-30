@@ -22,8 +22,8 @@ use crate::error::{AppError, AppResult};
 use crate::task::{self, Event, FailedTarget, Job};
 
 use app::{
-    App, FormKind, FormState, HomeworkData, LoginScreen, Page, Screen, SettingsState,
-    TermPickerState,
+    AgreementState, App, FormKind, FormState, HomeworkData, LoginScreen, Page, Screen,
+    SettingsState, TermPickerState,
 };
 use text::InputLine;
 
@@ -41,6 +41,11 @@ pub fn run() -> AppResult<()> {
     let mut app = App::new(config.access_policy);
     if !vault_exists {
         app.set_screen(Screen::Setup(FormState::setup()));
+    }
+    // 尚未同意本版用户协议：先顯示閱讀門。底層畫面（首次設定或解鎖）已就緒，
+    // 同意後直接揭露。
+    if !config.privacy_accepted(crate::privacy::VERSION) {
+        app.agreement = Some(Box::new(AgreementState::new()));
     }
 
     // 刻意不用 `?` 提前返回：任何情況下都要還原終端狀態。
@@ -179,6 +184,10 @@ fn apply_event(app: &mut App, event: Event, jobs: &Sender<Job>) {
         }
         Event::SessionsCleared => {
             app.clear_site_modes();
+        }
+        Event::AgreementAccepted => {
+            // 協議已同意：關閉閱讀門，揭露底層畫面（首次設定或解鎖）。
+            app.agreement = None;
         }
         Event::SessionExpired { site } => {
             app.clear_site_mode(site);
@@ -358,6 +367,12 @@ fn apply_event(app: &mut App, event: Event, jobs: &Sender<Job>) {
                             form.clear_secrets();
                         }
                         _ => {}
+                    }
+                }
+                FailedTarget::Agreement => {
+                    // 協議同意保存失敗：留在閱讀畫面就地顯示錯誤，可重試。
+                    if let Some(state) = app.agreement.as_mut() {
+                        state.fail(message.clone());
                     }
                 }
                 _ => {

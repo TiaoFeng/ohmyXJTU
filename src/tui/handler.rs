@@ -31,12 +31,21 @@ enum LoginAction {
 
 /// 處理單一按鍵事件。
 pub fn handle_key(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
+    // Ctrl+C 一律可退出（含協議閱讀門與登入覆蓋層）。
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+        app.quit = true;
+        return;
+    }
+
+    // 用户协议閱讀門開啟時攔截其餘所有按鍵（含 Ctrl+P／Ctrl+U），
+    // 底層畫面與表單完全隔離。
+    if app.agreement.is_some() {
+        handle_agreement(app, key, jobs);
+        return;
+    }
+
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         match key.code {
-            KeyCode::Char('c') => {
-                app.quit = true;
-                return;
-            }
             KeyCode::Char('p') => {
                 toggle_settings(app);
                 return;
@@ -70,15 +79,69 @@ pub fn handle_key(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
     }
 }
 
-/// `Ctrl+P`：開啟或關閉帳戶設定（登入覆蓋層開啟時不生效）。
+/// `Ctrl+P`：開啟或關閉帳戶設定（登入覆蓋層或協議閱讀門開啟時不生效）。
 fn toggle_settings(app: &mut App) {
-    if app.login.is_some() {
+    if app.login.is_some() || app.agreement.is_some() {
         return;
     }
     match app.screen {
         Screen::Settings(_) | Screen::TermPicker(_) => app.set_screen(Screen::Main),
         Screen::Main => app.set_screen(Screen::Settings(SettingsState::open(app.access_policy))),
         _ => {}
+    }
+}
+
+// ── 用户协议 ─────────────────────────────────────────
+
+/// 用户协议閱讀門：捲動、翻頁、同意（需讀到底部）與退出。
+fn handle_agreement(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
+    // 保存中：忽略所有輸入，避免重複提交。
+    if app.agreement.as_ref().is_some_and(|state| state.saving) {
+        return;
+    }
+
+    match key.code {
+        // 不同意：直接退出，不記錄任何同意狀態。
+        KeyCode::Esc | KeyCode::Char('q') => app.quit = true,
+        KeyCode::Up | KeyCode::Char('k') => scroll_agreement(app, -1),
+        KeyCode::Down | KeyCode::Char('j') => scroll_agreement(app, 1),
+        KeyCode::PageUp => page_agreement(app, -1),
+        KeyCode::PageDown | KeyCode::Char(' ') => page_agreement(app, 1),
+        KeyCode::Home | KeyCode::Char('g') => {
+            if let Some(state) = app.agreement.as_mut() {
+                state.to_top();
+            }
+        }
+        KeyCode::End | KeyCode::Char('G') => {
+            if let Some(state) = app.agreement.as_mut() {
+                state.to_bottom();
+            }
+        }
+        KeyCode::Enter | KeyCode::Char('\n') => {
+            let Some(state) = app.agreement.as_mut() else {
+                return;
+            };
+            // 未讀到底部前 enter 不作用（頁腳會顯示原因）。
+            if state.can_confirm() {
+                state.start_saving();
+                let _ = jobs.send(Job::AcceptAgreement);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// 協議逐行捲動（正為向下）。
+fn scroll_agreement(app: &mut App, delta: i32) {
+    if let Some(state) = app.agreement.as_mut() {
+        state.scroll_by(delta);
+    }
+}
+
+/// 協議翻頁（`pages` 為 +1／-1）。
+fn page_agreement(app: &mut App, pages: i32) {
+    if let Some(state) = app.agreement.as_mut() {
+        state.page_by(pages);
     }
 }
 

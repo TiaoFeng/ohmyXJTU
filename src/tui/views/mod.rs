@@ -1,5 +1,6 @@
 //! 畫面繪製。
 
+pub mod agreement;
 pub mod content;
 pub mod main_view;
 pub mod settings;
@@ -15,6 +16,13 @@ use crate::tui::app::{App, Screen};
 /// 一律改為顯示置中的放大提示：表單在過小的終端會被裁切而無法操作。
 pub fn draw(frame: &mut Frame, app: &mut App) {
     if crate::tui::ui::too_small(frame) {
+        return;
+    }
+
+    // 用户协议閱讀門：獨占畫面（不繪製底層，避免底下表單設定的游標
+    // 位置殘留在協議內容上）。
+    if let Some(state) = app.agreement.as_mut() {
+        agreement::draw(frame, state);
         return;
     }
 

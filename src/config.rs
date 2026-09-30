@@ -52,6 +52,9 @@ pub struct Config {
     /// 使用者記住的學期（`YYYY-YYYY+1-T`）；無法由考勤系統判定時作為預設。
     #[serde(default)]
     pub homework_term: Option<String>,
+    /// 使用者已同意的用户协议版本（與 [`crate::privacy::VERSION`] 比對）。
+    #[serde(default)]
+    pub privacy_version: Option<String>,
     /// 設定檔路徑覆寫（測試用；正式執行為 `None`，寫入預設位置）。
     #[serde(skip)]
     pub save_path: Option<PathBuf>,
@@ -63,6 +66,7 @@ impl Default for Config {
             visitor_id: "0".repeat(VISITOR_ID_LEN),
             access_policy: AccessPolicy::default(),
             homework_term: None,
+            privacy_version: None,
             save_path: None,
         }
     }
@@ -110,6 +114,7 @@ impl Config {
             visitor_id: random::hex(VISITOR_ID_LEN / 2)?,
             access_policy: AccessPolicy::default(),
             homework_term: None,
+            privacy_version: None,
             save_path: None,
         })
     }
@@ -133,4 +138,13 @@ impl Config {
         }
         Ok(())
     }
+
+    /// 是否已同意指定版本的协议（版本字串需完全一致）。
+    pub fn privacy_accepted(&self, version: &str) -> bool {
+        self.privacy_version.as_deref() == Some(version)
+    }
 }
+
+#[cfg(test)]
+#[path = "tests/config_test.rs"]
+mod config_test;

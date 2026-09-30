@@ -447,6 +447,66 @@ fn set_access_policy_saves_without_login_and_keeps_old_value_on_failure() {
     );
 }
 
+#[test]
+fn accept_agreement_saves_version_and_emits_event() {
+    let mut harness = harness(|_request: &HttpRequest| panic!("同意协议不应触发网络请求"));
+
+    harness
+        .dispatch(Job::AcceptAgreement)
+        .expect("同意协议应当成功");
+
+    let events = harness.drain_events();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::AgreementAccepted)),
+        "应回报协议已同意"
+    );
+    assert_eq!(
+        harness.worker.config.privacy_version.as_deref(),
+        Some(crate::privacy::VERSION),
+        "内存中的设定应记录已同意版本"
+    );
+    let saved = std::fs::read_to_string(harness.config_path()).expect("读取配置文件");
+    assert!(
+        saved.contains(&format!(
+            "\"privacy_version\": \"{}\"",
+            crate::privacy::VERSION
+        )),
+        "已同意版本应写入磁盘：{saved}"
+    );
+}
+
+#[test]
+fn accept_agreement_save_failure_keeps_previous_version() {
+    let mut harness = harness(|_request: &HttpRequest| panic!("同意协议不应触发网络请求"));
+    harness.worker.config.privacy_version = Some("1.0".to_owned());
+
+    // 将存档路径指向目录，迫使写入失败。
+    harness.worker.config.save_path = Some(harness._dir.path().to_path_buf());
+    let result = harness.dispatch(Job::AcceptAgreement);
+    assert!(result.is_err(), "写入失败时应报告错误");
+    assert_eq!(
+        harness.worker.config.privacy_version.as_deref(),
+        Some("1.0"),
+        "写入失败时应保留旧版本记录"
+    );
+    assert!(
+        harness.saw(|event| matches!(
+            event,
+            Event::Failed {
+                target: FailedTarget::Agreement,
+                ..
+            }
+        )),
+        "失败应定位到协议画面"
+    );
+    assert!(
+        !harness.saw(|event| matches!(event, Event::AgreementAccepted)),
+        "失败时不得回报已同意"
+    );
+}
+
 // ── 作業流程 ─────────────────────────────────────────
 
 /// 作業流程用的最小思源學堂假站點。

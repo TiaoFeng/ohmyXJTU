@@ -11,8 +11,8 @@ use crate::session::{AccessMode, SiteKind};
 use crate::sites::lms::LmsCourse;
 use crate::task::{CoursesData, Event, FailedTarget, HomeworkUpdate};
 use crate::tui::app::{
-    App, FlowData, FormState, HomeworkData, LoginScreen, NavItem, Page, ScheduleData, Screen,
-    SettingsState,
+    AgreementState, App, FlowData, FormState, HomeworkData, LoginScreen, NavItem, Page,
+    ScheduleData, Screen, SettingsState,
 };
 
 use super::apply_event as apply_event_with_jobs;
@@ -626,4 +626,31 @@ fn loading_cancelled_settles_page_without_losing_partial_data() {
         matches!(app.homework, Page::Ready(_)),
         "已有部分資料時取消應保留資料"
     );
+}
+
+#[test]
+fn agreement_accepted_closes_gate() {
+    let mut app = app();
+    app.agreement = Some(Box::new(AgreementState::new()));
+    apply_event(&mut app, Event::AgreementAccepted);
+    assert!(app.agreement.is_none(), "同意成功应关闭協议閱讀門");
+}
+
+#[test]
+fn agreement_failure_keeps_gate_with_inline_error() {
+    let mut app = app();
+    let mut state = AgreementState::new();
+    state.start_saving();
+    app.agreement = Some(Box::new(state));
+    apply_event(
+        &mut app,
+        Event::Failed {
+            what: "用户协议".to_owned(),
+            message: "写入配置文件失败".to_owned(),
+            target: FailedTarget::Agreement,
+        },
+    );
+    let state = app.agreement.as_deref().expect("失败后閱讀門应保留");
+    assert!(!state.saving, "失败后应解除保存中");
+    assert_eq!(state.error.as_deref(), Some("写入配置文件失败"));
 }

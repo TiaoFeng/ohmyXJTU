@@ -21,8 +21,12 @@ pub struct TermCode {
 
 impl TermCode {
     /// 由起始學年與學期序（1 起）建立。
+    ///
+    /// 拒絕 `u16::MAX` 作為起始學年：`label()` 與 `Display` 都要輸出
+    /// `start_year + 1`，而欄位是私有的、這裡又是唯一建構點，在此擋掉即可
+    /// 保證該運算永不溢位（外部輸入如思源學堂的學期碼可能任意）。
     pub fn new(start_year: u16, ordinal: u8) -> Option<Self> {
-        if start_year == 0 || ordinal == 0 {
+        if start_year == 0 || ordinal == 0 || start_year.checked_add(1).is_none() {
             return None;
         }
         Some(Self {
@@ -37,7 +41,7 @@ impl TermCode {
         let start_year: u16 = parts.next()?.parse().ok()?;
         let end_year: u16 = parts.next()?.parse().ok()?;
         let ordinal: u8 = parts.next()?.parse().ok()?;
-        if parts.next().is_some() || end_year != start_year + 1 {
+        if parts.next().is_some() || end_year != start_year.checked_add(1)? {
             return None;
         }
         Self::new(start_year, ordinal)

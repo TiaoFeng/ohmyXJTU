@@ -143,6 +143,11 @@ pub enum Job {
     SetAccessPolicy(AccessPolicy),
     /// 記錄使用者已同意的用户协议版本。
     AcceptAgreement,
+    /// 取消進行中的登入流程（介面關閉登入覆蓋層時）。
+    ///
+    /// 沒有這個任務時，「登入互動期間資料任務一律延後」會讓關閉覆蓋層後的
+    /// 重新整理永遠排不到：`r` 送出的任務只能躺在待執行佇列裡。
+    CancelLogin,
     /// 結束工作執行緒。
     Shutdown,
 }
@@ -169,6 +174,7 @@ impl Job {
             Self::ChangePassphrase { .. } => "修改口令".to_owned(),
             Self::SetAccessPolicy(_) => "访问模式".to_owned(),
             Self::AcceptAgreement => "用户协议".to_owned(),
+            Self::CancelLogin => "取消登录".to_owned(),
             Self::Shutdown => String::new(),
         }
     }
@@ -400,6 +406,9 @@ struct PendingVault {
     passphrase: Secret,
     /// 使用者重新輸入的帳號密碼。
     credentials: Credentials,
+    /// 嘗試新憑證前的舊憑證：取消或憑證被拒時還原，避免記憶體中的憑證
+    /// 與保險庫不一致（下次啟動、自動重登都應以保險庫為準）。
+    previous: Option<Credentials>,
 }
 
 /// 背景工作執行緒。
@@ -764,6 +773,7 @@ impl Worker {
             Job::SetAccessPolicy(policy) => self.set_access_policy(policy),
             Job::SetHomeworkTerm { term } => self.set_homework_term(&term),
             Job::AcceptAgreement => self.accept_agreement(),
+            Job::CancelLogin => self.cancel_login(),
             Job::Shutdown => Ok(()),
             // 資料任務由 [`Self::run_data_job`] 負責。
             Job::LoadSchedule
@@ -791,6 +801,7 @@ impl Worker {
         self.start_session(credentials)?;
         // 不預先登入任何站點：頁面載入需要時才按站點惰性登入。
         self.emit(Event::VaultReady);
+        self.report_vault_permissions();
         Ok(())
     }
 
@@ -801,7 +812,21 @@ impl Worker {
         self.start_session(credentials)?;
         self.emit(Event::AccountUpdated);
         self.emit(Event::VaultReady);
+        self.report_vault_permissions();
         Ok(())
+    }
+
+    /// 憑證檔權限若過寬（例如由他處複製進來而帶有 0644），收緊並告知使用者。
+    ///
+    /// 只在讀取既有憑證後檢查；寫入本身已固定 0600，非 Unix 平台不檢查。
+    fn report_vault_permissions(&mut self) {
+        let path = self.vault.path().to_path_buf();
+        if let Ok(true) = crate::io::ensure_private(&path) {
+            self.emit(Event::Notice(format!(
+                "凭证文件权限过宽（其他用户可读），已收紧为仅本人可读写：{}",
+                path.display()
+            )));
+        }
     }
 
     fn change_passphrase(&mut self, old: &str, new: &str) -> AppResult<()> {
@@ -832,6 +857,8 @@ impl Worker {
         self.credentials = Some(credentials);
         self.flow = None;
         self.retry = None;
+        // 待存憑證屬於舊帳號：換帳號後一律作廢。
+        self.pending_vault = None;
         // 換帳號後舊任務與快取一律作廢，進行中的資料任務不再回報。
         self.generation += 1;
         self.relogin_attempts = 0;
@@ -870,6 +897,41 @@ impl Worker {
         Ok(())
     }
 
+    /// 取消進行中的登入流程（介面關閉登入覆蓋層時）。
+    ///
+    /// 丟棄登入驅動器、待存憑證、待重試任務與暫存的驗證碼圖片：登入互動期間
+    /// 資料任務一律延後，若不取消，關閉覆蓋層後使用者按 `r` 送出的任務會永遠
+    /// 排不到。沒有進行中的流程時不做任何事（也不覆蓋介面已顯示的提示）。
+    fn cancel_login(&mut self) -> AppResult<()> {
+        if self.flow.is_none() && self.pending_vault.is_none() {
+            return Ok(());
+        }
+        self.flow = None;
+        self.discard_pending_vault();
+        self.retry = None;
+        self.clear_captcha();
+        self.emit(Event::Notice("已取消登录流程，可重新刷新页面".to_owned()));
+        Ok(())
+    }
+
+    /// 丟棄待存憑證，並把記憶體中的憑證還原為嘗試新憑證前的版本。
+    ///
+    /// 新憑證只有在登入成功後才寫入保險庫；取消或憑證被拒時，記憶體中的
+    /// 憑證必須回到保險庫仍保存的舊憑證，否則之後的自動重登會拿一組從未
+    /// 驗證、也沒被保存的憑證去登入。
+    fn discard_pending_vault(&mut self) {
+        let Some(pending) = self.pending_vault.take() else {
+            return;
+        };
+        let Some(previous) = pending.previous else {
+            return;
+        };
+        if let Some(session) = self.session.as_mut() {
+            session.set_credentials(previous.clone());
+        }
+        self.credentials = Some(previous);
+    }
+
     /// 記錄使用者已同意的用户协议版本；寫入失敗時不變更已保存的版本。
     fn accept_agreement(&mut self) -> AppResult<()> {
         let previous = self.config.privacy_version.clone();
@@ -889,12 +951,15 @@ impl Worker {
             .credentials
             .clone()
             .ok_or_else(|| AppError::config("尚未解锁凭证"))?;
-        self.emit(Event::LoginProgress(format!("正在登录{site}…")));
         // 重新開始登入時丟棄上一個（多半已失敗的）流程與其驗證碼圖片。
         self.flow = None;
         self.clear_captcha();
 
+        // 先取得登入步驟（這裡就會向登入入口發第一個請求），成功後才告訴
+        // 介面「正在登入」：否則離線等情況下介面會先顯示進度，之後卻收不到
+        // 任何後續事件而卡在該畫面。
         let stage = self.session_mut()?.next_login_step(site)?;
+        self.emit(Event::LoginProgress(format!("正在登录{site}…")));
         self.drive(stage, site, credentials, retry)
     }
 
@@ -924,8 +989,8 @@ impl Worker {
             LoginReply::Success => self.complete_flow(),
             LoginReply::Fail { message } => {
                 self.flow = None;
-                // 憑證被拒：丟棄待存憑證，不覆蓋保險庫中的舊憑證。
-                self.pending_vault = None;
+                // 憑證被拒：丟棄待存憑證（並還原舊憑證），不覆蓋保險庫中的舊憑證。
+                self.discard_pending_vault();
                 self.clear_captcha();
                 self.emit(Event::LoginFailed(message));
                 Ok(())
@@ -1043,11 +1108,14 @@ impl Worker {
 
         // 使用者手動重試：自動重登額度重新計算。
         self.relogin_attempts = 0;
+        // 先記下舊憑證，取消或憑證被拒時才能還原（見 `discard_pending_vault`）。
+        let previous = self.credentials.clone();
         self.session_mut()?.set_credentials(credentials.clone());
         self.credentials = Some(credentials.clone());
         self.pending_vault = Some(PendingVault {
             passphrase: Secret::from(passphrase),
             credentials,
+            previous,
         });
         self.begin_login(SiteKind::Attendance, None)
     }
@@ -1216,10 +1284,17 @@ impl Worker {
                 return;
             }
             self.relogin_attempts += 1;
-            if let Err(login_err) = self.begin_login(site, None)
-                && let Some(job) = self.retry.take()
-            {
-                self.emit_failed(&job, login_err);
+            if let Err(login_err) = self.begin_login(site, None) {
+                // 登入流程連開始都做不到（離線、DNS 失敗、登入頁取不到…）：
+                // 原任務必須收斂（否則頁面永遠停在「載入中」）。
+                //
+                // 這裡刻意「不」額外發送登入失敗事件：使用者只是斷網時不需
+                // 要一個無故彈出的登入框；若介面上已經有「正在登入」的覆蓋層
+                //（`begin_login` 已進到會顯示進度的階段），介面會在收到本失敗
+                // 事件時把它收斂成可重試的失敗畫面。
+                if let Some(job) = self.retry.take() {
+                    self.emit_failed(&job, login_err);
+                }
             }
             return;
         }
@@ -1760,7 +1835,8 @@ fn failed_target_of(job: &Job) -> FailedTarget {
         | Job::SendMfaCode
         | Job::VerifyMfaCode(_)
         | Job::RetryLogin
-        | Job::RetryWithAccount { .. } => FailedTarget::Login,
+        | Job::RetryWithAccount { .. }
+        | Job::CancelLogin => FailedTarget::Login,
         Job::CreateVault { .. }
         | Job::Unlock { .. }
         | Job::ChangeAccount { .. }

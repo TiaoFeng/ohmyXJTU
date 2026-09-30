@@ -2,6 +2,8 @@
 
 use std::fmt;
 
+use url::Url;
+
 use crate::auth::webvpn;
 use crate::error::{AppError, AppResult};
 use crate::http::{HttpClient, HttpRequest, HttpResponse};
@@ -153,12 +155,20 @@ pub(crate) fn merge_headers(
     request
 }
 
+/// 統一身份（Keycloak）主機；部分跳轉會落在這裡而不是統一認證。
+pub const IDENTITY_HOST: &str = "identity1.xjtu.edu.cn";
+
+/// 統一認證主機（`login.xjtu.edu.cn`）。
+const LOGIN_HOST: &str = "login.xjtu.edu.cn";
+
 /// 判定回應是否代表登入態失效。
+///
+/// 除了明確的 401 與二次認證頁，也涵蓋各種「被導向登入入口」的情況：統一認證
+/// （`login.xjtu.edu.cn`）、統一身份主機、站點自身的 CAS 入口，以及 **WebVPN
+/// 閘道本身的登入頁**。閘道登入態過期若漏判，資料查詢只會回報「响应无法解析」
+/// 或「待核实」，使用者不會看到自動重新登入。
 pub(crate) fn is_auth_failure(response: &HttpResponse) -> bool {
-    if response.status == 401 {
-        return true;
-    }
-    if response.final_url.contains("login.xjtu.edu.cn") {
+    if response.status == 401 || is_login_endpoint(&response.final_url) {
         return true;
     }
     let is_html = response
@@ -173,7 +183,77 @@ pub(crate) fn is_auth_failure(response: &HttpResponse) -> bool {
     false
 }
 
+/// `final_url` 是否為登入入口。
+///
+/// 只在學校網域內判定（外部網站的 `/login` 與我們無關），並以解析後的主機與
+/// 路徑比對，避免以子字串比對整條 URL 而被查詢參數誤導。
+fn is_login_endpoint(url: &str) -> bool {
+    let Ok(parsed) = Url::parse(url) else {
+        return false;
+    };
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    if !webvpn::is_school_host(host) {
+        return false;
+    }
+
+    let path = parsed.path();
+    let query = parsed.query();
+    if host == webvpn::WEBVPN_HOST {
+        // 閘道自身的登入頁。
+        if path == "/login" || path.starts_with("/login/") {
+            return true;
+        }
+        // 代理路徑（`/https[-port]/<cipher>/<目標路徑>`）以代理目標判定：
+        // 代理的對象是登入入口時，一樣代表登入態已失效。
+        let Some((target_host, target_path)) = proxied_target(path) else {
+            return false;
+        };
+        if target_host.as_deref().is_some_and(is_login_host) {
+            return true;
+        }
+        return is_login_path(&target_path, query);
+    }
+
+    is_login_host(host) || is_login_path(path, query)
+}
+
+/// 是否為統一認證／統一身份主機（在其上的一切回應都代表仍在登入流程中）。
+fn is_login_host(host: &str) -> bool {
+    host == IDENTITY_HOST || host == LOGIN_HOST
+}
+
+/// 路徑與查詢是否指向登入入口。
+fn is_login_path(path: &str, query: Option<&str>) -> bool {
+    path.contains("/cas/login")
+        || path == "/login"
+        || path.starts_with("/login/")
+        || query.is_some_and(|query| query.contains("cas_login"))
+}
+
+/// 取出 WebVPN 代理路徑的目標主機（盡力解密，失敗為 `None`）與目標路徑。
+///
+/// 形如 `/https/<前綴+密文>/<目標路徑>`；不是代理路徑時回 `None`。
+fn proxied_target(path: &str) -> Option<(Option<String>, String)> {
+    let rest = path.trim_start_matches('/');
+    let (scheme, rest) = rest.split_once('/')?;
+    let (scheme, _port) = scheme.split_once('-').unwrap_or((scheme, ""));
+    if !matches!(scheme, "https" | "http") {
+        return None;
+    }
+    let (cipher, rest) = rest.split_once('/')?;
+    let host = cipher
+        .strip_prefix(webvpn::PREFIX)
+        .and_then(|hex| webvpn::decrypt_host(hex).ok());
+    Some((host, format!("/{rest}")))
+}
+
 /// 缺少站點設定時的回報。
 pub(crate) fn unknown_site(site: SiteKind) -> AppError {
     AppError::protocol(format!("未注册的站点：{site}"))
 }
+
+#[cfg(test)]
+#[path = "tests/site_test.rs"]
+mod site_test;

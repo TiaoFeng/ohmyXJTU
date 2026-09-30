@@ -229,7 +229,8 @@ pub fn draw_login(frame: &mut Frame, screen: &LoginScreen) {
                 message.clone(),
                 THEME.error_style(),
             ))],
-            "enter 重试（使用已保存的账号密码） · e 重新输入账号密码 · q 退出".to_owned(),
+            "enter 重试（使用已保存的账号密码） · e 重新输入账号密码 · esc 关闭 · q 退出"
+                .to_owned(),
             None,
         ),
         LoginScreen::Captcha { path, error, input } => {

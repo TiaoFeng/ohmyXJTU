@@ -181,12 +181,12 @@ impl LoginDriver {
             return Ok(phone);
         }
 
-        let flow = self
+        let context = self
             .mfa
             .as_ref()
-            .ok_or_else(|| AppError::protocol("当前不需要短信验证"))?
-            .flow;
-        let state = self.mfa.as_ref().expect("已确认存在上下文").state.clone();
+            .ok_or_else(|| AppError::protocol("当前不需要短信验证"))?;
+        let flow = context.flow;
+        let state = context.state.clone();
         let mut url = Url::parse(&format!(
             "{LOGIN_HOST}/cas/{}/initByType/securephone",
             flow.path_segment()

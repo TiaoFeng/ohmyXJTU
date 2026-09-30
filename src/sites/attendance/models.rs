@@ -198,6 +198,8 @@ impl FlowPage {
         if self.page_size == 0 {
             return 1;
         }
-        self.total.div_ceil(u64::from(self.page_size)).max(1) as u32
+        // `total` 由伺服器回報，理論上可以是任意 `u64`：改用 `try_from`，
+        // 超出 `u32` 時以上限表示（`as` 會靜默截斷成看似合理卻錯誤的頁數）。
+        u32::try_from(self.total.div_ceil(u64::from(self.page_size)).max(1)).unwrap_or(u32::MAX)
     }
 }

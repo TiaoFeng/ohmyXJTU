@@ -4,20 +4,31 @@
 //! 字串拼接，避免注入。實際的 URL 來源一律是伺服器回應或既定常數
 //! （例如思源學堂首頁），不拼接未經驗證的路徑。
 
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use url::Url;
 
 use crate::error::{AppError, AppResult};
 
 /// 以系統預設瀏覽器開啟網址（不等待程序結束）。
+///
+/// 三個標準串流都接到 null：`xdg-open` 之類的啟動器會把訊息寫到 stdout／stderr，
+/// 直接繼承會打亂 TUI 畫面。子行程交由獨立執行緒回收，避免每開一次就累積殭屍。
 pub fn open_url(url: &str) -> AppResult<()> {
     let (program, args) = command_for(std::env::consts::OS, url)?;
-    Command::new(program)
+    let mut child = Command::new(program)
         .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .spawn()
-        .map(|_child| ())
-        .map_err(|err| AppError::protocol(format!("无法启动浏览器：{err}")))
+        .map_err(|err| AppError::protocol(format!("无法启动浏览器：{err}")))?;
+
+    // 不等待（瀏覽器會持續執行），但仍要回收，否則子行程結束後會成為殭屍。
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
 }
 
 /// 依平台組出開啟網址的系統命令（供測試檢驗程式與參數）。

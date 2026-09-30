@@ -27,7 +27,32 @@ pub fn write_private_atomic(path: &Path, bytes: &[u8]) -> AppResult<()> {
     tmp.as_file().sync_all()?;
     tmp.persist(path).map_err(|err| AppError::Io(err.error))?;
     restrict_permissions(path)?;
+    // 盡力同步目錄項：`rename` 的結果要在中繼資料落盤後才保證可見。
+    // 部分平台不支援對目錄開啟檔案（例如 Windows），失敗一律忽略。
+    if let Ok(dir) = fs::File::open(dir) {
+        let _ = dir.sync_all();
+    }
     Ok(())
+}
+
+/// 確保檔案權限僅擁有者可讀寫。
+///
+/// 回傳 `true` 代表原本權限過寬、已收緊為 0600（呼叫端可據此提示使用者）；
+/// `false` 代表本來就合乎要求，或平台不支援（非 Unix 一律為 `false`）。
+pub fn ensure_private(path: &Path) -> AppResult<bool> {
+    #[cfg(unix)]
+    {
+        if is_private(path)? {
+            return Ok(false);
+        }
+        restrict_permissions(path)?;
+        Ok(true)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(false)
+    }
 }
 
 /// 將檔案權限收緊為 0600（僅 Unix 有效）。

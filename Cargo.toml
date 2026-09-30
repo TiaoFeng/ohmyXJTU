@@ -43,3 +43,8 @@ zeroize = { version = "1.9.0", features = ["derive"] }
 [profile.dist]
 inherits = "release"
 lto = "thin"
+
+[profile.release]
+# 發佈版也保留整數溢位檢查：算術輸入多來自學校回應（學期、節次、頁數），
+# 溢位時寧可 panic 也不要靜默回繞而產生錯誤結果。
+overflow-checks = true

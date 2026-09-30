@@ -98,3 +98,33 @@ fn computes_total_pages_for_flow_page() {
     };
     assert_eq!(empty.total_pages(), 1);
 }
+
+/// 極端的 `total` 與每頁筆數：不得除以零，也不得以 `as u32` 靜默截斷。
+#[test]
+fn clamps_total_pages_for_hostile_totals() {
+    let zero_size = FlowPage {
+        records: Vec::new(),
+        total: 100,
+        page: 1,
+        page_size: 0,
+    };
+    assert_eq!(zero_size.total_pages(), 1);
+
+    // `total` 遠超 `u32` 可表示範圍時以上限表示，不截斷成看似合理的錯誤頁數。
+    let huge = FlowPage {
+        records: Vec::new(),
+        total: u64::MAX,
+        page: 1,
+        page_size: 20,
+    };
+    assert_eq!(huge.total_pages(), u32::MAX);
+
+    // 可正常表示的範圍不受影響。
+    let large = FlowPage {
+        records: Vec::new(),
+        total: 1_000_000,
+        page: 1,
+        page_size: 20,
+    };
+    assert_eq!(large.total_pages(), 50_000);
+}

@@ -505,6 +505,27 @@ fn failed_screen_retries_with_saved_credentials_or_quits() {
     assert!(app.quit);
 }
 
+/// 失敗畫面按 esc 關閉覆蓋層：使用者得以回到頁面按 r 重試（不必重啟程式）。
+#[test]
+fn failed_screen_esc_closes_overlay_so_refresh_works() {
+    let (jobs, rx) = channel();
+    let mut app = failed_app("登录失败：网络连接失败（域名解析失败）");
+
+    press(&mut app, &jobs, KeyCode::Esc);
+    assert!(app.login.is_none(), "esc 應關閉登入覆蓋層");
+    assert!(
+        matches!(rx.try_recv(), Ok(Job::CancelLogin)),
+        "關閉覆蓋層應一併取消工作者端的登入流程"
+    );
+
+    // 覆蓋層關閉後，主畫面的 r 才能刷新目前頁面。
+    press(&mut app, &jobs, KeyCode::Char('r'));
+    assert!(
+        matches!(rx.try_recv(), Ok(Job::LoadSchedule)),
+        "關閉覆蓋層後 r 應能刷新目前頁面"
+    );
+}
+
 #[test]
 fn failed_screen_opens_credentials_form() {
     let (jobs, _rx) = channel();
@@ -1009,4 +1030,47 @@ fn agreement_quit_keys_exit_without_accepting() {
         &jobs,
     );
     assert!(app.quit, "ctrl+c 一律可退出");
+}
+
+/// 帶 CONTROL／ALT 修飾的字元不得被當成普通字元寫進輸入框。
+///
+/// crossterm 對 `Ctrl+A` 同樣回報 `Char('a')`；若只看 `code`，控制鍵會污染
+/// 表單內容（含口令與密碼欄位）。
+#[test]
+fn control_modified_characters_are_not_inserted() {
+    let (jobs, _rx) = channel();
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Unlock(FormState::unlock()));
+
+    for (code, modifiers) in [
+        (KeyCode::Char('a'), KeyModifiers::CONTROL),
+        (KeyCode::Char('s'), KeyModifiers::CONTROL),
+        (
+            KeyCode::Char('x'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        ),
+        (KeyCode::Char('a'), KeyModifiers::ALT),
+    ] {
+        handle_key(&mut app, KeyEvent::new(code, modifiers), &jobs);
+    }
+
+    let Screen::Unlock(form) = &app.screen else {
+        panic!("應停留在解鎖表單");
+    };
+    assert!(
+        form.focused().expect("聚焦字段").value.is_empty(),
+        "控制键不得插入内容"
+    );
+
+    // 一般字元仍可正常輸入，Ctrl+U 仍是清空（既有行為）。
+    type_text(&mut app, &jobs, "abc");
+    handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+        &jobs,
+    );
+    let Screen::Unlock(form) = &app.screen else {
+        panic!("應停留在解鎖表單");
+    };
+    assert_eq!(form.value("加密口令"), "", "ctrl+u 應清空欄位");
 }

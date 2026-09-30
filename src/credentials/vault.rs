@@ -217,8 +217,13 @@ fn decrypt(passphrase: &str, bytes: &[u8]) -> AppResult<Credentials> {
         )
         .map_err(|_| AppError::WrongPassphrase)?;
     let plaintext = Zeroizing::new(plaintext);
-    serde_json::from_slice(&plaintext)
-        .map_err(|err| AppError::VaultFile(format!("凭证内容无法解析：{err}")))
+    // 錯誤訊息只描述類別：`serde_json` 的型別錯誤會引用出問題的欄位值。
+    serde_json::from_slice(&plaintext).map_err(|err| {
+        AppError::VaultFile(format!(
+            "凭证内容无法解析（{}）",
+            crate::error::describe_json_failure(err.classify())
+        ))
+    })
 }
 
 type ParsedVault<'a> = (KdfParams, [u8; SALT_LEN], [u8; NONCE_LEN], &'a [u8]);

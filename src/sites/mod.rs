@@ -56,19 +56,9 @@ pub fn deserialize_value<T: DeserializeOwned>(
     serde_json::from_value(value).map_err(|err| {
         AppError::protocol(format!(
             "{context} 响应格式不符（{}）",
-            describe_parse_failure(err.classify())
+            crate::error::describe_json_failure(err.classify())
         ))
     })
-}
-
-/// 解析失敗的類別描述（不含原始欄位值）。
-fn describe_parse_failure(category: serde_json::error::Category) -> &'static str {
-    match category {
-        serde_json::error::Category::Io => "读取失败",
-        serde_json::error::Category::Syntax => "语法错误",
-        serde_json::error::Category::Data => "数据类型不符",
-        serde_json::error::Category::Eof => "内容不完整",
-    }
 }
 
 /// JSON 值的型別名稱（不含內容）。

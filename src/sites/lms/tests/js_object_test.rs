@@ -93,3 +93,34 @@ fn keeps_ascii_escapes_and_rejects_trailing_backslash() {
     // 非法 `\u` 跳脫：解析失敗回 None。
     assert!(parse_js_object("{ user: { a: \"\\uZZZZ\" }, dept: {} }", "user", "dept").is_none());
 }
+
+/// 巢狀深度上限：超限回 `None`，不得遞迴到堆疊溢位。
+///
+/// 修復前這裡的輸入會讓解析器遞迴上萬層（工作執行緒堆疊 2 MiB）而直接
+/// abort；上限生效後只有前 `MAX_DEPTH` 層會被走訪，回應極快。
+#[test]
+fn refuses_values_nested_deeper_than_the_limit() {
+    const DEPTH: usize = 50_000;
+
+    // 深層巢狀陣列（`globalData` 的指派語句）。
+    let deep_arrays = format!(
+        "var globalData = {}{};",
+        "[".repeat(DEPTH),
+        "]".repeat(DEPTH)
+    );
+    assert!(find_named_value(&deep_arrays, "globalData").is_none());
+
+    // 深層巢狀物件（`user` 子物件）。
+    let deep_objects = format!("{}1{}", "{ a: ".repeat(DEPTH), " }".repeat(DEPTH));
+    let page = format!("{{ user: {deep_objects}, dept: {{}} }}");
+    assert!(parse_js_object(&page, "user", "dept").is_none());
+}
+
+/// 上限之內的巢狀結構仍要能完整解析。
+#[test]
+fn still_parses_nesting_within_the_limit() {
+    let nested = "{ a: { b: [ { c: 1 } ] } }";
+    let page = format!("{{ user: {nested}, dept: {{}} }}");
+    let user = parse_js_object(&page, "user", "dept").expect("应解析");
+    assert_eq!(user["a"]["b"][0]["c"], json!(1));
+}

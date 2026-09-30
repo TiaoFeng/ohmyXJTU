@@ -385,8 +385,16 @@ fn apply_event(app: &mut App, event: Event, jobs: &Sender<Job>) {
                     }
                 }
                 _ => {
-                    // 資料任務失敗：只標記對應頁面，不影響登入覆蓋層或根畫面。
+                    // 資料任務失敗：只標記對應頁面，不影響根畫面。
                 }
+            }
+            // 登入嘗試若以失敗收場（包含自動重登連開始都做不到，例如離線），
+            // 覆蓋層必須離開「正在登入」：進度畫面只接受 q，否則使用者會被
+            // 卡在一個不會再有後續事件的畫面（連 r 都無法刷新）。
+            if matches!(app.login.as_deref(), Some(LoginScreen::Progress { .. })) {
+                app.login = Some(Box::new(LoginScreen::Failed {
+                    message: format!("登录未完成：{message}"),
+                }));
             }
             app.set_message(text);
         }

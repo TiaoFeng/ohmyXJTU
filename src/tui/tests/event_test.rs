@@ -219,12 +219,16 @@ fn homework_event_updates_groups_and_counts() {
     );
 }
 
+/// 資料任務失敗時：目標頁面標記失敗，且停在「正在登入」的覆蓋層必須收斂。
+///
+/// 離線時自動重登連開始都做不到，工作者會先要求重登（介面顯示「正在登入…」）
+/// 再回報失敗；若覆蓋層留在進度畫面，按鍵全被它吃掉，使用者只能重啟程式。
 #[test]
-fn data_failure_marks_target_page_without_touching_login_overlay() {
+fn data_failure_settles_page_and_stuck_login_progress() {
     let mut app = app();
     app.set_screen(Screen::Main);
     app.login = Some(Box::new(LoginScreen::Progress {
-        note: "正在登录…".to_owned(),
+        note: "正在登录考勤系统…".to_owned(),
     }));
     app.schedule.start_loading("正在加载…");
 
@@ -232,15 +236,43 @@ fn data_failure_marks_target_page_without_touching_login_overlay() {
         &mut app,
         Event::Failed {
             what: "课表".to_owned(),
-            message: "网络连接失败".to_owned(),
+            message: "网络连接失败（域名解析失败）".to_owned(),
             target: FailedTarget::Schedule,
         },
     );
 
-    // 資料任務失敗：失敗標記只落在課表頁；底層畫面與登入覆蓋層皆不變。
-    assert!(matches!(app.screen, Screen::Main));
-    assert!(app.login.is_some(), "資料失敗不應關閉或替換登入覆蓋層");
-    assert!(matches!(app.schedule, Page::Failed { .. }));
+    assert!(matches!(app.screen, Screen::Main), "底層畫面維持不變");
+    assert!(
+        matches!(app.schedule, Page::Failed { .. }),
+        "目標頁面必須收斂為失敗，而不是停在載入中"
+    );
+    assert!(
+        matches!(app.login.as_deref(), Some(LoginScreen::Failed { .. })),
+        "停在「正在登入」的覆蓋層必須收斂為可重試的失敗畫面：{:?}",
+        app.login
+    );
+
+    // 已在等待使用者輸入（驗證碼）的覆蓋層不受資料任務失敗影響。
+    let mut waiting = App::new(AccessPolicy::Auto);
+    waiting.set_screen(Screen::Main);
+    waiting.login = Some(Box::new(LoginScreen::Captcha {
+        path: PathBuf::from("/tmp/captcha.png"),
+        input: crate::tui::text::InputLine::new(),
+        error: None,
+    }));
+    apply_event(
+        &mut waiting,
+        Event::Failed {
+            what: "课表".to_owned(),
+            message: "网络连接失败".to_owned(),
+            target: FailedTarget::Schedule,
+        },
+    );
+    assert!(
+        matches!(waiting.login.as_deref(), Some(LoginScreen::Captcha { .. })),
+        "等使用者輸入的覆蓋層不應被資料失敗替換：{:?}",
+        waiting.login
+    );
 }
 
 #[test]

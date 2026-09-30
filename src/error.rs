@@ -7,6 +7,20 @@ use thiserror::Error;
 /// 應用程式統一的結果型別。
 pub type AppResult<T> = Result<T, AppError>;
 
+/// `serde_json` 解析失敗的類別描述。
+///
+/// 錯誤訊息一律只描述類別，不直接使用 `serde_json::Error` 的 `Display`：
+/// 型別不符時它會引用出問題的欄位值（例如 `invalid type: string "…"`），
+/// 不該出現在使用者可見的訊息或紀錄裡。
+pub fn describe_json_failure(category: serde_json::error::Category) -> &'static str {
+    match category {
+        serde_json::error::Category::Io => "读取失败",
+        serde_json::error::Category::Syntax => "语法错误",
+        serde_json::error::Category::Data => "数据类型不符",
+        serde_json::error::Category::Eof => "内容不完整",
+    }
+}
+
 /// 網路錯誤的類別。
 ///
 /// 由 HTTP 層依錯誤鏈分類，供介面顯示與路由決策使用：只有

@@ -165,3 +165,59 @@ fn failed_write_keeps_previous_file() {
         "写入失败时原有凭证必须保留"
     );
 }
+
+/// 解密的內容不是預期的結構時，錯誤訊息不得夾帶明文片段。
+///
+/// `serde_json` 對型別不符的訊息會引用出問題的值（例如
+/// `invalid type: string "…", expected struct Credentials`）；修復前這裡會把
+/// 解密後的明文寫進使用者可見的訊息。
+#[test]
+fn parse_failure_message_does_not_leak_plaintext() {
+    const PLAINTEXT: &str = "TOP-SECRET-PLAINTEXT";
+
+    let dir = tempdir().expect("创建临时目录");
+    let vault = Vault::at(dir.path().join("credentials.vault"));
+    fs::write(vault.path(), seal(PLAINTEXT.as_bytes())).expect("写入凭证文件");
+
+    let err = vault.load(PASSPHRASE).unwrap_err();
+    let message = err.to_string();
+    assert!(
+        !message.contains(PLAINTEXT),
+        "訊息不得夾帶解密內容：{message}"
+    );
+    assert!(matches!(err, AppError::VaultFile(_)), "实际错误：{err}");
+}
+
+/// 以 `PASSPHRASE` 加密任意位元組，組出格式合法的憑證檔。
+fn seal(plaintext: &[u8]) -> Vec<u8> {
+    use chacha20poly1305::aead::{Aead as _, KeyInit as _, Payload};
+    use chacha20poly1305::{ChaCha20Poly1305, Nonce};
+
+    let mut salt = [0_u8; SALT_LEN];
+    let mut nonce = [0_u8; NONCE_LEN];
+    crate::random::fill(&mut salt).expect("盐值");
+    crate::random::fill(&mut nonce).expect("nonce");
+
+    let key = derive_key(PASSPHRASE, DEFAULT_KDF, &salt).expect("派生密钥");
+    let cipher = ChaCha20Poly1305::new((&*key).into());
+    let ciphertext = cipher
+        .encrypt(
+            Nonce::from_slice(&nonce),
+            Payload {
+                msg: plaintext,
+                aad: AAD,
+            },
+        )
+        .expect("加密");
+
+    let mut out = Vec::with_capacity(HEADER_LEN + ciphertext.len());
+    out.extend_from_slice(MAGIC);
+    out.push(VERSION);
+    out.extend_from_slice(&DEFAULT_KDF.m_cost.to_le_bytes());
+    out.extend_from_slice(&DEFAULT_KDF.t_cost.to_le_bytes());
+    out.extend_from_slice(&DEFAULT_KDF.p_cost.to_le_bytes());
+    out.extend_from_slice(&salt);
+    out.extend_from_slice(&nonce);
+    out.extend_from_slice(&ciphertext);
+    out
+}

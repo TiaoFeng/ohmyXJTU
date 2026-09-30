@@ -25,6 +25,8 @@ enum LoginAction {
     Retry,
     EditAccount,
     BackToFailed,
+    /// 關閉登入覆蓋層（回到底層畫面，可繼續按 `r` 刷新等操作）。
+    Dismiss,
     SubmitCredentials,
     SubmitCaptcha(String),
     RefreshCaptcha,
@@ -379,6 +381,8 @@ fn handle_login(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
             LoginScreen::Failed { .. } => match key.code {
                 KeyCode::Enter => action = Some(LoginAction::Retry),
                 KeyCode::Char('e') => action = Some(LoginAction::EditAccount),
+                // 關閉覆蓋層：讓使用者回到原本的頁面（可換頁或按 r 重試）。
+                KeyCode::Esc => action = Some(LoginAction::Dismiss),
                 KeyCode::Char('q') => action = Some(LoginAction::Quit),
                 _ => {}
             },
@@ -436,6 +440,13 @@ fn handle_login(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
             let _ = jobs.send(Job::RetryLogin);
         }
         Some(LoginAction::EditAccount) => open_credentials_form(app),
+        Some(LoginAction::Dismiss) => {
+            app.login = None;
+            // 一併取消工作者端的登入流程：否則登入互動期間被延後的資料任務
+            //（例如接著按 r 重新整理）永遠不會執行。
+            let _ = jobs.send(Job::CancelLogin);
+            app.set_message("已关闭登录提示：网络恢复后可按 r 重试");
+        }
         Some(LoginAction::BackToFailed) => {
             let message = login_message(app);
             app.login = Some(Box::new(LoginScreen::Failed { message }));
@@ -830,6 +841,10 @@ fn change_flow_page(app: &mut App, jobs: &Sender<Job>, delta: i32) {
 }
 
 /// 單行輸入的共用編輯邏輯。
+///
+/// 帶 CONTROL 或 ALT 修飾的字元一律不插入：crossterm 對 `Ctrl+A` 之類的按鍵
+/// 同樣回報 `Char('a')`，若只看 `code` 會把控制鍵當成普通字元寫進欄位
+/// （包含口令欄）。
 fn edit_line(line: &mut InputLine, key: KeyEvent) {
     match key.code {
         KeyCode::Backspace => {
@@ -846,7 +861,11 @@ fn edit_line(line: &mut InputLine, key: KeyEvent) {
         }
         KeyCode::Home => line.move_home(),
         KeyCode::End => line.move_end(),
-        KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::ALT) => {
+        KeyCode::Char(character)
+            if !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
             line.insert(character);
         }
         _ => {}

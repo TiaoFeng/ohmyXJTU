@@ -144,12 +144,25 @@ fn skip_ws(text: &str, from: usize) -> usize {
 struct Parser<'a> {
     text: &'a str,
     pos: usize,
+    depth: usize,
 }
+
+/// 巢狀結構的最大深度。
+///
+/// 解析在背景工作執行緒上執行（預設堆疊 2 MiB）：不限制深度的話，異常或惡意
+/// 的頁面只要塞入上萬層巢狀容器就會堆疊溢位——那是直接 abort，panic hook 不會
+/// 執行（終端可能留在 raw mode）。超限一律回 `None`（呼叫端視為解析失敗，
+/// 走既有的「待核实」語意），不嘗試救援異常輸入。
+const MAX_DEPTH: usize = 64;
 
 impl<'a> Parser<'a> {
     /// 建立解析器。
     fn new(text: &'a str, pos: usize) -> Self {
-        Self { text, pos }
+        Self {
+            text,
+            pos,
+            depth: 0,
+        }
     }
 
     /// 目前位元組。
@@ -166,8 +179,8 @@ impl<'a> Parser<'a> {
     fn parse_value(&mut self) -> Option<Value> {
         self.skip_ws();
         match self.peek()? {
-            b'{' => self.parse_object(),
-            b'[' => self.parse_array(),
+            b'{' => self.nested(Self::parse_object),
+            b'[' => self.nested(Self::parse_array),
             b'"' | b'\'' => self.parse_string().map(Value::String),
             b't' if self.starts_with("true") => {
                 self.pos += 4;
@@ -200,6 +213,17 @@ impl<'a> Parser<'a> {
                 (self.pos > start).then(|| Value::String(self.text[start..self.pos].to_owned()))
             }
         }
+    }
+
+    /// 解析巢狀容器（物件或陣列）：深度超限即回 `None`，離開時一定還原深度。
+    fn nested(&mut self, parse: impl FnOnce(&mut Self) -> Option<Value>) -> Option<Value> {
+        if self.depth >= MAX_DEPTH {
+            return None;
+        }
+        self.depth += 1;
+        let value = parse(self);
+        self.depth -= 1;
+        value
     }
 
     /// 解析物件（允許未加引號的鍵與尾逗號）。

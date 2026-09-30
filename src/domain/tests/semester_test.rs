@@ -38,6 +38,22 @@ fn parses_and_formats_term_codes() {
     assert_eq!(TermCode::parse("2026-2027-1-2"), None);
 }
 
+/// 起始學年不得取到 `u16::MAX`：`label()`／`Display` 會輸出 `start_year + 1`。
+///
+/// 修復前 `TermCode::parse("65535-65535-1")` 與 `from_lms_code("65535-1")` 都能
+/// 造出該值，debug 版本會在字串格式化時因溢位 panic（release 則靜默回繞）。
+#[test]
+fn rejects_start_years_that_cannot_be_incremented() {
+    assert_eq!(TermCode::parse("65535-65535-1"), None);
+    assert_eq!(TermCode::parse("65535-65536-1"), None);
+    assert_eq!(TermCode::from_lms_code("65535-1"), None);
+
+    // 上限的前一年仍可正常運作。
+    let term = TermCode::parse("65534-65535-1").expect("解析");
+    assert_eq!(term.label(), "65534-65535 学年 第 1 学期");
+    assert_eq!(term.to_string(), "65534-65535-1");
+}
+
 #[test]
 fn maps_lms_semester_codes() {
     assert_eq!(

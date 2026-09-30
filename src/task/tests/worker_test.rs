@@ -15,6 +15,7 @@ use tempfile::TempDir;
 use crate::auth::rsa;
 use crate::domain::homework::HomeworkState;
 use crate::domain::semester::TermCode;
+use crate::error::NetworkKind;
 use crate::http::fake::{FakeClient, html, json};
 use crate::http::{HttpClient, HttpRequest, HttpResponse};
 use crate::session::AccessMode;
@@ -517,6 +518,172 @@ fn new_load_resets_the_relogin_budget() {
         login_posts.load(Ordering::SeqCst),
         2,
         "新的请求应重新获得一次自动重登额度"
+    );
+}
+
+/// 離線時自動重登連開始都做不到：不得留下「正在登入」的進度畫面，頁面也要收斂。
+///
+/// 修復前：工作者先發 `LoginProgress`（介面顯示「正在登录考勤系统…」），之後的
+/// 失敗只回報在原頁面上，覆蓋層因此永遠留在進度畫面——而進度畫面只接受 `q`，
+/// 使用者連 `r` 都無法刷新，只能重啟程式。
+#[test]
+fn offline_relogin_failure_settles_page_and_reports_login_failure() {
+    let mut harness = harness(|_request: &HttpRequest| {
+        Err(AppError::network_kind(
+            NetworkKind::Dns,
+            "域名解析失败".to_owned(),
+        ))
+    });
+
+    // 考勤站點尚未登入：資料任務先回報工作階段失效，再嘗試自動重登。
+    harness
+        .dispatch(Job::LoadSchedule)
+        .expect("資料任務失敗不應冒泡為任務錯誤");
+
+    let events = harness.drain_events();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::SessionExpired {
+                site: SiteKind::Attendance
+            }
+        )),
+        "應先回報工作階段失效：{events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::LoginProgress(_))),
+        "登入流程連開始都做不到時，不得顯示「正在登入」：{events:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Failed {
+                target: FailedTarget::Schedule,
+                ..
+            }
+        )),
+        "原頁面必須收斂為失敗，而不是停在載入中：{events:?}"
+    );
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            Event::Failed {
+                target: FailedTarget::Login,
+                ..
+            }
+        )),
+        "單純的連線失敗不應彈出登入框：{events:?}"
+    );
+    assert!(
+        harness.worker.retry.is_none(),
+        "重登失敗後不應保留待重試任務"
+    );
+}
+
+/// 自動重登已進到會顯示進度的階段才失敗時，覆蓋層必須被收斂成失敗畫面。
+///
+/// 介面端由 `tui::event_test` 的
+/// `data_failure_settles_page_and_stuck_login_progress` 覆蓋；這裡確認工作者在
+/// 這種情況下確實會送出「原頁面失敗」事件（也就是介面收斂的依據）。
+#[test]
+fn relogin_progress_is_followed_by_a_page_failure_when_the_login_breaks() {
+    let mut harness = harness(|request: &HttpRequest| {
+        let url = request.url.as_str();
+        // 登入入口可取回，但公鑰取不到：登入流程已進到會顯示進度的階段才失敗。
+        if url == rsa::PUBLIC_KEY_URL {
+            return Err(AppError::network_kind(
+                NetworkKind::Connect,
+                "连接失败".to_owned(),
+            ));
+        }
+        if url == attendance::LOGIN_URL {
+            return Ok(HttpResponse::new(200, ATTENDANCE_POST, login_page()));
+        }
+        Err(AppError::network_kind(
+            NetworkKind::Connect,
+            "连接失败".to_owned(),
+        ))
+    });
+
+    harness
+        .dispatch(Job::LoadSchedule)
+        .expect("資料任務失敗不應冒泡為任務錯誤");
+
+    let events = harness.drain_events();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::LoginProgress(_))),
+        "登入流程確實開始時應顯示進度：{events:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Failed {
+                target: FailedTarget::Schedule,
+                ..
+            }
+        )),
+        "進度之後必須跟著原頁面的失敗事件，介面才能收斂覆蓋層：{events:?}"
+    );
+    assert!(harness.worker.retry.is_none());
+}
+
+/// 取消登入：丟棄流程、待存憑證與待重試任務。
+///
+/// 登入互動期間資料任務一律延後，若不取消，使用者關閉登入覆蓋層後按 `r`
+/// 送出的任務會永遠排在佇列裡（介面看起來像「r 沒反應」）。
+#[test]
+fn cancel_login_drops_pending_login_state() {
+    // 建立一個登入流程（假客戶端回傳學校網域的登入頁回應）。
+    let client: Arc<dyn HttpClient> =
+        Arc::new(FakeClient::with_responder(|request: &HttpRequest| {
+            Ok(HttpResponse::new(200, request.url.clone(), "<html></html>"))
+        }));
+    let driver =
+        LoginDriver::new(client, attendance::LOGIN_URL, &"0".repeat(32)).expect("建立登录驱动器");
+
+    let mut harness = harness(|_request: &HttpRequest| panic!("取消登录不应触发网络请求"));
+    harness.worker.flow = Some(LoginFlow {
+        site: SiteKind::Attendance,
+        driver: Box::new(driver),
+        retry: Some(Job::LoadSchedule),
+    });
+    harness.worker.retry = Some(Job::LoadSchedule);
+    // 模擬「使用者重新輸入密碼後嘗試登入」的當下狀態。
+    harness.worker.credentials = Some(Credentials::new("3120000001", "typed-password"));
+    harness.worker.pending_vault = Some(PendingVault {
+        passphrase: Secret::from("secret123"),
+        credentials: Credentials::new("3120000001", "typed-password"),
+        previous: Some(Credentials::new("3120000001", "old-password")),
+    });
+
+    harness
+        .dispatch(Job::CancelLogin)
+        .expect("取消登入应当成功");
+
+    assert!(harness.worker.flow.is_none(), "應丟棄登入流程");
+    assert!(harness.worker.pending_vault.is_none(), "應丟棄待存憑證");
+    assert!(harness.worker.retry.is_none(), "應丟棄待重試任務");
+    assert_eq!(
+        harness.worker.credentials,
+        Some(Credentials::new("3120000001", "old-password")),
+        "取消後記憶體中的憑證應還原為保險庫保存的舊憑證"
+    );
+    assert_eq!(
+        harness
+            .worker
+            .session
+            .as_ref()
+            .and_then(|session| session.credentials().cloned()),
+        Some(Credentials::new("3120000001", "old-password")),
+        "工作階段的憑證也應還原"
+    );
+    assert!(
+        harness.saw(|event| matches!(event, Event::Notice(_))),
+        "應提示已取消登入"
     );
 }
 
@@ -1996,4 +2163,44 @@ fn clears_captcha_file_when_login_job_fails() {
         )),
         "应回报登入失败事件：{events:?}"
     );
+}
+
+/// 憑證檔權限過寬（例如由他處複製進來而帶有 0644）時應收緊並告知使用者。
+#[cfg(unix)]
+#[test]
+fn unlock_tightens_loose_vault_permissions() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let mut harness = harness(|_request: &HttpRequest| panic!("解锁不应触发任何网络请求"));
+    harness.seed_vault("secret123", &Credentials::new("3120000001", "old-password"));
+
+    let path = harness.vault.path().to_path_buf();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("放宽权限");
+    assert_eq!(mode(&path), 0o644);
+
+    harness
+        .dispatch(Job::Unlock {
+            passphrase: "secret123".into(),
+        })
+        .expect("解锁应当成功");
+
+    assert!(
+        harness.saw(|event| matches!(
+            event,
+            Event::Notice(message) if message.contains("权限")
+        )),
+        "应提示凭证文件权限过宽"
+    );
+    assert_eq!(mode(&path), 0o600, "权限应收紧为 0600");
+}
+
+/// 憑證檔權限（僅 Unix 有權限位）。
+#[cfg(unix)]
+fn mode(path: &std::path::Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::metadata(path)
+        .expect("读取权限")
+        .permissions()
+        .mode()
+        & 0o777
 }

@@ -179,8 +179,12 @@ impl HttpResponse {
 
     /// 將回應本文解析為 JSON。
     pub fn json<T: DeserializeOwned>(&self) -> AppResult<T> {
-        serde_json::from_slice(&self.body)
-            .map_err(|err| AppError::protocol(format!("响应 JSON 解析失败：{err}")))
+        serde_json::from_slice(&self.body).map_err(|err| {
+            AppError::protocol(format!(
+                "响应 JSON 解析失败（{}）",
+                crate::error::describe_json_failure(err.classify())
+            ))
+        })
     }
 
     /// 讀取標頭值（不分大小寫）。

@@ -198,6 +198,16 @@ impl Job {
             _ => None,
         }
     }
+
+    /// 是否為略過快取的強制刷新（僅作業、課程與活動載入帶有 `force`）。
+    fn is_forced(&self) -> bool {
+        match self {
+            Self::LoadHomework { force }
+            | Self::LoadCourses { force }
+            | Self::LoadActivities { force, .. } => *force,
+            _ => false,
+        }
+    }
 }
 
 /// 資料任務的合併鍵。
@@ -402,6 +412,8 @@ struct Worker {
     cache: LmsCache,
     /// 本會話曾查得的考勤學期（供課程分區使用，不重複請求）。
     known_term: Option<TermCode>,
+    /// 已收到結束指令；[`Worker::run`] 於迴圈開頭立即返回。
+    shutdown: bool,
 }
 
 /// 作業載入的步進階段。
@@ -607,6 +619,7 @@ pub fn spawn(config: Config, vault: Vault) -> AppResult<(Sender<Job>, Receiver<E
         generation: 0,
         cache: LmsCache::default(),
         known_term: None,
+        shutdown: false,
     };
 
     thread::Builder::new()
@@ -620,6 +633,10 @@ pub fn spawn(config: Config, vault: Vault) -> AppResult<(Sender<Job>, Receiver<E
 impl Worker {
     fn run(&mut self) {
         loop {
+            // 資料載入中途收到結束指令：立即停止（排隊中的任務一併丟棄）。
+            if self.shutdown {
+                return;
+            }
             let job = if self.flow.is_none() {
                 match self.pending_data.pop_front() {
                     Some(job) => job,
@@ -643,15 +660,8 @@ impl Worker {
                     return;
                 }
             } else if self.flow.is_some() {
-                // 登入尚未完成：排入待執行（略過重複的請求）。
-                let duplicate = job.data_key().is_some_and(|key| {
-                    self.pending_data
-                        .iter()
-                        .any(|queued| queued.data_key().as_ref() == Some(&key))
-                });
-                if !duplicate {
-                    self.pending_data.push_back(job);
-                }
+                // 登入尚未完成：資料任務排入待執行（同鍵去重，強制優先）。
+                self.merge_data_job(job, None);
             } else {
                 self.run_data_job(job);
             }
@@ -784,8 +794,9 @@ impl Worker {
         self.config.homework_term = Some(term.to_string());
         self.config.save()?;
         self.emit(Event::Notice(format!("已记住学期 {}", term.label())));
-        self.pending_data
-            .push_back(Job::LoadHomework { force: true });
+        // 學期已變更：任何早於此開始的載入都基於舊學期，必須確保佇列中恰有
+        // 一筆強制重載（忽略執行中任務），切換才會立即生效。
+        self.merge_data_job(Job::LoadHomework { force: true }, None);
         Ok(())
     }
 
@@ -1035,7 +1046,7 @@ impl Worker {
     fn run_single_job(&mut self, job: Job) {
         let generation = self.generation;
         // 先處理排隊中的控制任務，並合併與本任務重複的請求。
-        if !self.drain_channel(job.data_key()) {
+        if !self.drain_channel(&job) {
             return;
         }
         if generation != self.generation {
@@ -1078,33 +1089,55 @@ impl Worker {
         Ok(Some(event))
     }
 
+    /// 合併資料任務到待執行佇列。
+    ///
+    /// 以 [`Job::data_key`] 為資源鍵、[`Job::is_forced`] 為強度：同鍵任務至多
+    /// 保留一筆，且以最強者為準——佇列中的非強制任務會被強制任務原位升級，
+    /// 強制任務不會被降級或重複。`running` 為目前進行中的任務；同鍵且不弱於
+    /// 來者時視為重複而丟棄（例如長查詢期間重複按 `r`）。傳 `None` 代表忽略
+    /// 執行中任務（學期變更後，進行中的載入已基於舊學期，必須保留一次重載）。
+    fn merge_data_job(&mut self, job: Job, running: Option<&Job>) {
+        let Some(key) = job.data_key() else {
+            return;
+        };
+        let forced = job.is_forced();
+        if let Some(running) = running
+            && running.data_key().as_ref() == Some(&key)
+            && (!forced || running.is_forced())
+        {
+            // 執行中的任務已涵蓋此請求：丟棄。
+            return;
+        }
+        // 與排隊中的同鍵任務合併：強制優先且原位升級，不得降級或重複。
+        for queued in &mut self.pending_data {
+            if queued.data_key().as_ref() == Some(&key) {
+                if forced && !queued.is_forced() {
+                    *queued = job;
+                }
+                return;
+            }
+        }
+        self.pending_data.push_back(job);
+    }
+
     /// 重新查詢資料前先排空通道：控制任務優先處理、重複的資料請求合併。
     ///
-    /// `running` 為目前進行中的任務鍵；與它重複的排隊請求直接合併（例如
-    /// 長查詢期間重複按 `r`）。回傳 `false` 代表收到結束指令，呼叫端應立即停止。
-    fn drain_channel(&mut self, running: Option<DataKey>) -> bool {
+    /// `running` 為目前進行中的任務；同鍵的排隊請求經 [`Self::merge_data_job`]
+    /// 合併後至多保留一筆最強者（例如長查詢期間重複按 `r`）。回傳 `false` 代表
+    /// 收到結束指令，呼叫端應立即停止。
+    fn drain_channel(&mut self, running: &Job) -> bool {
         loop {
             match self.jobs.try_recv() {
-                Ok(Job::Shutdown) => return false,
+                Ok(Job::Shutdown) => {
+                    // 資料載入中途收到結束指令：記錄後停止目前任務，
+                    // 由 [`Self::run`] 的迴圈開頭結束整個工作執行緒。
+                    self.shutdown = true;
+                    return false;
+                }
                 Ok(job) if job.is_control() => {
                     let _ = self.handle_control(job);
                 }
-                Ok(job) => {
-                    let Some(key) = job.data_key() else { continue };
-                    // 與進行中的任務重複：合併。
-                    if running.as_ref() == Some(&key) {
-                        continue;
-                    }
-                    // 已有相同任務在排隊：合併。
-                    if self
-                        .pending_data
-                        .iter()
-                        .any(|queued| queued.data_key().as_ref() == Some(&key))
-                    {
-                        continue;
-                    }
-                    self.pending_data.push_back(job);
-                }
+                Ok(job) => self.merge_data_job(job, Some(running)),
                 Err(TryRecvError::Empty) => return true,
                 Err(TryRecvError::Disconnected) => return false,
             }
@@ -1209,7 +1242,6 @@ impl Worker {
     fn run_homework_job(&mut self, force: bool) {
         let generation = self.generation;
         let job = Job::LoadHomework { force };
-        let running_key = job.data_key();
 
         let mut runner = match self.begin_homework(force) {
             Ok(Some(runner)) => runner,
@@ -1221,7 +1253,7 @@ impl Worker {
         };
 
         loop {
-            if !self.drain_channel(running_key.clone()) {
+            if !self.drain_channel(&job) {
                 return;
             }
             if generation != self.generation {

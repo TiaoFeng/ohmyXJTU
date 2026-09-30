@@ -149,6 +149,7 @@ impl Harness {
                 generation: 0,
                 cache: LmsCache::default(),
                 known_term: None,
+                shutdown: false,
             },
             events: event_rx,
             vault,
@@ -376,6 +377,156 @@ fn pending_data_job_survives_failed_relogin_and_resumes_afterwards() {
         "待重试的作业任务应在登录成功后自动续跑"
     );
     assert!(harness.worker.retry.is_none(), "任务续跑后不应继续保留");
+}
+
+// ── 資料任務合併（強制刷新優先、同鍵至多一筆）──────────
+
+#[test]
+fn merge_upgrades_queued_non_forced_job_in_place() {
+    let mut harness = harness(|_request: &HttpRequest| panic!("合併不应触发网络请求"));
+    harness.worker.pending_data.push_back(Job::LoadSchedule);
+    harness
+        .worker
+        .pending_data
+        .push_back(Job::LoadCourses { force: false });
+
+    harness
+        .worker
+        .merge_data_job(Job::LoadCourses { force: true }, None);
+
+    let queued: Vec<&Job> = harness.worker.pending_data.iter().collect();
+    assert_eq!(queued.len(), 2, "同键任务应原位升级而不是追加");
+    assert!(matches!(queued[0], Job::LoadSchedule), "无关任务位置不变");
+    assert!(
+        matches!(queued[1], Job::LoadCourses { force: true }),
+        "非强制任务应原位升级为强制"
+    );
+}
+
+#[test]
+fn merge_never_downgrades_forced_job() {
+    let mut harness = harness(|_request: &HttpRequest| panic!("合併不应触发网络请求"));
+    harness
+        .worker
+        .pending_data
+        .push_back(Job::LoadHomework { force: true });
+
+    harness
+        .worker
+        .merge_data_job(Job::LoadHomework { force: false }, None);
+    harness
+        .worker
+        .merge_data_job(Job::LoadHomework { force: true }, None);
+
+    assert_eq!(harness.worker.pending_data.len(), 1, "不得重复追加");
+    assert!(
+        harness.worker.pending_data[0].is_forced(),
+        "已排队的强制任务不得被降级"
+    );
+}
+
+#[test]
+fn merge_drops_duplicates_of_unforced_jobs() {
+    let mut harness = harness(|_request: &HttpRequest| panic!("合併不应触发网络请求"));
+    harness.worker.pending_data.push_back(Job::LoadSchedule);
+    harness
+        .worker
+        .pending_data
+        .push_back(Job::LoadFlow { page: 1 });
+
+    // 同鍵重複：丟棄；不同頁碼是不同資源鍵，允許並存。
+    harness.worker.merge_data_job(Job::LoadSchedule, None);
+    harness
+        .worker
+        .merge_data_job(Job::LoadFlow { page: 1 }, None);
+    harness
+        .worker
+        .merge_data_job(Job::LoadFlow { page: 2 }, None);
+
+    let keys: Vec<Option<DataKey>> = harness
+        .worker
+        .pending_data
+        .iter()
+        .map(|job| job.data_key())
+        .collect();
+    assert_eq!(
+        keys,
+        vec![
+            Some(DataKey::Schedule),
+            Some(DataKey::Flow(1)),
+            Some(DataKey::Flow(2)),
+        ]
+    );
+}
+
+#[test]
+fn merge_keeps_one_forced_job_behind_a_running_unforced_job() {
+    let mut harness = harness(|_request: &HttpRequest| panic!("合併不应触发网络请求"));
+    let running = Job::LoadCourses { force: false };
+
+    harness
+        .worker
+        .merge_data_job(Job::LoadCourses { force: true }, Some(&running));
+    // 重複的強制請求不得再排入第二筆。
+    harness
+        .worker
+        .merge_data_job(Job::LoadCourses { force: true }, Some(&running));
+
+    assert_eq!(harness.worker.pending_data.len(), 1, "只保留一笔强制任务");
+    assert!(harness.worker.pending_data[0].is_forced());
+}
+
+#[test]
+fn merge_drops_same_key_requests_while_a_forced_job_runs() {
+    let mut harness = harness(|_request: &HttpRequest| panic!("合併不应触发网络请求"));
+    let running = Job::LoadHomework { force: true };
+
+    harness
+        .worker
+        .merge_data_job(Job::LoadHomework { force: true }, Some(&running));
+    harness
+        .worker
+        .merge_data_job(Job::LoadHomework { force: false }, Some(&running));
+
+    assert!(
+        harness.worker.pending_data.is_empty(),
+        "执行中的强制任务已涵盖同键请求"
+    );
+}
+
+#[test]
+fn set_homework_term_leaves_exactly_one_forced_reload() {
+    let mut harness = harness(|_request: &HttpRequest| panic!("设置学期不应触发网络请求"));
+    harness
+        .worker
+        .pending_data
+        .push_back(Job::LoadHomework { force: false });
+
+    harness
+        .dispatch(Job::SetHomeworkTerm {
+            term: "2026-2027-1".to_owned(),
+        })
+        .expect("记住学期");
+
+    let queued: Vec<&Job> = harness.worker.pending_data.iter().collect();
+    assert_eq!(queued.len(), 1, "非强制作业任务应被原位升级");
+    assert!(queued[0].is_forced(), "重载必须是强制刷新");
+    assert_eq!(
+        harness.worker.config.homework_term.as_deref(),
+        Some("2026-2027-1")
+    );
+    assert!(harness.saw(|event| matches!(
+        event,
+        Event::Notice(text) if text.contains("已记住学期")
+    )));
+
+    // 已有强制任务时不重复追加。
+    harness
+        .dispatch(Job::SetHomeworkTerm {
+            term: "2026-2027-1".to_owned(),
+        })
+        .expect("记住学期");
+    assert_eq!(harness.worker.pending_data.len(), 1, "不得重复追加");
 }
 
 #[test]

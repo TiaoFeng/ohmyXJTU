@@ -20,6 +20,8 @@ use crate::http::fake::{FakeClient, html, json};
 use crate::http::{HttpClient, HttpRequest, HttpResponse, Method};
 use crate::session::AccessMode;
 use crate::sites::{attendance, lms};
+use crate::tui::app::{App, LoginScreen};
+use crate::tui::text::InputLine;
 
 use super::*;
 
@@ -2967,9 +2969,124 @@ fn captcha_mistake_keeps_the_pending_switch() {
         harness.worker.flow.is_some(),
         "登入流程應保留以便重輸驗證碼"
     );
+    let events = harness.drain_events();
     assert!(
-        harness.saw(|event| matches!(event, Event::LoginFailed { .. })),
-        "仍應回報登入失敗（畫面顯示驗證碼錯誤）"
+        events.iter().any(|event| matches!(
+            event,
+            Event::VerificationRetry { site: SiteKind::Attendance, message }
+                if !message.is_empty()
+        )),
+        "驗證碼填錯應回報可重試事件（讓介面留在輸入畫面）：{events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::LoginFailed { .. } | Event::Failed { .. })),
+        "驗證碼填錯不應彈出一般失敗畫面：{events:?}"
+    );
+}
+
+/// 驗證碼填錯後「工作者 → 介面」的完整串接：輸入畫面必須留著並顯示錯誤。
+#[test]
+fn wrong_captcha_keeps_the_captcha_input_screen() {
+    // 白箱：以假驅動器把流程帶到「已送出錯誤驗證碼」，不必寫入真實的驗證碼圖片。
+    let mut harness = harness(|_request: &HttpRequest| panic!("本測試不應發出請求"));
+
+    let client: Arc<dyn HttpClient> =
+        Arc::new(FakeClient::with_responder(|request: &HttpRequest| {
+            if request.url == rsa::PUBLIC_KEY_URL {
+                return Ok(HttpResponse::new(
+                    200,
+                    rsa::PUBLIC_KEY_URL,
+                    public_key_pem(),
+                ));
+            }
+            if request.url == attendance::LOGIN_URL {
+                return Ok(HttpResponse::new(200, ATTENDANCE_POST, login_page()));
+            }
+            // 帳密／驗證碼被拒；驗證碼圖片端點也失敗（不會寫入使用者的資料目錄）。
+            Ok(HttpResponse::new(401, ATTENDANCE_POST, "<html></html>"))
+        }));
+    let mut driver =
+        LoginDriver::new(client, attendance::LOGIN_URL, &"0".repeat(32)).expect("建立登入驅動器");
+    driver.set_fail_count(3);
+    assert_eq!(
+        driver
+            .start(
+                &Credentials::new("3120000002", "new-password"),
+                AccountType::Undergraduate
+            )
+            .expect("啟動登入"),
+        LoginReply::NeedCaptcha
+    );
+    let reply = driver.submit_captcha("bad-code").expect("提交驗證碼");
+    assert!(matches!(reply, LoginReply::Fail { .. }), "{reply:?}");
+
+    // 目前的驗證碼圖片（換新圖失敗時必須保留給使用者重輸）。
+    let dir = TempDir::new().expect("建立暂存目录");
+    let image = dir.path().join("captcha.png");
+    std::fs::write(&image, b"png-bytes").expect("写入测试图片");
+    harness.worker.captcha_path = Some(image.clone());
+    harness.worker.credentials = Some(Credentials::new("3120000002", "new-password"));
+    harness.worker.pending_vault = Some(PendingVault {
+        passphrase: Secret::from("secret123"),
+        credentials: Credentials::new("3120000002", "new-password"),
+        previous: Some(Credentials::new("3120000001", "old-password")),
+    });
+    harness.worker.flow = Some(LoginFlow {
+        site: SiteKind::Attendance,
+        driver: Box::new(driver),
+        retry: None,
+    });
+
+    // 介面端此刻正停在驗證碼輸入畫面。
+    let mut app = App::new(AccessPolicy::Direct);
+    app.login = Some(Box::new(LoginScreen::Captcha {
+        path: image.clone(),
+        input: InputLine::with_value("bad-code"),
+        error: None,
+    }));
+
+    harness
+        .worker
+        .handle_reply(reply)
+        .expect("處理登入回覆不應出錯");
+    let events = harness.drain_events();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::VerificationRetry { .. })),
+        "應回報可重試的驗證錯誤：{events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::LoginFailed { .. })),
+        "不得發出一般登入失敗（會把輸入畫面換掉）：{events:?}"
+    );
+
+    // 依序套用工作者發出的事件：畫面必須仍是驗證碼輸入框。
+    for event in events {
+        crate::tui::apply_event_for_test(&mut app, event);
+    }
+    match app.login.as_deref() {
+        Some(LoginScreen::Captcha { input, error, path }) => {
+            assert!(input.is_empty(), "重輸前應清空驗證碼：{:?}", input.value());
+            assert!(
+                error.as_deref().is_some_and(|text| !text.is_empty()),
+                "輸入畫面應就地顯示錯誤：{error:?}"
+            );
+            assert_eq!(path, &image, "換不到新圖時應沿用舊圖");
+        }
+        other => panic!("應留在驗證碼輸入畫面，實際為 {other:?}"),
+    }
+    assert!(
+        image.exists(),
+        "換新圖失敗時不得刪掉使用者正在看的驗證碼圖片"
+    );
+    assert!(
+        harness.worker.flow.is_some() && harness.worker.pending_vault.is_some(),
+        "同一次帳號切換必須保留，讓重輸的驗證碼沿用同一個登入流程"
     );
 }
 

@@ -1265,32 +1265,36 @@ impl Worker {
                 self.complete_flow()
             }
             LoginReply::Fail { message } => {
-                let site = self.flow.as_ref().map(|flow| flow.site);
-                // 有送出圖片驗證碼的失敗多半是驗證碼本身填錯：使用者重输即可
-                // 繼續同一次登入（伺服器端的連續失敗計數仍會要求驗證碼），
-                // 不當成帳密錯誤而作廢整個帳號切換。
-                let retryable = self
+                let site = self
                     .flow
                     .as_ref()
-                    .is_some_and(|flow| flow.driver.last_attempt_submitted_captcha());
-                if !retryable {
-                    self.flow = None;
-                    // 憑證被拒：丟棄待存憑證（並還原舊憑證），不覆蓋保險庫中的舊憑證。
-                    self.discard_pending_vault();
+                    .map(|flow| flow.site)
+                    .or(self.login_site)
+                    .unwrap_or(SiteKind::Attendance);
+                if self
+                    .flow
+                    .as_ref()
+                    .is_some_and(|flow| flow.driver.last_attempt_submitted_captcha())
+                {
+                    // 圖片驗證碼填錯：流程與待存憑證都保留，介面留在輸入畫面讓
+                    // 使用者直接重輸，不當成帳密錯誤而作廢整個帳號切換。
+                    self.emit(Event::VerificationRetry {
+                        site,
+                        message: message.clone(),
+                    });
+                    // 伺服器多半已作廢舊驗證碼：盡力換一張新圖；換不到就沿用
+                    // 舊圖（使用者至少還能重輸一次）。
+                    let _ = self.show_captcha();
+                    return Ok(());
                 }
+                // 憑證被拒：丟棄待存憑證（並還原舊憑證），不覆蓋保險庫中的舊憑證。
+                self.flow = None;
+                self.discard_pending_vault();
                 self.clear_captcha();
-                self.emit(Event::LoginFailed {
-                    site: site.or(self.login_site).unwrap_or(SiteKind::Attendance),
-                    message,
-                });
+                self.emit(Event::LoginFailed { site, message });
                 Ok(())
             }
-            LoginReply::NeedCaptcha => {
-                let path = self.driver()?.fetch_captcha()?;
-                self.captcha_path = Some(path.clone());
-                self.emit(Event::LoginNeedsCaptcha(path));
-                Ok(())
-            }
+            LoginReply::NeedCaptcha => self.show_captcha(),
             LoginReply::NeedMfa => {
                 let phone = match self.driver_mut()?.mfa_phone() {
                     Ok(phone) => Some(phone),
@@ -1383,6 +1387,11 @@ impl Worker {
     }
 
     fn refresh_captcha(&mut self) -> AppResult<()> {
+        self.show_captcha()
+    }
+
+    /// 取得並顯示新的驗證碼圖片（覆寫暫存檔）。
+    fn show_captcha(&mut self) -> AppResult<()> {
         let path = self.driver()?.fetch_captcha()?;
         self.captcha_path = Some(path.clone());
         self.emit(Event::LoginNeedsCaptcha(path));

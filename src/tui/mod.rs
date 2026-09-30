@@ -162,6 +162,13 @@ fn main_loop(
     }
 }
 
+/// 套用背景事件（測試用：供跨模組的「工作者 → 介面」串接測試呼叫）。
+#[cfg(test)]
+pub(crate) fn apply_event_for_test(app: &mut App, event: Event) {
+    let (jobs, _rx) = std::sync::mpsc::channel();
+    apply_event(app, event, &jobs);
+}
+
 /// 套用背景事件。
 fn apply_event(app: &mut App, event: Event, jobs: &Sender<Job>) {
     match event {

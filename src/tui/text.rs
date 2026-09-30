@@ -5,16 +5,29 @@
 
 use ratatui::text::Line;
 use unicode_segmentation::UnicodeSegmentation as _;
+use zeroize::Zeroize as _;
 
 /// 遮罩字元。
 pub const MASK_CHAR: char = '•';
 
 /// 單行輸入框的內容與游標。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct InputLine {
     value: String,
     cursor: usize,
     masked: bool,
+}
+
+impl std::fmt::Debug for InputLine {
+    /// 只輸出長度：任何 `{:?}` 都不會洩漏輸入內容（口令、密碼或帳號）。
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("InputLine")
+            .field("len", &self.len())
+            .field("cursor", &self.cursor)
+            .field("masked", &self.masked)
+            .finish()
+    }
 }
 
 impl InputLine {
@@ -65,9 +78,9 @@ impl InputLine {
         grapheme_len(&self.value)
     }
 
-    /// 清空內容。
+    /// 清空內容（覆寫底層緩衝，不只截斷長度）。
     pub fn clear(&mut self) {
-        self.value.clear();
+        self.value.zeroize();
         self.cursor = 0;
     }
 

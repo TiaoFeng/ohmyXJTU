@@ -546,16 +546,22 @@ pub fn is_login_host(url: &str) -> bool {
     url.starts_with(LOGIN_HOST)
 }
 
-/// 確認登入表單的提交目標位於學校網域；否則回報錯誤（訊息只含主機名）。
+/// 確認登入表單的提交目標位於學校網域且使用 https；否則回報錯誤
+/// （訊息只含主機名或簡短原因，不含完整 URL）。
 fn ensure_trusted_submit_target(url: &str) -> AppResult<()> {
-    let host = Url::parse(url)
-        .ok()
-        .and_then(|parsed| parsed.host_str().map(str::to_owned));
-    match host {
-        Some(host) if webvpn::is_school_host(&host) => Ok(()),
-        Some(host) => Err(AppError::UntrustedHost { host }),
-        None => Err(AppError::protocol("登录重定向地址缺少主机名")),
+    let parsed = Url::parse(url).map_err(|_| AppError::protocol("登录重定向地址缺少主机名"))?;
+    let Some(host) = parsed.host_str() else {
+        return Err(AppError::protocol("登录重定向地址缺少主机名"));
+    };
+    if !webvpn::is_school_host(host) {
+        return Err(AppError::UntrustedHost {
+            host: host.to_owned(),
+        });
     }
+    if parsed.scheme() != "https" {
+        return Err(AppError::protocol("登录提交目标必须使用 https"));
+    }
+    Ok(())
 }
 
 /// 供外部（會話層）判斷是否需要改寫為 WebVPN 網址。

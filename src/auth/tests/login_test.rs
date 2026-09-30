@@ -534,6 +534,31 @@ fn rejects_domain_suffix_confusion_in_redirect() {
 }
 
 #[test]
+fn rejects_plain_http_submission_target() {
+    // 學校網域但為 http：不得提交（憑證雖以 RSA 加密，仍要求 TLS）。
+    let client = Arc::new(FakeClient::with_responder(|request| {
+        match request.url.as_str() {
+            LOGIN_URL => Ok(page(
+                "http://bk-kq.xjtu.edu.cn/cas/login",
+                &login_page(false, "e9s1"),
+            )),
+            _ => Ok(page(TARGET_URL, TARGET_PAGE)),
+        }
+    }));
+
+    let http: Arc<dyn HttpClient> = client;
+    let err = LoginDriver::new(http, LOGIN_URL, VISITOR_ID)
+        .err()
+        .expect("http 目标不得通过");
+    match err {
+        AppError::Protocol(message) => {
+            assert!(message.contains("https"), "错误应说明需要 https：{message}");
+        }
+        other => panic!("应为协议错误，实际：{other}"),
+    }
+}
+
+#[test]
 fn rejects_safety_verify_submission_outside_school_domain() {
     let safety_page = std::fs::read_to_string(format!(
         "{}/tests/fixtures/safety_verify_page.html",

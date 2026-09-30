@@ -67,3 +67,29 @@ fn rejects_invalid_or_partial_input() {
     // 名稱必須是獨立識別字，不得命中更長的鍵名。
     assert!(find_named_value("var globalDataExtra = {};", "globalData").is_none());
 }
+
+#[test]
+fn handles_identity_escapes_with_multibyte_characters() {
+    // `\` 緊接多位元組字元（JS identity escape）：`\中` 等同 `中`。
+    // 修復前解析器只前進一個位元組，會對非字元邊界切片而 panic。
+    let page = "{ user: { name: \"a\\中b\", tag: \"x\\🙂y\" }, dept: {} }";
+    let user = parse_js_object(page, "user", "dept").expect("应解析");
+    assert_eq!(user["name"], json!("a中b"));
+    assert_eq!(user["tag"], json!("x🙂y"));
+}
+
+#[test]
+fn keeps_ascii_escapes_and_rejects_trailing_backslash() {
+    let page =
+        r#"{ user: { path: "a\/b", win: "c:\\d", quote: "e\"f", esc: "\u4e2d" }, dept: {} }"#;
+    let user = parse_js_object(page, "user", "dept").expect("应解析");
+    assert_eq!(user["path"], json!("a/b"));
+    assert_eq!(user["win"], json!("c:\\d"));
+    assert_eq!(user["quote"], json!("e\"f"));
+    assert_eq!(user["esc"], json!("中"));
+
+    // 結尾反斜線未閉合：保守回 None，不得 panic。
+    assert!(parse_js_object("{ user: { a: \"abc\\", "user", "dept").is_none());
+    // 非法 `\u` 跳脫：解析失敗回 None。
+    assert!(parse_js_object("{ user: { a: \"\\uZZZZ\" }, dept: {} }", "user", "dept").is_none());
+}

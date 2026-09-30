@@ -4,7 +4,7 @@ use std::sync::mpsc::Sender;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::credentials::Credentials;
+use crate::credentials::{Credentials, Secret};
 use crate::sites::lms::ActivityKind;
 use crate::task::Job;
 use crate::tui::app::{
@@ -14,7 +14,10 @@ use crate::tui::app::{
 use crate::tui::text::InputLine;
 
 /// 加密口令的最短長度。
-const MIN_PASSPHRASE_LEN: usize = 6;
+///
+/// 僅適用於新設置的口令（首次設定、修改口令）；解鎖既有憑證不檢查長度，
+/// 以免舊使用者的短口令被鎖死。
+const MIN_PASSPHRASE_LEN: usize = 8;
 
 /// 登入畫面的動作。
 enum LoginAction {
@@ -251,7 +254,7 @@ fn build_job(kind: FormKind, values: &FormValues) -> Result<Job, String> {
             validate_passphrase(&values.password, &values.password_confirm)?;
             Ok(Job::ChangePassphrase {
                 old: values.passphrase.clone(),
-                new: values.password.clone(),
+                new: values.password.clone().into(),
             })
         }
     }
@@ -297,8 +300,10 @@ fn submit_form(app: &mut App, jobs: &Sender<Job>) {
 /// 表單各欄位的值（依表單種類對應位置）。
 #[derive(Debug, Default)]
 struct FormValues {
-    passphrase: String,
-    passphrase_confirm: String,
+    /// 加密口令（自動零化）。
+    passphrase: Secret,
+    /// 確認加密口令（自動零化）。
+    passphrase_confirm: Secret,
     username: String,
     password: String,
     password_confirm: String,
@@ -311,33 +316,34 @@ impl FormValues {
                 .get(index)
                 .map_or_else(String::new, |field| field.value.value().to_owned())
         };
+        let secret_at = |index: usize| Secret::from(at(index));
         match form.kind {
             FormKind::Setup => Self {
-                passphrase: at(0),
-                passphrase_confirm: at(1),
+                passphrase: secret_at(0),
+                passphrase_confirm: secret_at(1),
                 username: at(2),
                 password: at(3),
                 password_confirm: at(4),
             },
             FormKind::Unlock => Self {
-                passphrase: at(0),
+                passphrase: secret_at(0),
                 ..Self::default()
             },
             FormKind::LoginRetry => Self {
                 username: at(0),
                 password: at(1),
-                passphrase: at(2),
+                passphrase: secret_at(2),
                 ..Self::default()
             },
             FormKind::ChangeAccount => Self {
-                passphrase: at(0),
+                passphrase: secret_at(0),
                 username: at(1),
                 password: at(2),
                 password_confirm: at(3),
                 ..Self::default()
             },
             FormKind::ChangePassphrase => Self {
-                passphrase: at(0),
+                passphrase: secret_at(0),
                 password: at(1),
                 password_confirm: at(2),
                 ..Self::default()

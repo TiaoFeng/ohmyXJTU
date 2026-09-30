@@ -4,6 +4,22 @@ use super::*;
 use crate::tui::ui::input_window;
 
 #[test]
+fn debug_is_masked_and_clear_empties() {
+    let mut line = InputLine::with_value("secret-password");
+    let debug = format!("{line:?}");
+    assert!(
+        !debug.contains("secret-password"),
+        "Debug 不得洩漏輸入內容：{debug}"
+    );
+    assert!(debug.contains("len: 15"), "Debug 可顯示長度：{debug}");
+
+    line.clear();
+    assert!(line.is_empty());
+    assert_eq!(line.value(), "");
+    assert_eq!(line.cursor(), 0);
+}
+
+#[test]
 fn edits_by_grapheme() {
     let mut line = InputLine::new();
     for character in "中文abc".chars() {

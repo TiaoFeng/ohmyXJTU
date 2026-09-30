@@ -80,6 +80,31 @@ fn malformed_file_is_rejected() {
 }
 
 #[test]
+fn malformed_file_error_includes_path_and_rebuild_hint() {
+    let (_dir, vault) = vault_in_temp();
+    fs::write(vault.path(), b"not a vault").unwrap();
+
+    let message = vault.load(PASSPHRASE).unwrap_err().to_string();
+    assert!(message.contains("可删除"), "应附重建指引：{message}");
+    assert!(
+        message.contains(&vault.path().display().to_string()),
+        "应包含凭证文件路径：{message}"
+    );
+    assert!(
+        !message.contains("not a vault"),
+        "不得包含文件内容：{message}"
+    );
+
+    // 口令錯誤属正常情况，不應附帶重建指引。
+    vault.store(PASSPHRASE, &credentials()).unwrap();
+    let message = vault.load("wrong passphrase").unwrap_err().to_string();
+    assert!(
+        !message.contains("可删除"),
+        "口令错误不应附带重建指引：{message}"
+    );
+}
+
+#[test]
 fn change_passphrase_rotates_secret() {
     let (_dir, vault) = vault_in_temp();
     vault.store(PASSPHRASE, &credentials()).unwrap();

@@ -147,6 +147,7 @@ impl Harness {
                 captcha_path: None,
                 pending_data: VecDeque::new(),
                 generation: 0,
+                relogin_attempts: 0,
                 cache: LmsCache::default(),
                 known_term: None,
                 shutdown: false,
@@ -230,7 +231,7 @@ fn rejects_wrong_passphrase_without_touching_the_vault() {
 
     let result = harness.dispatch(Job::RetryWithAccount {
         credentials: Credentials::new("3120000002", "new-password"),
-        passphrase: "wrong-passphrase".to_owned(),
+        passphrase: "wrong-passphrase".into(),
     });
 
     assert!(
@@ -251,7 +252,7 @@ fn unlock_failure_reports_credentials_target() {
     let mut harness = harness(fake_flow(0));
 
     let result = harness.dispatch(Job::Unlock {
-        passphrase: "wrong-passphrase".to_owned(),
+        passphrase: "wrong-passphrase".into(),
     });
 
     assert!(
@@ -271,13 +272,43 @@ fn unlock_failure_reports_credentials_target() {
 }
 
 #[test]
+fn job_debug_never_leaks_credentials() {
+    // 任何 `{:?}` 都不得輸出明文口令或帳號密碼。
+    let unlock = Job::Unlock {
+        passphrase: "super-secret-passphrase".into(),
+    };
+    let debug = format!("{unlock:?}");
+    assert!(
+        !debug.contains("super-secret-passphrase"),
+        "Debug 不得洩漏口令：{debug}"
+    );
+
+    let create = Job::CreateVault {
+        passphrase: "another-secret".into(),
+        credentials: Credentials::new("3120000001", "pw-secret-value"),
+    };
+    let debug = format!("{create:?}");
+    assert!(!debug.contains("another-secret"), "口令泄漏：{debug}");
+    assert!(!debug.contains("pw-secret-value"), "密码泄漏：{debug}");
+    assert!(!debug.contains("3120000001"), "账号泄漏：{debug}");
+
+    let change = Job::ChangePassphrase {
+        old: "old-secret".into(),
+        new: "new-secret".into(),
+    };
+    let debug = format!("{change:?}");
+    assert!(!debug.contains("old-secret"), "旧口令泄漏：{debug}");
+    assert!(!debug.contains("new-secret"), "新口令泄漏：{debug}");
+}
+
+#[test]
 fn saves_credentials_only_after_login_succeeds() {
     let mut harness = harness(fake_flow(0));
 
     harness
         .dispatch(Job::RetryWithAccount {
             credentials: Credentials::new("3120000002", "new-password"),
-            passphrase: "secret123".to_owned(),
+            passphrase: "secret123".into(),
         })
         .expect("登录应当成功");
 
@@ -324,7 +355,7 @@ fn keeps_old_credentials_when_the_new_ones_are_rejected() {
     harness
         .dispatch(Job::RetryWithAccount {
             credentials: Credentials::new("3120000002", "wrong-password"),
-            passphrase: "secret123".to_owned(),
+            passphrase: "secret123".into(),
         })
         .expect("登录被拒属于预期结果，不应是任务错误");
 
@@ -377,6 +408,116 @@ fn pending_data_job_survives_failed_relogin_and_resumes_afterwards() {
         "待重试的作业任务应在登录成功后自动续跑"
     );
     assert!(harness.worker.retry.is_none(), "任务续跑后不应继续保留");
+}
+
+// ── 自動重登上限（避免「重登→重試→再失效」的無上限迴圈）──
+
+/// 「站點持續回報登入態失效」的假站點：資料端點永遠回傳統一認證頁，
+/// 登入端點則正常成功；可用計數器觀察重登與資料請求次數。
+fn always_expired_responses(
+    login_posts: Arc<AtomicUsize>,
+    lms_requests: Arc<AtomicUsize>,
+) -> impl Fn(&HttpRequest) -> AppResult<HttpResponse> + Send + Sync + 'static {
+    move |request: &HttpRequest| {
+        let url = request.url.as_str();
+        if url == rsa::PUBLIC_KEY_URL {
+            return Ok(HttpResponse::new(
+                200,
+                rsa::PUBLIC_KEY_URL,
+                public_key_pem(),
+            ));
+        }
+        match url {
+            lms::LOGIN_URL => Ok(HttpResponse::new(200, LMS_POST, login_page())),
+            LMS_POST => {
+                login_posts.fetch_add(1, Ordering::SeqCst);
+                Ok(HttpResponse::new(200, LMS_HOME, TARGET_BODY))
+            }
+            LMS_HOME => Ok(HttpResponse::new(200, LMS_HOME, TARGET_BODY)),
+            url if url.ends_with("/user/index") => {
+                Ok(HttpResponse::new(200, LMS_HOME, TARGET_BODY))
+            }
+            LMS_COURSES => {
+                lms_requests.fetch_add(1, Ordering::SeqCst);
+                // 最終位址落在統一認證：站點層判定登入態已失效。
+                Ok(HttpResponse::new(
+                    200,
+                    "https://login.xjtu.edu.cn/cas/login?service=lms",
+                    login_page().as_bytes(),
+                ))
+            }
+            _ => Ok(html("")),
+        }
+    }
+}
+
+#[test]
+fn automatic_relogin_is_bounded_per_load() {
+    let login_posts = Arc::new(AtomicUsize::new(0));
+    let lms_requests = Arc::new(AtomicUsize::new(0));
+    let mut harness = harness(always_expired_responses(
+        Arc::clone(&login_posts),
+        Arc::clone(&lms_requests),
+    ));
+    harness.login_lms_only();
+
+    harness
+        .dispatch(Job::LoadCourses { force: false })
+        .expect("放弃自动重试不属于任务错误");
+
+    // 初次加载 + 一次自动重登后的重试 = 恰两次课程请求。
+    assert_eq!(
+        lms_requests.load(Ordering::SeqCst),
+        2,
+        "自动重试应恰执行一次"
+    );
+    assert_eq!(
+        login_posts.load(Ordering::SeqCst),
+        1,
+        "同一轮加载只允许一次自动重登"
+    );
+    assert!(harness.worker.retry.is_none(), "放弃后不应保留待重试任务");
+    assert!(
+        harness.saw(|event| matches!(
+            event,
+            Event::Failed {
+                message,
+                target: FailedTarget::Courses,
+                ..
+            } if message.contains("自动重新登录")
+        )),
+        "应回报自动重登后仍失败"
+    );
+}
+
+#[test]
+fn new_load_resets_the_relogin_budget() {
+    let login_posts = Arc::new(AtomicUsize::new(0));
+    let lms_requests = Arc::new(AtomicUsize::new(0));
+    let mut harness = harness(always_expired_responses(
+        Arc::clone(&login_posts),
+        Arc::clone(&lms_requests),
+    ));
+    harness.login_lms_only();
+
+    harness
+        .dispatch(Job::LoadCourses { force: false })
+        .expect("第一次加载应当在放弃后正常结束");
+    assert_eq!(
+        login_posts.load(Ordering::SeqCst),
+        1,
+        "第一次加载恰一次自动重登"
+    );
+
+    // 全新的刷新请求（相当于使用者按 r）：额度重置，可再自动重登一次。
+    harness
+        .dispatch(Job::LoadCourses { force: false })
+        .expect("第二次加载同样有界");
+    assert_eq!(
+        login_posts.load(Ordering::SeqCst),
+        2,
+        "新的请求应重新获得一次自动重登额度"
+    );
 }
 
 // ── 資料任務合併（強制刷新優先、同鍵至多一筆）──────────
@@ -535,7 +676,7 @@ fn unlock_does_not_start_login() {
 
     harness
         .dispatch(Job::Unlock {
-            passphrase: "secret123".to_owned(),
+            passphrase: "secret123".into(),
         })
         .expect("解锁应当成功");
 
@@ -553,10 +694,13 @@ fn unlock_does_not_start_login() {
         "解锁不再预登录任何站点"
     );
     assert!(
-        events
-            .iter()
-            .any(|event| matches!(event, Event::SessionsCleared)),
-        "解锁后应回报会话已重置"
+        events.iter().any(|event| matches!(
+            event,
+            Event::SessionsCleared {
+                account_changed: true
+            }
+        )),
+        "解锁后应回报会话已重置（并标记页面资料失效）"
     );
 }
 
@@ -569,10 +713,13 @@ fn set_access_policy_saves_without_login_and_keeps_old_value_on_failure() {
         .expect("保存应当成功");
     let events = harness.drain_events();
     assert!(
-        events
-            .iter()
-            .any(|event| matches!(event, Event::SessionsCleared)),
-        "切换访问模式后应回报会话已重置"
+        events.iter().any(|event| matches!(
+            event,
+            Event::SessionsCleared {
+                account_changed: false
+            }
+        )),
+        "切换访问模式后应回报会话已重置（页面资料仍有效）"
     );
     assert!(
         events

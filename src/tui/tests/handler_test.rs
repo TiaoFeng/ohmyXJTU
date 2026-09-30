@@ -82,6 +82,73 @@ fn setup_form_rejects_short_passphrase() {
 }
 
 #[test]
+fn setup_form_passphrase_minimum_is_eight_characters() {
+    // 7 個字元：拒絕。
+    let (jobs, rx) = channel();
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Setup(FormState::setup()));
+    fill_setup(&mut app, &jobs, "1234567", "1234567", "pw-12345");
+    press(&mut app, &jobs, KeyCode::Enter);
+    assert!(rx.try_recv().is_err(), "7 个字符的口令应被拒绝");
+
+    // 8 個字元：接受。
+    let (jobs, rx) = channel();
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Setup(FormState::setup()));
+    fill_setup(&mut app, &jobs, "12345678", "12345678", "pw-12345");
+    press(&mut app, &jobs, KeyCode::Enter);
+    assert!(
+        matches!(rx.try_recv(), Ok(Job::CreateVault { .. })),
+        "8 个字符的口令应被接受"
+    );
+}
+
+#[test]
+fn change_passphrase_minimum_applies_to_new_passphrase_only() {
+    // 新口令過短（7 字元）：拒絕；原口令長度不檢查（可少於下限）。
+    let (jobs, rx) = channel();
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::SettingsForm(FormState::change_passphrase()));
+    type_text(&mut app, &jobs, "old6ch");
+    press(&mut app, &jobs, KeyCode::Tab);
+    type_text(&mut app, &jobs, "1234567");
+    press(&mut app, &jobs, KeyCode::Tab);
+    type_text(&mut app, &jobs, "1234567");
+    press(&mut app, &jobs, KeyCode::Enter);
+    assert!(rx.try_recv().is_err(), "7 个字符的新口令应被拒绝");
+
+    // 新口令 8 字元：接受（原口令仅 6 字元，属旧凭据，不受下限限制）。
+    let (jobs, rx) = channel();
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::SettingsForm(FormState::change_passphrase()));
+    type_text(&mut app, &jobs, "old6ch");
+    press(&mut app, &jobs, KeyCode::Tab);
+    type_text(&mut app, &jobs, "12345678");
+    press(&mut app, &jobs, KeyCode::Tab);
+    type_text(&mut app, &jobs, "12345678");
+    press(&mut app, &jobs, KeyCode::Enter);
+    assert!(
+        matches!(rx.try_recv(), Ok(Job::ChangePassphrase { old, new }) if old == "old6ch" && new == "12345678"),
+        "新口令 8 字元、原口令 6 字元应被接受"
+    );
+}
+
+#[test]
+fn unlock_accepts_short_passphrases_of_existing_vaults() {
+    // 解鎖既有憑證不檢查長度：舊使用者的 6 字元口令必須能繼續使用。
+    let (jobs, rx) = channel();
+    let mut app = App::new(AccessPolicy::Auto);
+
+    type_text(&mut app, &jobs, "old6ch");
+    press(&mut app, &jobs, KeyCode::Enter);
+
+    assert!(
+        matches!(rx.try_recv(), Ok(Job::Unlock { passphrase }) if passphrase == "old6ch"),
+        "旧凭据的短口令应能解锁"
+    );
+}
+
+#[test]
 fn setup_form_rejects_mismatched_passphrase() {
     let (jobs, rx) = channel();
     let mut app = App::new(AccessPolicy::Auto);

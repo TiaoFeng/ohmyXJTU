@@ -960,6 +960,35 @@ impl App {
         self.site_modes.clear();
     }
 
+    /// 會話重置後的頁面失效處理。
+    ///
+    /// - 更換帳號（`account_changed=true`）：所有頁面資料都屬於舊帳號，
+    ///   一律清空並回到未載入（思源學堂回到課程層），切換選取與時間標記。
+    /// - 切換訪問模式（`account_changed=false`）：資料仍有效，只把卡在
+    ///   「載入中」的頁面收斂（對應的進行中與排隊任務已作廢）。
+    pub fn invalidate_data(&mut self, account_changed: bool) {
+        if account_changed {
+            self.schedule = Page::Idle;
+            self.homework = Page::Idle;
+            self.attendance = Page::Idle;
+            // 舊帳號的課程、活動與詳情一律清空。
+            self.lms = LmsState::default();
+            self.updated_at = UpdatedAt::default();
+            self.schedule_state.select(Some(0));
+            self.homework_state.select(Some(0));
+            self.flow_state.select(Some(0));
+            self.course_state.select(Some(0));
+            self.activity_state.select(Some(0));
+            return;
+        }
+        Self::settle_loading(&mut self.schedule);
+        Self::settle_loading(&mut self.homework);
+        Self::settle_loading(&mut self.attendance);
+        Self::settle_loading(&mut self.lms.courses);
+        Self::settle_loading(&mut self.lms.activities);
+        Self::settle_loading(&mut self.lms.detail);
+    }
+
     /// 目前頁面的登入狀態文字（底欄顯示用）。
     ///
     /// 已登入時只顯示實際訪問方式（「直连」「WebVPN」）——登入正常不需佔用

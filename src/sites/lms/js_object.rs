@@ -271,6 +271,10 @@ impl<'a> Parser<'a> {
     }
 
     /// 解析字串（含跳脫序列）。
+    ///
+    /// 跳脫字元一律以**完整字元**前進：`\` 之後可能是多位元組字元
+    /// （例如 `"\中"` 的 JS identity escape）。若只前進一個位元組，
+    /// `pos` 會落在字元中間，後續切片即 panic。
     fn parse_string(&mut self) -> Option<String> {
         let quote = self.peek()?;
         self.pos += 1;
@@ -282,16 +286,17 @@ impl<'a> Parser<'a> {
             }
             if byte == b'\\' {
                 self.pos += 1;
-                let escaped = self.peek()?;
-                self.pos += 1;
+                let escaped = self.text[self.pos..].chars().next()?;
+                self.pos += escaped.len_utf8();
                 match escaped {
-                    b'n' => out.push('\n'),
-                    b't' => out.push('\t'),
-                    b'r' => out.push('\r'),
-                    b'b' => out.push('\u{8}'),
-                    b'f' => out.push('\u{c}'),
-                    b'u' => out.push(self.parse_unicode_escape()?),
-                    other => out.push(char::from(other)),
+                    'n' => out.push('\n'),
+                    't' => out.push('\t'),
+                    'r' => out.push('\r'),
+                    'b' => out.push('\u{8}'),
+                    'f' => out.push('\u{c}'),
+                    'u' => out.push(self.parse_unicode_escape()?),
+                    // JS identity escape：`\中` 等同 `中`。
+                    other => out.push(other),
                 }
                 continue;
             }

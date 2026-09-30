@@ -49,7 +49,15 @@ pub fn run() -> AppResult<()> {
     }
 
     // 刻意不用 `?` 提前返回：任何情況下都要還原終端狀態。
-    let mut terminal = ratatui::try_init().map_err(|err| AppError::Tui(err.to_string()))?;
+    // `try_init` 本身失敗時（例如無法查詢終端尺寸）可能已開啟原始模式，
+    // 也要先盡力還原再回報錯誤。
+    let mut terminal = match ratatui::try_init() {
+        Ok(terminal) => terminal,
+        Err(err) => {
+            let _ = ratatui::try_restore();
+            return Err(AppError::Tui(err.to_string()));
+        }
+    };
     let loop_result = main_loop(&mut terminal, &mut app, &events, &jobs);
     let restore_result = ratatui::try_restore().map_err(|err| AppError::Tui(err.to_string()));
 
@@ -182,8 +190,9 @@ fn apply_event(app: &mut App, event: Event, jobs: &Sender<Job>) {
             handler::ensure_page(app, jobs);
             app.set_message("登录成功");
         }
-        Event::SessionsCleared => {
+        Event::SessionsCleared { account_changed } => {
             app.clear_site_modes();
+            app.invalidate_data(account_changed);
         }
         Event::AgreementAccepted => {
             // 協議已同意：關閉閱讀門，揭露底層畫面（首次設定或解鎖）。

@@ -11,7 +11,7 @@ use crate::session::{AccessMode, SiteKind};
 use crate::sites::lms::LmsCourse;
 use crate::task::{CoursesData, Event, FailedTarget, HomeworkUpdate};
 use crate::tui::app::{
-    AgreementState, App, FlowData, FormState, HomeworkData, LoginScreen, NavItem, Page,
+    AgreementState, App, FlowData, FormState, HomeworkData, LmsLevel, LoginScreen, NavItem, Page,
     ScheduleData, Screen, SettingsState,
 };
 
@@ -546,8 +546,54 @@ fn session_state_is_tracked_per_site() {
     assert_eq!(app.session_label(), "直连");
 
     // 解鎖、換帳號或切換訪問模式：全部清除。
-    apply_event(&mut app, Event::SessionsCleared);
+    apply_event(
+        &mut app,
+        Event::SessionsCleared {
+            account_changed: false,
+        },
+    );
     assert_eq!(app.session_label(), "未登录");
+}
+
+#[test]
+fn account_change_discards_pages_and_policy_change_keeps_data() {
+    // 更換帳號：舊帳號的資料一律清空，卡住的載入回到未載入。
+    let mut app = app();
+    app.schedule = Page::Ready(ScheduleData::default());
+    app.attendance.start_loading("正在加载考勤流水…");
+    app.lms.courses = Page::Ready(Vec::new());
+    app.lms.level = LmsLevel::Activities;
+    app.updated_at.schedule = Some("12:00".to_owned());
+
+    apply_event(
+        &mut app,
+        Event::SessionsCleared {
+            account_changed: true,
+        },
+    );
+    assert!(app.schedule.is_idle(), "换账号后课表资料应清空");
+    assert!(app.attendance.is_idle(), "换账号后卡住的载入应回到未载入");
+    assert!(app.lms.courses.is_idle(), "换账号后课程列表应清空");
+    assert_eq!(
+        app.lms.level,
+        LmsLevel::Courses,
+        "换账号后思源学堂应回到课程层"
+    );
+    assert!(app.updated_at.schedule.is_none(), "旧账号的更新时间应清除");
+
+    // 切換訪問模式：既有資料仍有效，只把載入中的頁面收斂。
+    let mut app = App::new(AccessPolicy::Auto);
+    app.schedule = Page::Ready(ScheduleData::default());
+    app.homework.start_loading("正在汇总作业…");
+
+    apply_event(
+        &mut app,
+        Event::SessionsCleared {
+            account_changed: false,
+        },
+    );
+    assert!(app.schedule.ready().is_some(), "切换模式后旧资料应保留");
+    assert!(!app.homework.is_loading(), "卡住的载入状态应被解除");
 }
 
 #[test]

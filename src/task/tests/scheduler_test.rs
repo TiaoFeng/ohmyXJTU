@@ -82,6 +82,7 @@ impl ThreadWorker {
             captcha_path: None,
             pending_data: VecDeque::new(),
             generation: 0,
+            relogin_attempts: 0,
             cache: LmsCache::default(),
             known_term: None,
             shutdown: false,

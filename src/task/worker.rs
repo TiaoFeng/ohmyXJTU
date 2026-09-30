@@ -20,12 +20,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use chrono::{Local, NaiveDate};
-use zeroize::Zeroizing;
 
 use crate::auth::webvpn;
 use crate::auth::{AccountType, LoginDriver, LoginReply};
 use crate::config::{AccessPolicy, Config};
-use crate::credentials::{Credentials, Vault};
+use crate::credentials::{Credentials, Secret, Vault};
 use crate::domain::homework::{HomeworkInput, HomeworkItem};
 use crate::domain::semester::{self, TermCode, TermResolution, TermSource};
 use crate::domain::{attendance_match, homework, schedule};
@@ -44,20 +43,27 @@ const FLOW_PAGE_SIZE: u32 = 20;
 /// 思源學堂課程／活動快取的有效時間。
 const LMS_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 
+/// 單一載入週期允許的自動重新登入次數上限。
+///
+/// 站點持續回報登入態失效時，「自動重登 → 重試 → 再失效」會形成無上限的
+/// 迴圈；超過上限即停止自動重試並回報錯誤，由使用者手動按 `r` 重試
+///（每次全新的載入請求都會重新獲得額度）。
+const MAX_AUTO_RELOGINS: u8 = 1;
+
 /// 介面送到背景的任務。
 #[derive(Debug, Clone)]
 pub enum Job {
     /// 首次建立保險庫並登入。
     CreateVault {
         /// 使用者設定的加密口令。
-        passphrase: String,
+        passphrase: Secret,
         /// 帳號密碼。
         credentials: Credentials,
     },
     /// 解鎖保險庫。
     Unlock {
         /// 加密口令。
-        passphrase: String,
+        passphrase: Secret,
     },
     /// 提交圖片驗證碼。
     SubmitCaptcha(String),
@@ -74,7 +80,7 @@ pub enum Job {
         /// 使用者重新輸入的帳號密碼。
         credentials: Credentials,
         /// 加密口令（用於登入成功後更新保險庫）。
-        passphrase: String,
+        passphrase: Secret,
     },
     /// 載入課表（含本週考勤）。
     LoadSchedule,
@@ -122,16 +128,16 @@ pub enum Job {
     /// 修改帳號。
     ChangeAccount {
         /// 原加密口令。
-        passphrase: String,
+        passphrase: Secret,
         /// 新帳號密碼。
         credentials: Credentials,
     },
     /// 修改加密口令。
     ChangePassphrase {
         /// 原口令。
-        old: String,
+        old: Secret,
         /// 新口令。
-        new: String,
+        new: Secret,
     },
     /// 切換訪問策略。
     SetAccessPolicy(AccessPolicy),
@@ -248,7 +254,12 @@ pub enum Event {
         mode: Option<AccessMode>,
     },
     /// 會話已全部重置（解鎖、換帳號或切換訪問模式）：介面清除站點登入狀態。
-    SessionsCleared,
+    SessionsCleared {
+        /// 是否因更換帳號而重置：為真時介面必須清空所有頁面的舊資料
+        ///（屬於前一個帳號）；為假（切換訪問模式）時資料仍有效，
+        /// 只需解除卡住的載入狀態。
+        account_changed: bool,
+    },
     /// 進行中的資料載入已被取消（換帳號或切換訪問模式）：
     /// 介面解除該頁的載入中狀態，保留已取得的資料。
     LoadingCancelled {
@@ -386,7 +397,7 @@ struct LoginFlow {
 /// 等待登入成功後才寫入保險庫的憑證。
 struct PendingVault {
     /// 加密口令（寫入後隨即丟棄）。
-    passphrase: Zeroizing<String>,
+    passphrase: Secret,
     /// 使用者重新輸入的帳號密碼。
     credentials: Credentials,
 }
@@ -408,6 +419,8 @@ struct Worker {
     pending_data: VecDeque<Job>,
     /// 資料任務代際：帳號或訪問模式變更時遞增，進行中的任務自動中止。
     generation: u64,
+    /// 本輪載入已嘗試的自動重新登入次數（全新的載入請求歸零）。
+    relogin_attempts: u8,
     /// 思源學堂課程／活動快取。
     cache: LmsCache,
     /// 本會話曾查得的考勤學期（供課程分區使用，不重複請求）。
@@ -617,6 +630,7 @@ pub fn spawn(config: Config, vault: Vault) -> AppResult<(Sender<Job>, Receiver<E
         captcha_path: None,
         pending_data: VecDeque::new(),
         generation: 0,
+        relogin_attempts: 0,
         cache: LmsCache::default(),
         known_term: None,
         shutdown: false,
@@ -663,9 +677,18 @@ impl Worker {
                 // 登入尚未完成：資料任務排入待執行（同鍵去重，強制優先）。
                 self.merge_data_job(job, None);
             } else {
-                self.run_data_job(job);
+                self.run_fresh_data_job(job);
             }
         }
+    }
+
+    /// 執行使用者發起的全新資料任務：重置自動重登額度後再執行。
+    ///
+    /// 自動重登後的重試（[`Self::finish_login`]）不走這裡，額度才會遞減；
+    /// 新的刷新請求則重新獲得完整額度。
+    fn run_fresh_data_job(&mut self, job: Job) {
+        self.relogin_attempts = 0;
+        self.run_data_job(job);
     }
 
     /// 執行控制任務；回傳是否收到結束指令。
@@ -711,7 +734,7 @@ impl Worker {
         if job.is_control() {
             self.dispatch_control(job)
         } else {
-            self.run_data_job(job);
+            self.run_fresh_data_job(job);
             Ok(())
         }
     }
@@ -811,10 +834,13 @@ impl Worker {
         self.retry = None;
         // 換帳號後舊任務與快取一律作廢，進行中的資料任務不再回報。
         self.generation += 1;
+        self.relogin_attempts = 0;
         self.pending_data.clear();
         self.cache.clear();
-        // 舊帳號的站點登入狀態已失效：介面應清除。
-        self.emit(Event::SessionsCleared);
+        // 舊帳號的站點登入狀態與頁面資料已失效：介面應清除。
+        self.emit(Event::SessionsCleared {
+            account_changed: true,
+        });
         Ok(())
     }
 
@@ -833,9 +859,13 @@ impl Worker {
         // 訪問方式變更：進行中的資料任務作廢，快取失效。
         // 保存設定本身不觸發登入，後續登入由各頁面按需進行。
         self.generation += 1;
+        self.relogin_attempts = 0;
         self.cache.clear();
-        // 連線與登入態已重建：介面清除站點登入狀態。
-        self.emit(Event::SessionsCleared);
+        // 連線與登入態已重建：介面清除站點登入狀態；既有頁面資料仍有效，
+        // 只解除因任務作廢而卡住的載入狀態。
+        self.emit(Event::SessionsCleared {
+            account_changed: false,
+        });
         self.emit(Event::AccessPolicyUpdated(policy));
         Ok(())
     }
@@ -1001,6 +1031,8 @@ impl Worker {
     }
 
     fn retry_login(&mut self) -> AppResult<()> {
+        // 使用者手動重試：自動重登額度重新計算。
+        self.relogin_attempts = 0;
         self.begin_login(SiteKind::Attendance, None)
     }
 
@@ -1009,10 +1041,12 @@ impl Worker {
         // 口令錯誤時回報 [`AppError::WrongPassphrase`]，舊憑證不受影響。
         self.vault.load(passphrase)?;
 
+        // 使用者手動重試：自動重登額度重新計算。
+        self.relogin_attempts = 0;
         self.session_mut()?.set_credentials(credentials.clone());
         self.credentials = Some(credentials.clone());
         self.pending_vault = Some(PendingVault {
-            passphrase: Zeroizing::new(passphrase.to_owned()),
+            passphrase: Secret::from(passphrase),
             credentials,
         });
         self.begin_login(SiteKind::Attendance, None)
@@ -1173,6 +1207,15 @@ impl Worker {
             // 登入態失效（或剛切換路由）：記下任務，重新登入後自動重試。
             self.emit(Event::SessionExpired { site });
             self.retry = Some(job);
+            if self.relogin_attempts >= MAX_AUTO_RELOGINS {
+                // 自動重登後站點仍回報登入態失效：停止自動重試，避免
+                //「重登→重試→再失效」的無上限迴圈，交由使用者手動重試。
+                if let Some(job) = self.retry.take() {
+                    self.emit_failed(&job, AppError::ReloginExhausted);
+                }
+                return;
+            }
+            self.relogin_attempts += 1;
             if let Err(login_err) = self.begin_login(site, None)
                 && let Some(job) = self.retry.take()
             {

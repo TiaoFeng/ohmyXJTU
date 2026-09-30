@@ -90,6 +90,10 @@ pub enum AppError {
     #[error("登录状态已失效，请重新登录")]
     SessionExpired,
 
+    /// 自動重新登入後站點仍回報登入態失效（已達自動重試上限）。
+    #[error("自动重新登录后仍然失败，请按 r 重试")]
+    ReloginExhausted,
+
     /// 回應內容與預期格式不符。
     #[error("服务器响应无法解析：{0}")]
     Protocol(String),

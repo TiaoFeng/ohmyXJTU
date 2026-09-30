@@ -51,12 +51,23 @@ const MAX_T_COST: u32 = 16;
 const MAX_P_COST: u32 = 8;
 
 /// 帳號憑證。
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Credentials {
     /// 學號、手機號或信箱。
     pub username: String,
     /// 統一認證密碼。
     pub password: String,
+}
+
+impl std::fmt::Debug for Credentials {
+    /// 只輸出遮罩：任何 `{:?}` 都不會洩漏帳號或密碼。
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Credentials")
+            .field("username", &"<redacted>")
+            .field("password", &"<redacted>")
+            .finish()
+    }
 }
 
 impl Credentials {
@@ -117,9 +128,23 @@ impl Vault {
     }
 
     /// 以口令解密讀取憑證。
+    ///
+    /// 檔案結構損毀時任何口令都無法解鎖；錯誤訊息附上檔案路徑與刪除
+    /// 重建的指引（不含檔案內容），讓使用者有恢復途徑。
     pub fn load(&self, passphrase: &str) -> AppResult<Credentials> {
         let bytes = io::read_private(&self.path)?;
-        decrypt(passphrase, &bytes)
+        decrypt(passphrase, &bytes).map_err(|err| self.describe_file_error(err))
+    }
+
+    /// 為結構損毀錯誤補上路徑與重建指引；其餘錯誤（如口令錯誤）原樣回傳。
+    fn describe_file_error(&self, err: AppError) -> AppError {
+        match err {
+            AppError::VaultFile(detail) => AppError::VaultFile(format!(
+                "{detail}；可删除 {} 后重新设置凭证",
+                self.path.display()
+            )),
+            other => other,
+        }
     }
 
     /// 更換口令：先以舊口令解密（同時驗證舊口令），再以新口令重新加密寫入。

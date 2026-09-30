@@ -31,7 +31,6 @@ use crate::random;
 
 const MAGIC: &[u8; 8] = b"OMXJTU1\n";
 const VERSION: u8 = 1;
-const AAD: &[u8] = b"ohmyXJTU-vault-v1";
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 12;
 const KEY_LEN: usize = 32;
@@ -168,6 +167,14 @@ const DEFAULT_KDF: KdfParams = KdfParams {
     p_cost: P_COST,
 };
 
+/// AEAD 的附加驗證資料：由檔案格式版本派生，因此版本欄位受完整性保護。
+///
+/// 升版時 AAD 會隨 [`VERSION`] 自動改變，不會與版本常數脫節；現行 v1 的
+/// 輸出與舊常數 `b"ohmyXJTU-vault-v1"` 位元組相同，舊保險庫仍可解密。
+fn aad(version: u8) -> Vec<u8> {
+    format!("ohmyXJTU-vault-v{version}").into_bytes()
+}
+
 fn encrypt(passphrase: &str, credentials: &Credentials) -> AppResult<Vec<u8>> {
     let plaintext = Zeroizing::new(
         serde_json::to_vec(credentials)
@@ -181,12 +188,13 @@ fn encrypt(passphrase: &str, credentials: &Credentials) -> AppResult<Vec<u8>> {
 
     let key = derive_key(passphrase, DEFAULT_KDF, &salt)?;
     let cipher = ChaCha20Poly1305::new((&*key).into());
+    let aad = aad(VERSION);
     let ciphertext = cipher
         .encrypt(
             Nonce::from_slice(&nonce),
             Payload {
                 msg: plaintext.as_slice(),
-                aad: AAD,
+                aad: &aad,
             },
         )
         .map_err(|_| AppError::Crypto("凭证加密失败".to_owned()))?;
@@ -204,15 +212,16 @@ fn encrypt(passphrase: &str, credentials: &Credentials) -> AppResult<Vec<u8>> {
 }
 
 fn decrypt(passphrase: &str, bytes: &[u8]) -> AppResult<Credentials> {
-    let (params, salt, nonce, ciphertext) = parse(bytes)?;
+    let (version, params, salt, nonce, ciphertext) = parse(bytes)?;
     let key = derive_key(passphrase, params, &salt)?;
     let cipher = ChaCha20Poly1305::new((&*key).into());
+    let aad = aad(version);
     let plaintext = cipher
         .decrypt(
             Nonce::from_slice(&nonce),
             Payload {
                 msg: ciphertext,
-                aad: AAD,
+                aad: &aad,
             },
         )
         .map_err(|_| AppError::WrongPassphrase)?;
@@ -226,7 +235,7 @@ fn decrypt(passphrase: &str, bytes: &[u8]) -> AppResult<Credentials> {
     })
 }
 
-type ParsedVault<'a> = (KdfParams, [u8; SALT_LEN], [u8; NONCE_LEN], &'a [u8]);
+type ParsedVault<'a> = (u8, KdfParams, [u8; SALT_LEN], [u8; NONCE_LEN], &'a [u8]);
 
 fn parse(bytes: &[u8]) -> AppResult<ParsedVault<'_>> {
     if bytes.len() < HEADER_LEN + TAG_LEN {
@@ -260,7 +269,7 @@ fn parse(bytes: &[u8]) -> AppResult<ParsedVault<'_>> {
     let salt = read_array::<SALT_LEN>(bytes, &mut offset)?;
     let nonce = read_array::<NONCE_LEN>(bytes, &mut offset)?;
     let ciphertext = &bytes[offset..];
-    Ok((params, salt, nonce, ciphertext))
+    Ok((version, params, salt, nonce, ciphertext))
 }
 
 fn read_u32(bytes: &[u8], offset: &mut usize) -> AppResult<u32> {

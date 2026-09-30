@@ -58,6 +58,10 @@ pub struct Config {
     /// 設定檔路徑覆寫（測試用；正式執行為 `None`，寫入預設位置）。
     #[serde(skip)]
     pub save_path: Option<PathBuf>,
+    /// 設定檔損毀後重建的旗標（非持久化）：啟動時用以提示使用者已同意的
+    /// 協議版本與記住的學期已一併重設。
+    #[serde(skip)]
+    pub rebuilt: bool,
 }
 
 impl Default for Config {
@@ -68,6 +72,7 @@ impl Default for Config {
             homework_term: None,
             privacy_version: None,
             save_path: None,
+            rebuilt: false,
         }
     }
 }
@@ -75,12 +80,21 @@ impl Default for Config {
 impl Config {
     /// 讀取設定檔；不存在或損毀時以預設值建立。
     pub fn load_or_create() -> AppResult<Self> {
-        let path = io::config_path()?;
+        Self::load_or_create_at(io::config_path()?)
+    }
+
+    /// 由指定路徑讀取或建立設定檔（供啟動與測試共用）。
+    fn load_or_create_at(path: PathBuf) -> AppResult<Self> {
         let (mut config, mut dirty) = match io::read_private(&path) {
             Ok(bytes) => match serde_json::from_slice::<Self>(&bytes) {
                 Ok(config) => (config, false),
-                // 設定檔僅含非機密資訊，損毀時直接以預設值重建。
-                Err(_) => (Self::generate()?, true),
+                // 設定檔僅含非機密資訊，損毀時直接以預設值重建；標記 `rebuilt`
+                // 以便啟動時告知使用者（協議同意與記住的學期會一併重設）。
+                Err(_) => {
+                    let mut fresh = Self::generate()?;
+                    fresh.rebuilt = true;
+                    (fresh, true)
+                }
             },
             Err(AppError::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => {
                 (Self::generate()?, true)
@@ -116,6 +130,7 @@ impl Config {
             homework_term: None,
             privacy_version: None,
             save_path: None,
+            rebuilt: false,
         })
     }
 

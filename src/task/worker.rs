@@ -65,14 +65,14 @@ pub enum Job {
         /// 加密口令。
         passphrase: Secret,
     },
-    /// 提交圖片驗證碼。
-    SubmitCaptcha(String),
+    /// 提交圖片驗證碼（自動零化，避免明碼進入 `Debug`）。
+    SubmitCaptcha(Secret),
     /// 重新取得驗證碼圖片。
     RefreshCaptcha,
     /// 發送簡訊驗證碼。
     SendMfaCode,
-    /// 提交簡訊驗證碼。
-    VerifyMfaCode(String),
+    /// 提交簡訊驗證碼（自動零化）。
+    VerifyMfaCode(Secret),
     /// 重新開始登入（登入失敗後重試）。
     RetryLogin,
     /// 以重新輸入的帳號密碼重試登入，成功後才寫入保險庫。
@@ -438,6 +438,12 @@ struct Worker {
     shutdown: bool,
 }
 
+/// 作業載入進度事件的節流間隔。
+///
+/// 每完成這麼多項作業（或每門課程結束）才送出一次完整快照，避免大型學期
+/// 逐項重算彙總造成 O(N²) 成本與無界的事件佇列。
+const PROGRESS_EMIT_INTERVAL: usize = 10;
+
 /// 作業載入的步進階段。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HomeworkStage {
@@ -473,6 +479,8 @@ struct HomeworkRunner {
     inputs: Vec<HomeworkInput>,
     /// 活動列表查詢失敗而略過的課程數。
     failed_courses: usize,
+    /// 距離上次發出進度事件以來完成的作業數（用於節流）。
+    since_emit: usize,
     /// 目前階段。
     stage: HomeworkStage,
     /// 是否略過快取。
@@ -655,6 +663,12 @@ pub fn spawn(config: Config, vault: Vault) -> AppResult<(Sender<Job>, Receiver<E
 
 impl Worker {
     fn run(&mut self) {
+        // 設定檔在啟動時損毁重建：提醒使用者協議同意與記住的學期已重設。
+        if self.config.rebuilt {
+            self.emit(Event::Notice(
+                "配置文件已损坏并重建：已同意的协议与记住的学期已重置".to_owned(),
+            ));
+        }
         loop {
             // 資料載入中途收到結束指令：立即停止（排隊中的任務一併丟棄）。
             if self.shutdown {
@@ -808,12 +822,32 @@ impl Worker {
     fn change_account(&mut self, passphrase: &str, credentials: Credentials) -> AppResult<()> {
         // 先以原口令解密，驗證口令正確（失敗會回報 [`AppError::WrongPassphrase`]）。
         self.vault.load(passphrase)?;
-        self.vault.store(passphrase, &credentials)?;
-        self.start_session(credentials)?;
-        self.emit(Event::AccountUpdated);
-        self.emit(Event::VaultReady);
-        self.report_vault_permissions();
-        Ok(())
+        // 記下舊憑證：登入失敗時還原記憶體中的憑證，避免用未驗證的新憑證繼續作業。
+        let previous = self.credentials.clone();
+        // 換帳號：舊帳號的站點登入狀態、快取與頁面資料一律作廢，並換用新憑證登入。
+        {
+            let session = self.session_mut()?;
+            session.set_credentials(credentials.clone());
+            session.clear_logins();
+        }
+        self.credentials = Some(credentials.clone());
+        self.retry = None;
+        self.generation += 1;
+        self.relogin_attempts = 0;
+        self.pending_data.clear();
+        self.cache.clear();
+        self.emit(Event::SessionsCleared {
+            account_changed: true,
+        });
+        // 暫存新憑證：只有登入成功才由 `commit_pending_vault` 寫回保險庫，
+        // 因此打錯新密碼不會覆蓋正確的舊憑證。
+        self.pending_vault = Some(PendingVault {
+            passphrase: Secret::from(passphrase),
+            credentials,
+            previous,
+        });
+        // 立即登入以驗證新憑證（失敗時介面顯示登入錯誤，舊憑證保持不變）。
+        self.begin_login(SiteKind::Attendance, None)
     }
 
     /// 憑證檔權限若過寬（例如由他處複製進來而帶有 0644），收緊並告知使用者。
@@ -908,7 +942,13 @@ impl Worker {
         }
         self.flow = None;
         self.discard_pending_vault();
-        self.retry = None;
+        // 等待重登的任務不會再被重試：明確收斂它的頁面，否則該頁會永遠停在
+        //「載入中」（登入互動期間資料任務一律延後，取消後沒有事件會再觸發）。
+        if let Some(job) = self.retry.take() {
+            self.emit(Event::LoadingCancelled {
+                target: failed_target_of(&job),
+            });
+        }
         self.clear_captcha();
         self.emit(Event::Notice("已取消登录流程，可重新刷新页面".to_owned()));
         Ok(())
@@ -1002,7 +1042,14 @@ impl Worker {
                 Ok(())
             }
             LoginReply::NeedMfa => {
-                let phone = self.driver_mut()?.mfa_phone().ok();
+                let phone = match self.driver_mut()?.mfa_phone() {
+                    Ok(phone) => Some(phone),
+                    Err(err) => {
+                        // 取不到手機號時明確告知，不靜默顯示成「沒有手機號」。
+                        self.emit(Event::Notice(format!("无法获取短信验证手机号：{err}")));
+                        None
+                    }
+                };
                 self.emit(Event::LoginNeedsMfa { phone, sent: false });
                 Ok(())
             }
@@ -1423,7 +1470,7 @@ impl Worker {
             return Ok(None);
         }
 
-        let attendance_term = self.attendance_term();
+        let attendance_term = self.attendance_term()?;
         let remembered = self
             .config
             .homework_term
@@ -1478,6 +1525,7 @@ impl Worker {
             activity_index: 0,
             inputs: Vec::new(),
             failed_courses: 0,
+            since_emit: 0,
             stage,
             force,
             started,
@@ -1537,15 +1585,22 @@ impl Worker {
                 runner.inputs.push(input);
 
                 runner.activity_index += 1;
-                if runner.activity_index >= runner.activities.len() {
+                runner.since_emit += 1;
+                let finished_course = runner.activity_index >= runner.activities.len();
+                if finished_course {
+                    // 整門課程結束：由 `AdvanceCourse` 統一發出一次進度事件。
                     runner.stage = HomeworkStage::AdvanceCourse;
+                } else if runner.since_emit >= PROGRESS_EMIT_INTERVAL {
+                    // 課程尚未結束但已累積足夠作業：節流地補一次進度。
+                    runner.since_emit = 0;
+                    self.emit_homework(runner);
                 }
-                self.emit_homework(runner);
             }
             HomeworkStage::AdvanceCourse => {
                 runner.course_index += 1;
                 runner.activities.clear();
                 runner.activity_index = 0;
+                runner.since_emit = 0;
                 runner.stage = if runner.course_index >= runner.courses.len() {
                     HomeworkStage::Done
                 } else {
@@ -1589,20 +1644,33 @@ impl Worker {
         Ok(input)
     }
 
-    /// 嘗試由考勤系統取得當前學期；未登入或查詢失敗時回傳 `None`（不觸發登入）。
-    fn attendance_term(&mut self) -> Option<TermCode> {
+    /// 嘗試由考勤系統取得當前學期；未登入時回傳 `Ok(None)`（不觸發登入）。
+    ///
+    /// 已登入但遇到登入態失效或連線層錯誤時向上傳播（交由呼叫端走統一重登），
+    /// 不再靜默降級為「沒有考勤學期」——否則作業清單會悄悄退回記憶中的舊學期，
+    /// 使用者看不到登入已過期。
+    fn attendance_term(&mut self) -> AppResult<Option<TermCode>> {
         let term = {
-            let session = self.session.as_mut()?;
+            let Some(session) = self.session.as_mut() else {
+                return Ok(None);
+            };
             if !session.is_logged_in(SiteKind::Attendance) {
-                return None;
+                return Ok(None);
             }
             let mut api = AttendanceApi::new(session);
-            let semester = api.current_semester().ok()?;
-            TermCode::parse(&semester.term_name())?
+            match api.current_semester() {
+                Ok(semester) => match TermCode::parse(&semester.term_name()) {
+                    Some(term) => term,
+                    // 學期名稱無法解析：可恢復，交由後續來源決定。
+                    None => return Ok(None),
+                },
+                Err(err) if is_recoverable(&err) => return Ok(None),
+                Err(err) => return Err(err),
+            }
         };
         // 記住本會話得知的學期，供思源學堂課程分區使用（不重複請求）。
         self.known_term = Some(term);
-        Some(term)
+        Ok(Some(term))
     }
 
     fn load_flow(&mut self, page: u32) -> AppResult<FlowData> {
@@ -1855,7 +1923,7 @@ fn is_recoverable(err: &AppError) -> bool {
 
 fn parse_date(value: &str) -> AppResult<NaiveDate> {
     NaiveDate::parse_from_str(value.trim(), "%Y-%m-%d")
-        .map_err(|err| AppError::protocol(format!("学期开始日期无法解析（{value}）：{err}")))
+        .map_err(|_| AppError::protocol("学期开始日期格式无法识别（应为 YYYY-MM-DD）"))
 }
 
 #[cfg(test)]

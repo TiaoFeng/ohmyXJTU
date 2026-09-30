@@ -84,8 +84,9 @@ impl InputLine {
         self.cursor = 0;
     }
 
-    /// 取代全部內容。
+    /// 取代全部內容（先覆寫舊緩衝，避免明文殘留）。
     pub fn set(&mut self, value: impl Into<String>) {
+        self.value.zeroize();
         self.value = value.into();
         self.cursor = grapheme_len(&self.value);
     }
@@ -94,7 +95,10 @@ impl InputLine {
     pub fn insert(&mut self, character: char) {
         let byte = grapheme_byte_index(&self.value, self.cursor);
         self.value.insert(byte, character);
-        self.cursor += 1;
+        // 新字元可能與前一個字素合併（例如組合重音），此時游標不應前進。
+        // 以字素重新計算游標位置，而非固定加一。
+        let inserted_end = byte + character.len_utf8();
+        self.cursor = grapheme_len(&self.value[..inserted_end]);
     }
 
     /// 刪除游標前的字素。
@@ -156,6 +160,14 @@ impl InputLine {
         } else {
             graphemes.iter().map(|value| (*value).to_owned()).collect()
         }
+    }
+}
+
+impl Drop for InputLine {
+    /// 丟棄前覆寫底層緩衝：表單被換掉或離開畫面時，明文口令／密碼不會
+    /// 留在已釋放的堆積上（`clear()` 只在顯式呼叫時執行）。
+    fn drop(&mut self) {
+        self.value.zeroize();
     }
 }
 

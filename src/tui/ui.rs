@@ -122,10 +122,14 @@ pub fn draw_field(
     frame.render_widget(Paragraph::new(text).style(THEME.surface_style()), area);
 
     focused.then(|| {
-        (
-            area.x.saturating_add(layout.prefix).saturating_add(column),
-            area.y,
-        )
+        // 夾在欄位區域內：標籤較寬或彈窗較窄時，游標不得落到邊框外。
+        let x = area
+            .x
+            .saturating_add(layout.prefix)
+            .saturating_add(column)
+            .min(area.right().saturating_sub(1))
+            .max(area.x);
+        (x, area.y)
     })
 }
 

@@ -58,7 +58,17 @@ pub fn run() -> AppResult<()> {
             return Err(AppError::Tui(err.to_string()));
         }
     };
+    // 啟用 bracketed paste：貼上內容會以單一 Paste 事件送達，不會被拆成
+    // 一連串按鍵（貼上含換行的內容時也不會意外送出表單）。
+    let _ = crossterm::execute!(
+        terminal.backend_mut(),
+        crossterm::event::EnableBracketedPaste
+    );
     let loop_result = main_loop(&mut terminal, &mut app, &events, &jobs);
+    let _ = crossterm::execute!(
+        terminal.backend_mut(),
+        crossterm::event::DisableBracketedPaste
+    );
     let restore_result = ratatui::try_restore().map_err(|err| AppError::Tui(err.to_string()));
 
     let _ = jobs.send(Job::Shutdown);
@@ -74,6 +84,13 @@ pub fn install_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
         // 盡力還原終端：panic 可能發生在進入原始模式或替代畫面之後。
         let _ = ratatui::try_restore();
+        // `try_restore` 不會重現游標，而 `exit` 又會跳過 `Terminal::Drop` 的補救；
+        // 這裡一併關閉 bracketed paste 並顯示游標。
+        let _ = crossterm::execute!(
+            std::io::stdout(),
+            crossterm::event::DisableBracketedPaste,
+            crossterm::cursor::Show
+        );
         let location = info
             .location()
             .map(|location| (location.file(), location.line()));
@@ -103,16 +120,31 @@ fn main_loop(
             .draw(|frame| views::draw(frame, app))
             .map_err(|err| AppError::Tui(err.to_string()))?;
 
-        if event::poll(TICK).map_err(|err| AppError::Tui(err.to_string()))?
-            && let CrosstermEvent::Key(key) =
-                event::read().map_err(|err| AppError::Tui(err.to_string()))?
-            && key.kind == KeyEventKind::Press
-        {
-            handler::handle_key(app, key, jobs);
+        if event::poll(TICK).map_err(|err| AppError::Tui(err.to_string()))? {
+            match event::read().map_err(|err| AppError::Tui(err.to_string()))? {
+                // 長按（Repeat）與單次按下（Press）都應作用；Release 忽略。
+                CrosstermEvent::Key(key)
+                    if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
+                {
+                    handler::handle_key(app, key, jobs);
+                }
+                // bracketed paste：整段貼上不應被拆成一連串按鍵。
+                CrosstermEvent::Paste(text) => handler::handle_paste(app, &text),
+                _ => {}
+            }
         }
 
-        while let Ok(event) = events.try_recv() {
-            apply_event(app, event, jobs);
+        loop {
+            match events.try_recv() {
+                Ok(event) => apply_event(app, event, jobs),
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    // 背景工作執行緒已結束：之後不會再有任何事件，頁面會永遠停在
+                    // 「載入中」且按鍵無效。明確提示使用者退出重啟，而不是靜默停滯。
+                    app.set_message("后台任务已停止，请按 q 退出后重新启动");
+                    break;
+                }
+            }
         }
 
         // 事件要求的瀏覽器開啟：在這裡執行，錯誤以狀態訊息回報。
@@ -413,7 +445,10 @@ fn set_login_error(app: &mut App, message: String) {
             form.busy = false;
             form.error = Some(message);
         }
-        _ => app.login = Some(Box::new(LoginScreen::Failed { message })),
+        // 已有其他登入畫面（進度、驗證碼、簡訊、失敗）：就地切換成失敗畫面。
+        Some(_) => app.login = Some(Box::new(LoginScreen::Failed { message })),
+        // 使用者已關閉覆蓋層：不要用遲到的失敗事件把彈窗重新彈出來。
+        None => {}
     }
 }
 

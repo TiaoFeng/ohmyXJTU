@@ -188,6 +188,12 @@ fn parse_failure_message_does_not_leak_plaintext() {
     assert!(matches!(err, AppError::VaultFile(_)), "实际错误：{err}");
 }
 
+/// AAD 由格式版本派生；現行 v1 必須與舊版常數位元組相同，否則既有憑證庫無法解密。
+#[test]
+fn aad_stays_compatible_with_previous_release() {
+    assert_eq!(aad(VERSION), b"ohmyXJTU-vault-v1");
+}
+
 /// 以 `PASSPHRASE` 加密任意位元組，組出格式合法的憑證檔。
 fn seal(plaintext: &[u8]) -> Vec<u8> {
     use chacha20poly1305::aead::{Aead as _, KeyInit as _, Payload};
@@ -200,12 +206,13 @@ fn seal(plaintext: &[u8]) -> Vec<u8> {
 
     let key = derive_key(PASSPHRASE, DEFAULT_KDF, &salt).expect("派生密钥");
     let cipher = ChaCha20Poly1305::new((&*key).into());
+    let aad = aad(VERSION);
     let ciphertext = cipher
         .encrypt(
             Nonce::from_slice(&nonce),
             Payload {
                 msg: plaintext,
-                aad: AAD,
+                aad: &aad,
             },
         )
         .expect("加密");

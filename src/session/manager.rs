@@ -182,6 +182,16 @@ impl SessionManager {
         self.sites.contains_key(&site)
     }
 
+    /// 清除所有站點的登入狀態與已解析結果（換帳號時使用）。
+    ///
+    /// 與 [`Self::set_access_policy`] 不同，不動訪問策略；WebVPN 的登入態也一併失效，
+    /// 下一次 [`Self::next_login_step`] 會重新登入各站點。
+    pub fn clear_logins(&mut self) {
+        self.resolved.clear();
+        self.sites.clear();
+        self.webvpn.logged_in = false;
+    }
+
     /// 站點目前使用的訪問方式（尚未解析時為 `None`）。
     pub fn access_mode(&self, site: SiteKind) -> Option<AccessMode> {
         self.sites.get(&site).map(|state| state.access_mode)

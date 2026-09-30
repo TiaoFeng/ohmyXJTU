@@ -541,11 +541,6 @@ fn check_envelope(response: &HttpResponse) -> AppResult<serde_json::Value> {
     }
 }
 
-/// 判斷網址是否屬於統一認證，供會話層辨識「登入態失效」。
-pub fn is_login_host(url: &str) -> bool {
-    url.starts_with(LOGIN_HOST)
-}
-
 /// 確認登入表單的提交目標位於學校網域且使用 https；否則回報錯誤
 /// （訊息只含主機名或簡短原因，不含完整 URL）。
 fn ensure_trusted_submit_target(url: &str) -> AppResult<()> {

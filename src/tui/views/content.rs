@@ -61,7 +61,9 @@ fn schedule(frame: &mut Frame, area: Rect, app: &mut App) {
             let (list_area, detail_area) = split_detail(area, app.schedule_detail);
             let width = row_width(list_area);
             let (items, detail) = {
-                let data = app.schedule.ready().expect("已确认存在课表数据");
+                let Some(data) = app.schedule.ready() else {
+                    return;
+                };
                 let Some(columns) = schedule_columns(width, ScheduleNeeds::of(&data.lessons))
                 else {
                     too_narrow(frame, list_area, &title, schedule_min_row_width(), width);
@@ -309,7 +311,9 @@ fn homework(frame: &mut Frame, area: Rect, app: &mut App) {
 
     let (list_area, detail_area) = split_detail(body_area, app.homework_detail);
     let (items, detail) = {
-        let data = app.homework.ready().expect("已确认存在作业数据");
+        let Some(data) = app.homework.ready() else {
+            return;
+        };
         if data.group_count(app.homework_group) == 0 {
             empty_homework(frame, body_area, &title, app, data);
             return;
@@ -773,7 +777,9 @@ fn flow(frame: &mut Frame, area: Rect, app: &mut App) {
         Some(_) => {
             let (list_area, detail_area) = split_detail(area, app.flow_detail);
             let (items, detail) = {
-                let data = app.attendance.ready().expect("已确认存在流水数据");
+                let Some(data) = app.attendance.ready() else {
+                    return;
+                };
                 let index = app.page_selection().min(data.records.len() - 1);
                 // 清單有邊框與高亮符號：欄寬需以實際列寬計算，狀態欄才能對齊。
                 let columns = flow_columns(row_width(list_area));
@@ -906,7 +912,9 @@ fn lms(frame: &mut Frame, area: Rect, app: &mut App) {
                 }
                 Some(_) => {
                     let rows = {
-                        let courses = app.lms.courses.ready().expect("已确认存在课程数据");
+                        let Some(courses) = app.lms.courses.ready() else {
+                            return;
+                        };
                         course_list::course_rows(courses, app.lms.courses_term)
                     };
                     let items = rows.iter().map(course_row_item).collect::<Vec<_>>();

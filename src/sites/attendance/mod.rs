@@ -142,9 +142,12 @@ impl<'a> AttendanceApi<'a> {
                 .unwrap_or_else(|| Value::Array(Vec::new())),
             "查询考勤流水",
         )?;
+        // `total` 必須是整數：缺欄位或型別不符時明確報錯，避免靜默歸零而
+        // 只取到第一頁的資料（流水被悄悄截斷）。
+        let total = required_total(&data, "查询考勤流水")?;
         Ok(FlowPage {
             records,
-            total: data.get("total").and_then(Value::as_u64).unwrap_or(0),
+            total,
             page,
             page_size,
         })
@@ -174,7 +177,7 @@ impl<'a> AttendanceApi<'a> {
                     .unwrap_or_else(|| Value::Array(Vec::new())),
                 "查询课程考勤记录",
             )?;
-            let total = data.get("total").and_then(Value::as_u64).unwrap_or(0);
+            let total = required_total(&data, "查询课程考勤记录")?;
             records.extend(rows);
 
             if records.len() as u64 >= total || page >= MAX_PAGES {
@@ -189,6 +192,16 @@ impl<'a> AttendanceApi<'a> {
         let response = self.session.send(SiteKind::Attendance, request)?;
         unwrap_envelope(&response, context)
     }
+}
+
+/// 取出必填的整數 `total`；缺欄位或型別不符時回報協定錯誤。
+///
+/// 分頁若把無法辨識的 `total` 當成 0，會在取完第一頁後就停止，使用者不會
+/// 察覺記錄被悄悄截斷；明確報錯才能讓問題浮現。
+fn required_total(data: &Value, context: &str) -> AppResult<u64> {
+    data.get("total")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| AppError::protocol(format!("{context} 响应缺少整数 total 字段")))
 }
 
 #[cfg(test)]

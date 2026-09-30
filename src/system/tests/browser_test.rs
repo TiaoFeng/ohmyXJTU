@@ -42,3 +42,24 @@ fn rejects_non_http_urls() {
     }
     assert!(open_url("javascript:alert(1)").is_err());
 }
+
+#[cfg(unix)]
+#[test]
+fn reap_launcher_reports_immediate_failure() {
+    let failed = Command::new("false")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("启动 false");
+    let err = reap_launcher(failed).expect_err("非零退出应报错");
+    assert!(err.to_string().contains("退出码"), "应说明退出码：{err}");
+
+    let ok = Command::new("true")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("启动 true");
+    reap_launcher(ok).expect("零退出应视为成功");
+}

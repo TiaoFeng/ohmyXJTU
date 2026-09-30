@@ -4,11 +4,19 @@
 //! 字串拼接，避免注入。實際的 URL 來源一律是伺服器回應或既定常數
 //! （例如思源學堂首頁），不拼接未經驗證的路徑。
 
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 use url::Url;
 
 use crate::error::{AppError, AppResult};
+
+/// 啟動後等待啟動器結束的寬限時間。
+///
+/// `xdg-open` 之類的啟動器失敗時會很快以非零碼結束；成功時通常立刻返回，
+/// 少數實作會一直等到瀏覽器關閉。等待上限即為此值，逾時後視為啟動成功並
+/// 交由背景執行緒回收。
+const LAUNCH_GRACE: Duration = Duration::from_millis(200);
 
 /// 以系統預設瀏覽器開啟網址（不等待程序結束）。
 ///
@@ -16,7 +24,7 @@ use crate::error::{AppError, AppResult};
 /// 直接繼承會打亂 TUI 畫面。子行程交由獨立執行緒回收，避免每開一次就累積殭屍。
 pub fn open_url(url: &str) -> AppResult<()> {
     let (program, args) = command_for(std::env::consts::OS, url)?;
-    let mut child = Command::new(program)
+    let child = Command::new(program)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -24,7 +32,41 @@ pub fn open_url(url: &str) -> AppResult<()> {
         .spawn()
         .map_err(|err| AppError::protocol(format!("无法启动浏览器：{err}")))?;
 
-    // 不等待（瀏覽器會持續執行），但仍要回收，否則子行程結束後會成為殭屍。
+    reap_launcher(child)
+}
+
+/// 確認啟動器是否立即失敗；仍在執行時交由背景執行緒回收。
+///
+/// `spawn` 成功只代表找到執行檔：沒有瀏覽器的環境下，啟動器會以非零碼結束
+/// （例如 `xdg-open: no method available`）。短暫等待以攔截這種立即失敗，
+/// 避免介面誤報「已開啟」。
+fn reap_launcher(mut child: Child) -> AppResult<()> {
+    let deadline = Instant::now() + LAUNCH_GRACE;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return if status.success() {
+                    Ok(())
+                } else {
+                    Err(AppError::protocol(format!(
+                        "浏览器启动失败（退出码 {}）",
+                        status
+                            .code()
+                            .map_or_else(|| "未知".to_owned(), |code| code.to_string())
+                    )))
+                };
+            }
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(err) => return Err(AppError::protocol(format!("无法确认浏览器是否启动：{err}"))),
+        }
+    }
+
+    // 仍在執行：由獨立執行緒回收，避免子行程結束後成為殭屍。
     std::thread::spawn(move || {
         let _ = child.wait();
     });

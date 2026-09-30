@@ -14,7 +14,7 @@ use crate::tui::app::{
     LoginScreen, NavItem, Page, ScheduleData, Screen, SettingsState,
 };
 
-use super::handle_key;
+use super::{FormValues, handle_key, handle_paste};
 
 fn press(app: &mut App, jobs: &Sender<Job>, code: KeyCode) {
     handle_key(app, KeyEvent::new(code, KeyModifiers::NONE), jobs);
@@ -551,6 +551,65 @@ fn failed_screen_opens_credentials_form() {
         }
         other => panic!("应回到失败画面，实际为 {other:?}"),
     }
+}
+
+#[test]
+fn login_progress_esc_dismisses_and_cancels_login() {
+    let (jobs, rx) = channel();
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.login = Some(Box::new(LoginScreen::Progress {
+        note: "正在登录考勤系统…".to_owned(),
+    }));
+
+    press(&mut app, &jobs, KeyCode::Esc);
+
+    assert!(app.login.is_none(), "esc 应关闭登录覆盖层");
+    assert!(
+        matches!(rx.try_recv(), Ok(Job::CancelLogin)),
+        "应送出取消登录任务"
+    );
+}
+
+#[test]
+fn paste_inserts_text_into_the_focused_field() {
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Setup(FormState::setup()));
+
+    handle_paste(&mut app, "secret123");
+    let Screen::Setup(form) = &app.screen else {
+        panic!("应停留在首次设置表单");
+    };
+    assert_eq!(form.fields[0].value.value(), "secret123");
+
+    // 換行與回車不得被插入，也不得送出表單。
+    handle_paste(&mut app, "\nmore\r");
+    let Screen::Setup(form) = &app.screen else {
+        panic!("应停留在首次设置表单");
+    };
+    assert_eq!(form.fields[0].value.value(), "secret123more");
+}
+
+#[test]
+fn form_values_debug_never_leaks_secrets() {
+    let mut form = FormState::change_account();
+    form.fields[0].value.set("SUPER-SECRET-PASSPHRASE");
+    form.fields[1].value.set("3120000009");
+    form.fields[2].value.set("SUPER-SECRET-PASSWORD");
+    form.fields[3].value.set("SUPER-SECRET-PASSWORD");
+
+    let values = FormValues::from_form(&form);
+    let debug = format!("{values:?}");
+
+    assert!(
+        !debug.contains("SUPER-SECRET-PASSPHRASE"),
+        "口令不得进 Debug：{debug}"
+    );
+    assert!(
+        !debug.contains("SUPER-SECRET-PASSWORD"),
+        "密码不得进 Debug：{debug}"
+    );
+    assert!(!debug.contains("3120000009"), "账号不得进 Debug：{debug}");
 }
 
 #[test]

@@ -101,6 +101,30 @@ fn zero_width_window_is_safe() {
 }
 
 #[test]
+fn combining_character_keeps_cursor_on_one_grapheme() {
+    let mut line = InputLine::new();
+    line.insert('a');
+    // U+0301 組合重音：與前一個 'a' 合併為單一字素。
+    line.insert('\u{0301}');
+    assert_eq!(line.value(), "a\u{0301}");
+    assert_eq!(line.len(), 1, "組合字元不應自成一個字素");
+    assert_eq!(line.cursor(), 1, "游標不應越過合併後的字素");
+
+    // 游標在尾端：backspace 應刪掉整個字素，而不是看似無效。
+    assert!(line.backspace(), "組合字元後仍應能刪除");
+    assert_eq!(line.value(), "");
+    assert_eq!(line.cursor(), 0);
+}
+
+#[test]
+fn set_replaces_content_and_moves_cursor_to_end() {
+    let mut line = InputLine::with_value("old");
+    line.set("new-value");
+    assert_eq!(line.value(), "new-value");
+    assert_eq!(line.cursor(), line.len());
+}
+
+#[test]
 fn measures_display_width() {
     assert_eq!(display_width("abc"), 3);
     assert_eq!(display_width("中文"), 4);

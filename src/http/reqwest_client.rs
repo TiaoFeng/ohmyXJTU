@@ -80,7 +80,10 @@ impl HttpClient for ReqwestClient {
             .map(|(name, value)| {
                 (
                     name.as_str().to_owned(),
-                    value.to_str().unwrap_or_default().to_owned(),
+                    // 以 lossy 轉換保留非 UTF-8 標頭的存在與近似值：`unwrap_or_default`
+                    // 會把任何非 UTF-8 標頭靜默變成空字串（例如 `content-type`），
+                    // 使登入態失效判定失去依據。
+                    String::from_utf8_lossy(value.as_bytes()).into_owned(),
                 )
             })
             .collect();

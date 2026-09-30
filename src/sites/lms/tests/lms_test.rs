@@ -32,6 +32,19 @@ fn course_homework_url_rejects_unsafe_identifiers() {
 }
 
 #[test]
+fn safe_identifier_accepts_only_url_safe_tokens() {
+    assert_eq!(safe_identifier(" 42 "), Some("42"), "前後空白應去除");
+    assert_eq!(safe_identifier("abc-DEF_09"), Some("abc-DEF_09"));
+    for value in ["", "   ", "1 2", "a/b", "a?b", "a#b", "中文", "a.b", "\n"] {
+        assert_eq!(
+            safe_identifier(value),
+            None,
+            "應拒絕不安全識別碼：{value:?}"
+        );
+    }
+}
+
+#[test]
 fn parses_courses_and_skips_incomplete_items() {
     let value = json!([
         {

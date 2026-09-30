@@ -84,6 +84,46 @@ pub fn handle_key(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
     }
 }
 
+/// 處理貼上事件：把文字插入目前聚焦的輸入欄位（含登入覆蓋層與各表單）。
+///
+/// 單行輸入不接受換行；貼上的換行與回車一律忽略，避免貼上內容意外送出表單。
+pub fn handle_paste(app: &mut App, text: &str) {
+    // 協議閱讀門開啟時不接受輸入。
+    if app.agreement.is_some() {
+        return;
+    }
+    // 登入覆蓋層優先於底層表單。
+    if let Some(screen) = app.login.as_mut() {
+        match screen.as_mut() {
+            LoginScreen::Captcha { input, .. } | LoginScreen::Mfa { input, .. } => {
+                insert_text(input, text);
+            }
+            LoginScreen::Credentials { form, .. } => {
+                if let Some(field) = form.focused_mut() {
+                    insert_text(&mut field.value, text);
+                }
+            }
+            _ => {}
+        }
+        return;
+    }
+    if let Some(form) = form_mut(app)
+        && let Some(field) = form.focused_mut()
+    {
+        insert_text(&mut field.value, text);
+    }
+}
+
+/// 把貼上的文字插入單行輸入框（忽略換行）。
+fn insert_text(line: &mut InputLine, text: &str) {
+    for character in text
+        .chars()
+        .filter(|character| !matches!(character, '\n' | '\r'))
+    {
+        line.insert(character);
+    }
+}
+
 /// `Ctrl+P`：開啟或關閉帳戶設定（登入覆蓋層或協議閱讀門開啟時不生效）。
 fn toggle_settings(app: &mut App) {
     if app.login.is_some() || app.agreement.is_some() {
@@ -205,7 +245,7 @@ fn build_job(kind: FormKind, values: &FormValues) -> Result<Job, String> {
             }
             Ok(Job::CreateVault {
                 passphrase: values.passphrase.clone(),
-                credentials: Credentials::new(values.username.trim(), values.password.clone()),
+                credentials: Credentials::new(values.username.trim(), values.password.as_str()),
             })
         }
         FormKind::Unlock => {
@@ -227,7 +267,7 @@ fn build_job(kind: FormKind, values: &FormValues) -> Result<Job, String> {
                 return Err("请输入加密口令".to_owned());
             }
             Ok(Job::RetryWithAccount {
-                credentials: Credentials::new(values.username.trim(), values.password.clone()),
+                credentials: Credentials::new(values.username.trim(), values.password.as_str()),
                 passphrase: values.passphrase.clone(),
             })
         }
@@ -246,7 +286,7 @@ fn build_job(kind: FormKind, values: &FormValues) -> Result<Job, String> {
             }
             Ok(Job::ChangeAccount {
                 passphrase: values.passphrase.clone(),
-                credentials: Credentials::new(values.username.trim(), values.password.clone()),
+                credentials: Credentials::new(values.username.trim(), values.password.as_str()),
             })
         }
         FormKind::ChangePassphrase => {
@@ -256,7 +296,7 @@ fn build_job(kind: FormKind, values: &FormValues) -> Result<Job, String> {
             validate_passphrase(&values.password, &values.password_confirm)?;
             Ok(Job::ChangePassphrase {
                 old: values.passphrase.clone(),
-                new: values.password.clone().into(),
+                new: values.password.clone(),
             })
         }
     }
@@ -300,15 +340,32 @@ fn submit_form(app: &mut App, jobs: &Sender<Job>) {
 }
 
 /// 表單各欄位的值（依表單種類對應位置）。
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct FormValues {
     /// 加密口令（自動零化）。
     passphrase: Secret,
     /// 確認加密口令（自動零化）。
     passphrase_confirm: Secret,
+    /// 帳號（非機密，但一律不進 `Debug`）。
     username: String,
-    password: String,
-    password_confirm: String,
+    /// 密碼（自動零化）。
+    password: Secret,
+    /// 確認密碼（自動零化）。
+    password_confirm: Secret,
+}
+
+impl std::fmt::Debug for FormValues {
+    /// 任何 `{:?}` 都只輸出欄位是否有值，不含帳號、密碼或口令內容。
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FormValues")
+            .field("passphrase", &!self.passphrase.is_empty())
+            .field("passphrase_confirm", &!self.passphrase_confirm.is_empty())
+            .field("username", &!self.username.is_empty())
+            .field("password", &!self.password.is_empty())
+            .field("password_confirm", &!self.password_confirm.is_empty())
+            .finish()
+    }
 }
 
 impl FormValues {
@@ -324,8 +381,8 @@ impl FormValues {
                 passphrase: secret_at(0),
                 passphrase_confirm: secret_at(1),
                 username: at(2),
-                password: at(3),
-                password_confirm: at(4),
+                password: secret_at(3),
+                password_confirm: secret_at(4),
             },
             FormKind::Unlock => Self {
                 passphrase: secret_at(0),
@@ -333,21 +390,21 @@ impl FormValues {
             },
             FormKind::LoginRetry => Self {
                 username: at(0),
-                password: at(1),
+                password: secret_at(1),
                 passphrase: secret_at(2),
                 ..Self::default()
             },
             FormKind::ChangeAccount => Self {
                 passphrase: secret_at(0),
                 username: at(1),
-                password: at(2),
-                password_confirm: at(3),
+                password: secret_at(2),
+                password_confirm: secret_at(3),
                 ..Self::default()
             },
             FormKind::ChangePassphrase => Self {
                 passphrase: secret_at(0),
-                password: at(1),
-                password_confirm: at(2),
+                password: secret_at(1),
+                password_confirm: secret_at(2),
                 ..Self::default()
             },
         }
@@ -373,11 +430,13 @@ fn handle_login(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
 
     if let Some(screen) = app.login.as_mut() {
         match screen.as_mut() {
-            LoginScreen::Progress { .. } => {
-                if key.code == KeyCode::Char('q') {
-                    action = Some(LoginAction::Quit);
-                }
-            }
+            LoginScreen::Progress { .. } => match key.code {
+                // 登入往返期間（可能長達預設的 HTTP 逾時）允許取消，
+                // 否則 r、換頁、Ctrl+P 全部無效。
+                KeyCode::Esc => action = Some(LoginAction::Dismiss),
+                KeyCode::Char('q') => action = Some(LoginAction::Quit),
+                _ => {}
+            },
             LoginScreen::Failed { .. } => match key.code {
                 KeyCode::Enter => action = Some(LoginAction::Retry),
                 KeyCode::Char('e') => action = Some(LoginAction::EditAccount),
@@ -442,6 +501,11 @@ fn handle_login(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
         Some(LoginAction::EditAccount) => open_credentials_form(app),
         Some(LoginAction::Dismiss) => {
             app.login = None;
+            // 底層若是送出中的表單（例如修改帳號失敗），一併解除處理中狀態，
+            // 否則關閉覆蓋層後表單會卡在「正在處理」而無法再操作。
+            if let Some(form) = form_mut(app) {
+                form.busy = false;
+            }
             // 一併取消工作者端的登入流程：否則登入互動期間被延後的資料任務
             //（例如接著按 r 重新整理）永遠不會執行。
             let _ = jobs.send(Job::CancelLogin);
@@ -453,7 +517,7 @@ fn handle_login(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
         }
         Some(LoginAction::SubmitCredentials) => submit_login_credentials(app, jobs),
         Some(LoginAction::SubmitCaptcha(code)) => {
-            let _ = jobs.send(Job::SubmitCaptcha(code));
+            let _ = jobs.send(Job::SubmitCaptcha(Secret::from(code)));
         }
         Some(LoginAction::RefreshCaptcha) => {
             let _ = jobs.send(Job::RefreshCaptcha);
@@ -462,7 +526,7 @@ fn handle_login(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
             let _ = jobs.send(Job::SendMfaCode);
         }
         Some(LoginAction::VerifyMfaCode(code)) => {
-            let _ = jobs.send(Job::VerifyMfaCode(code));
+            let _ = jobs.send(Job::VerifyMfaCode(Secret::from(code)));
         }
         None => {}
     }

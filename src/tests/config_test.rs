@@ -30,3 +30,22 @@ fn privacy_accepted_requires_exact_version() {
     assert!(!config.privacy_accepted("1.1"), "旧版本记录应要求重新同意");
     assert!(config.privacy_accepted("1.0"));
 }
+
+#[test]
+fn corrupt_config_is_rebuilt_and_flagged() {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let path = dir.path().join("config.json");
+    std::fs::write(&path, b"{ this is not json").expect("写入损坏配置");
+
+    let config = Config::load_or_create_at(path).expect("应重建配置");
+    assert!(config.rebuilt, "损毁的配置应标记为已重建");
+}
+
+#[test]
+fn first_run_config_is_not_flagged_as_rebuilt() {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let path = dir.path().join("config.json");
+
+    let config = Config::load_or_create_at(path).expect("应建立配置");
+    assert!(!config.rebuilt, "首次建立不应视为损毁重建");
+}

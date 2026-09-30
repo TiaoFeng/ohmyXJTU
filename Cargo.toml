@@ -28,7 +28,7 @@ crossterm = "0.29"
 dirs = "6"
 getrandom = "0.3"
 ratatui = "0.30"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "cookies", "json", "charset", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "cookies", "json", "rustls-tls"] }
 rsa = "0.9"
 scraper = "0.27.0"
 serde = { version = "1.0.229", features = ["derive"] }

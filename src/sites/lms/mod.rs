@@ -38,15 +38,21 @@ pub const POLICY: SitePolicy = SitePolicy {
 /// 課程識別碼僅接受 URL 安全字元；無法安全拼接時回傳 `None`，由呼叫端
 /// 決定替代目標。
 pub fn course_homework_url(course_id: &str) -> Option<String> {
-    let course_id = course_id.trim();
-    let safe = !course_id.is_empty()
-        && course_id
+    let course_id = safe_identifier(course_id)?;
+    Some(format!("{BASE_URL}/course/{course_id}/homework"))
+}
+
+/// 伺服器提供的識別碼是否可安全拼接進 API／前端路徑。
+///
+/// 只接受 URL 安全字元（ASCII 英數、`-`、`_`）：`?`、`#`、`/` 等字元會改變
+/// 實際請求目標。主機固定為思源學堂，因此這是縱深防禦與一致性檢查。
+fn safe_identifier(value: &str) -> Option<&str> {
+    let value = value.trim();
+    let safe = !value.is_empty()
+        && value
             .chars()
             .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'));
-    if !safe {
-        return None;
-    }
-    Some(format!("{BASE_URL}/course/{course_id}/homework"))
+    safe.then_some(value)
 }
 
 /// 站點擴充點。
@@ -214,7 +220,9 @@ impl<'a> LmsApi<'a> {
         if !submit_by_group && let Some(count) = detail.user_submit_count {
             return Ok(SubmissionSummary {
                 submit_by_group,
-                count: Some(count as usize),
+                // 伺服器值為 u64：在 32 位元目標上 `as usize` 會截斷並可能誤判為
+                // 「未提交」；超出範圍時視為無法確認（`None`）。
+                count: usize::try_from(count).ok(),
                 note: None,
             });
         }
@@ -241,6 +249,8 @@ impl<'a> LmsApi<'a> {
     /// 由伺服器回傳（附帶存取 token），不自行拼接前端路徑；
     /// 來源為參考實作的 `_get_lesson_player_url`。
     pub fn lesson_player_url(&mut self, activity_id: &str) -> AppResult<String> {
+        let activity_id = safe_identifier(activity_id)
+            .ok_or_else(|| AppError::protocol("活动识别码不符合预期格式"))?;
         let response = self.session.send(
             SiteKind::Lms,
             HttpRequest::get(format!(
@@ -258,6 +268,8 @@ impl<'a> LmsApi<'a> {
 
     /// 取得活動詳情（不含提交記錄）；供需要自行快取的呼叫端使用。
     pub fn fetch_activity_detail(&mut self, activity_id: &str) -> AppResult<LmsActivity> {
+        let activity_id = safe_identifier(activity_id)
+            .ok_or_else(|| AppError::protocol("活动识别码不符合预期格式"))?;
         let response = self.session.send(
             SiteKind::Lms,
             HttpRequest::get(format!("{BASE_URL}/api/activities/{activity_id}")),
@@ -272,13 +284,17 @@ impl<'a> LmsApi<'a> {
         submit_by_group: bool,
         group_id: Option<&str>,
     ) -> AppResult<LmsSubmissionList> {
+        let activity_id = safe_identifier(activity_id)
+            .ok_or_else(|| AppError::protocol("活动识别码不符合预期格式"))?;
         let url = if submit_by_group {
             let group_id = group_id
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| AppError::protocol("小组作业缺少 group_id，无法查询提交记录"))?;
+                .and_then(|value| safe_identifier(value))
+                .ok_or_else(|| AppError::protocol("小组作业缺少有效 group_id，无法查询提交记录"))?;
             format!("{BASE_URL}/api/activities/{activity_id}/groups/{group_id}/submission_list")
         } else {
             let user_id = self.user_id()?;
+            let user_id = safe_identifier(&user_id)
+                .ok_or_else(|| AppError::protocol("思源学堂用户识别码不符合预期格式"))?;
             format!("{BASE_URL}/api/activities/{activity_id}/students/{user_id}/submission_list")
         };
 

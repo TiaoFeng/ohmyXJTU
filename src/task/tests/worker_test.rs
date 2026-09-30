@@ -300,6 +300,12 @@ fn job_debug_never_leaks_credentials() {
     let debug = format!("{change:?}");
     assert!(!debug.contains("old-secret"), "旧口令泄漏：{debug}");
     assert!(!debug.contains("new-secret"), "新口令泄漏：{debug}");
+
+    // 一次性驗證碼同樣不得以明文進入 `Debug`。
+    let captcha = format!("{:?}", Job::SubmitCaptcha("4821".into()));
+    assert!(!captcha.contains("4821"), "验证码泄漏：{captcha}");
+    let mfa = format!("{:?}", Job::VerifyMfaCode("654321".into()));
+    assert!(!mfa.contains("654321"), "短信验证码泄漏：{mfa}");
 }
 
 #[test]
@@ -366,6 +372,87 @@ fn keeps_old_credentials_when_the_new_ones_are_rejected() {
     );
     let stored = harness.vault.load("secret123").expect("读取凭据");
     assert_eq!(stored.password, "old-password", "失败不得覆盖旧凭据");
+}
+
+#[test]
+fn change_account_saves_new_credentials_only_after_login_succeeds() {
+    let mut harness = harness(fake_flow(0));
+
+    harness
+        .dispatch(Job::ChangeAccount {
+            passphrase: "secret123".into(),
+            credentials: Credentials::new("3120000002", "new-password"),
+        })
+        .expect("登录应当成功");
+
+    let stored = harness.vault.load("secret123").expect("读取凭据");
+    assert_eq!(stored.username, "3120000002");
+    assert_eq!(stored.password, "new-password");
+
+    let events = harness.drain_events();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::AccountUpdated)),
+        "应当回报账号已更新"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::SessionsCleared {
+                account_changed: true
+            }
+        )),
+        "换账号应清除旧账号的资料与快取"
+    );
+}
+
+#[test]
+fn change_account_keeps_old_credentials_when_login_is_rejected() {
+    let mut harness = harness(|request: &HttpRequest| match request.url.as_str() {
+        url if url.starts_with(attendance::LOGIN_URL) => {
+            Ok(HttpResponse::new(200, ATTENDANCE_POST, login_page()))
+        }
+        rsa::PUBLIC_KEY_URL => Ok(HttpResponse::new(
+            200,
+            rsa::PUBLIC_KEY_URL,
+            public_key_pem(),
+        )),
+        _ => Ok(HttpResponse::new(401, ATTENDANCE_POST, "<html></html>")),
+    });
+
+    harness
+        .dispatch(Job::ChangeAccount {
+            passphrase: "secret123".into(),
+            credentials: Credentials::new("3120000002", "wrong-password"),
+        })
+        .expect("登录被拒属于预期结果，不应是任务错误");
+
+    assert!(
+        harness.saw(|event| matches!(event, Event::LoginFailed(_))),
+        "应当回报登录失败"
+    );
+    let stored = harness.vault.load("secret123").expect("读取凭据");
+    assert_eq!(stored.username, "3120000001", "失败不得覆盖旧凭据");
+    assert_eq!(stored.password, "old-password", "失败不得覆盖旧凭据");
+}
+
+#[test]
+fn change_account_rejects_wrong_passphrase_without_touching_the_vault() {
+    let mut harness = harness(fake_flow(0));
+
+    let result = harness.dispatch(Job::ChangeAccount {
+        passphrase: "wrong-passphrase".into(),
+        credentials: Credentials::new("3120000002", "new-password"),
+    });
+
+    assert!(
+        matches!(result, Err(AppError::WrongPassphrase)),
+        "口令错误时应拒绝任务，实际：{result:?}"
+    );
+    let stored = harness.vault.load("secret123").expect("旧凭据应保持不变");
+    assert_eq!(stored.username, "3120000001");
+    assert_eq!(stored.password, "old-password");
 }
 
 #[test]
@@ -684,6 +771,40 @@ fn cancel_login_drops_pending_login_state() {
     assert!(
         harness.saw(|event| matches!(event, Event::Notice(_))),
         "應提示已取消登入"
+    );
+}
+
+#[test]
+fn cancel_login_settles_the_waiting_page() {
+    // 等待重登的頁面在取消後不會再被重試：必須收到 LoadingCancelled 收斂，
+    // 否則會永遠停在「載入中」。
+    let client: Arc<dyn HttpClient> =
+        Arc::new(FakeClient::with_responder(|request: &HttpRequest| {
+            Ok(HttpResponse::new(200, request.url.clone(), "<html></html>"))
+        }));
+    let driver =
+        LoginDriver::new(client, attendance::LOGIN_URL, &"0".repeat(32)).expect("建立登录驱动器");
+
+    let mut harness = harness(|_request: &HttpRequest| panic!("取消登录不应触发网络请求"));
+    harness.worker.flow = Some(LoginFlow {
+        site: SiteKind::Attendance,
+        driver: Box::new(driver),
+        retry: None,
+    });
+    harness.worker.retry = Some(Job::LoadHomework { force: false });
+
+    harness
+        .dispatch(Job::CancelLogin)
+        .expect("取消登录应当成功");
+
+    assert!(
+        harness.saw(|event| matches!(
+            event,
+            Event::LoadingCancelled {
+                target: FailedTarget::Homework
+            }
+        )),
+        "取消登录应收敛等待重试的页面"
     );
 }
 
@@ -1082,6 +1203,46 @@ fn homework_updates(harness: &mut Harness) -> Vec<HomeworkUpdate> {
             _ => None,
         })
         .collect()
+}
+
+#[test]
+fn attendance_term_propagates_session_expiry_instead_of_falling_back() {
+    // 考勤已登入，但學期端點回傳登入頁（會話過期）：錯誤應向上傳播，
+    // 而非靜默回傳 None，讓作業清單悄悄退回記憶中的學期。
+    let mut harness = harness(|request: &HttpRequest| {
+        if request.url.ends_with("/timetable/semesters") {
+            Ok(HttpResponse::new(
+                200,
+                "https://login.xjtu.edu.cn/cas/login?service=attendance",
+                login_page().as_bytes(),
+            ))
+        } else {
+            panic!("未预期的请求：{}", request.url)
+        }
+    });
+    harness.login_both_sites();
+
+    let err = harness
+        .worker
+        .attendance_term()
+        .expect_err("会话失效应向上传播");
+    assert!(err.needs_relogin(), "应触发重新登录，实际：{err}");
+}
+
+#[test]
+fn attendance_term_is_none_when_not_logged_in() {
+    // 未登入考勤时不應發出任何請求，也不應出錯。
+    let mut harness = harness(|request: &HttpRequest| panic!("未应发起请求：{}", request.url));
+    let term = harness.worker.attendance_term().expect("未登录不应出错");
+    assert!(term.is_none(), "未登录时不应有学期");
+}
+
+#[test]
+fn parse_date_reports_category_without_echoing_server_value() {
+    let err = super::parse_date("<html>2026/09/07</html>").expect_err("应拒绝非 YYYY-MM-DD");
+    let message = err.to_string();
+    assert!(!message.contains("2026/09/07"), "不得夹带原始值：{message}");
+    assert!(!message.contains("<html>"), "不得夹带原始值：{message}");
 }
 
 #[test]
@@ -2149,7 +2310,7 @@ fn clears_captcha_file_when_login_job_fails() {
     // 沒有進行中的登入流程：提交驗證碼會立即失敗（屬登入類任務）。
     harness
         .worker
-        .handle_control(Job::SubmitCaptcha("1234".to_owned()));
+        .handle_control(Job::SubmitCaptcha("1234".into()));
 
     assert!(!path.exists(), "登入任務失敗後應刪除驗證碼檔案");
     let events = harness.drain_events();

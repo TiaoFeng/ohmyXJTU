@@ -81,6 +81,27 @@ fn reports_business_errors() {
 }
 
 #[test]
+fn required_total_rejects_missing_or_non_integer_totals() {
+    // 缺 `total`／字串／null：明確協定錯誤，不得靜默歸零（否則只取第一頁、
+    // 流水被悄悄截斷）。
+    for body in [
+        r#"{"rows":[]}"#,
+        r#"{"rows":[],"total":"3"}"#,
+        r#"{"rows":[],"total":null}"#,
+    ] {
+        let data: serde_json::Value = serde_json::from_str(body).expect("解析 JSON");
+        let err = required_total(&data, "查询考勤流水").expect_err("应拒绝无效 total");
+        assert!(matches!(err, AppError::Protocol(_)), "应为协定错误：{err}");
+    }
+
+    let data: serde_json::Value = serde_json::from_str(r#"{"total":5}"#).expect("解析 JSON");
+    assert_eq!(
+        required_total(&data, "查询考勤流水").expect("整数 total"),
+        5
+    );
+}
+
+#[test]
 fn computes_total_pages_for_flow_page() {
     let page = FlowPage {
         records: Vec::new(),

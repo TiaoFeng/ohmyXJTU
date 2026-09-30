@@ -300,6 +300,29 @@ fn login_failure_shows_failed_overlay() {
 }
 
 #[test]
+fn late_login_failure_does_not_reopen_dismissed_overlay() {
+    // 使用者已在失敗畫面按 Esc 關閉覆蓋層；此時若又收到先前排隊的登入失敗
+    // 事件，彈窗不得無預警重現。
+    let mut app = app();
+    app.set_screen(Screen::Main);
+    app.login = None;
+
+    apply_event(
+        &mut app,
+        Event::Failed {
+            what: "登录".to_owned(),
+            message: "网络连接失败".to_owned(),
+            target: FailedTarget::Login,
+        },
+    );
+
+    assert!(
+        app.login.is_none(),
+        "已关闭的登录弹窗不应被迟到的事件重新弹出"
+    );
+}
+
+#[test]
 fn settings_failure_keeps_popup_and_draft() {
     let mut app = app();
     app.set_screen(Screen::Settings(SettingsState::open(AccessPolicy::Auto)));

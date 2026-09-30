@@ -540,7 +540,7 @@ fn failed_screen_opens_credentials_form() {
     press(&mut app, &jobs, KeyCode::Char('e'));
 
     let form = credentials_form(&app);
-    assert_eq!(form.kind, FormKind::LoginRetry);
+    assert!(matches!(form.kind, FormKind::LoginRetry(_)));
     assert!(
         form.fields.iter().all(|field| field.value.is_empty()),
         "重新输入时字段必须为空"
@@ -556,6 +556,39 @@ fn failed_screen_opens_credentials_form() {
             assert_eq!(message, "登录失败：用户名或密码错误");
         }
         other => panic!("应回到失败画面，实际为 {other:?}"),
+    }
+}
+
+/// 由思源學堂的失敗畫面重新輸入帳密時，任務必須帶回思源學堂。
+#[test]
+fn failed_lms_screen_retries_with_the_lms_site() {
+    let (jobs, rx) = channel();
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.login = Some(Box::new(LoginScreen::Failed {
+        site: crate::session::SiteKind::Lms,
+        message: "登录失败：用户名或密码错误".to_owned(),
+    }));
+
+    // 表單本身也帶著同一個站點。
+    press(&mut app, &jobs, KeyCode::Char('e'));
+    assert!(matches!(
+        credentials_form(&app).kind,
+        FormKind::LoginRetry(crate::session::SiteKind::Lms)
+    ));
+
+    type_text(&mut app, &jobs, "3120000001");
+    press(&mut app, &jobs, KeyCode::Tab);
+    type_text(&mut app, &jobs, "pw-12345");
+    press(&mut app, &jobs, KeyCode::Tab);
+    type_text(&mut app, &jobs, "secret123");
+    press(&mut app, &jobs, KeyCode::Enter);
+
+    match rx.try_recv() {
+        Ok(Job::RetryWithAccount { site, .. }) => {
+            assert_eq!(site, crate::session::SiteKind::Lms)
+        }
+        other => panic!("应为凭证重输任务，实际为 {other:?}"),
     }
 }
 
@@ -950,9 +983,11 @@ fn credentials_form_validates_before_sending() {
 
     match rx.try_recv() {
         Ok(Job::RetryWithAccount {
+            site,
             credentials,
             passphrase,
         }) => {
+            assert_eq!(site, crate::session::SiteKind::Attendance);
             assert_eq!(credentials.username, "3120000001");
             assert_eq!(credentials.password, "pw-12345");
             assert_eq!(passphrase, "secret123");

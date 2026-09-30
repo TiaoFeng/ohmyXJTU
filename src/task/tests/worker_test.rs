@@ -97,6 +97,9 @@ fn fake_flow(
     }
 }
 
+/// 假 HTTP 伺服器的回應函式（可共用給多個假客戶端實例）。
+type SharedResponder = Arc<dyn Fn(&HttpRequest) -> AppResult<HttpResponse> + Send + Sync>;
+
 /// 測試用工作執行緒：以假客戶端取代真實網路與資料目錄。
 struct Harness {
     worker: Worker,
@@ -112,6 +115,24 @@ impl Harness {
     fn new(
         responder: impl Fn(&HttpRequest) -> AppResult<HttpResponse> + Send + Sync + 'static,
     ) -> Self {
+        Self::build(responder, None)
+    }
+
+    /// 以「每次重建後端都換新客戶端」的工廠建立，並以 `built` 觀察重建次數。
+    ///
+    /// 用於驗證換帳號／回復舊帳號時確實換掉了 cookie jar（假客戶端本身不存
+    /// cookie，只能以「是否換了實例」來觀察）。
+    fn rebuildable(
+        responder: impl Fn(&HttpRequest) -> AppResult<HttpResponse> + Send + Sync + 'static,
+        built: Arc<AtomicUsize>,
+    ) -> Self {
+        Self::build(responder, Some(built))
+    }
+
+    fn build(
+        responder: impl Fn(&HttpRequest) -> AppResult<HttpResponse> + Send + Sync + 'static,
+        built: Option<Arc<AtomicUsize>>,
+    ) -> Self {
         let dir = TempDir::new().expect("建立暂存目录");
         let vault = Vault::at(dir.path().join("credentials.vault"));
 
@@ -121,12 +142,40 @@ impl Harness {
             ..Config::default()
         };
 
-        let client = Arc::new(FakeClient::with_responder(responder));
-        let direct: Arc<dyn HttpClient> = client.clone();
-        let webvpn: Arc<dyn HttpClient> = client;
-
         let credentials = Credentials::new("3120000001", "old-password");
-        let mut session = SessionManager::with_clients(&config, direct, webvpn);
+        let mut session = match built {
+            None => {
+                let client = Arc::new(FakeClient::with_responder(responder));
+                let direct: Arc<dyn HttpClient> = client.clone();
+                let webvpn: Arc<dyn HttpClient> = client;
+                SessionManager::with_clients(&config, direct, webvpn)
+            }
+            Some(built) => {
+                let responder: SharedResponder = Arc::new(responder);
+                let direct_responder = Arc::clone(&responder);
+                let webvpn_responder = Arc::clone(&responder);
+                let direct_count = Arc::clone(&built);
+                let webvpn_count = Arc::clone(&built);
+                SessionManager::with_client_factories(
+                    &config,
+                    Arc::new(move || {
+                        direct_count.fetch_add(1, Ordering::SeqCst);
+                        let responder = Arc::clone(&direct_responder);
+                        Ok(Arc::new(FakeClient::with_responder(move |request| {
+                            responder(request)
+                        })) as Arc<dyn HttpClient>)
+                    }),
+                    Arc::new(move || {
+                        webvpn_count.fetch_add(1, Ordering::SeqCst);
+                        let responder = Arc::clone(&webvpn_responder);
+                        Ok(Arc::new(FakeClient::with_responder(move |request| {
+                            responder(request)
+                        })) as Arc<dyn HttpClient>)
+                    }),
+                )
+                .expect("建立会话管理器")
+            }
+        };
         session.register(Box::new(AttendanceSite));
         session.register(Box::new(LmsSite));
         session.set_credentials(credentials.clone());
@@ -237,6 +286,7 @@ fn rejects_wrong_passphrase_without_touching_the_vault() {
     let mut harness = harness(fake_flow(0));
 
     let result = harness.dispatch(Job::RetryWithAccount {
+        site: SiteKind::Attendance,
         credentials: Credentials::new("3120000002", "new-password"),
         passphrase: "wrong-passphrase".into(),
     });
@@ -320,6 +370,7 @@ fn saves_credentials_only_after_login_succeeds() {
 
     harness
         .dispatch(Job::RetryWithAccount {
+            site: SiteKind::Attendance,
             credentials: Credentials::new("3120000002", "new-password"),
             passphrase: "secret123".into(),
         })
@@ -367,6 +418,7 @@ fn keeps_old_credentials_when_the_new_ones_are_rejected() {
 
     harness
         .dispatch(Job::RetryWithAccount {
+            site: SiteKind::Attendance,
             credentials: Credentials::new("3120000002", "wrong-password"),
             passphrase: "secret123".into(),
         })
@@ -2373,6 +2425,182 @@ fn unlock_tightens_loose_vault_permissions() {
     assert_eq!(mode(&path), 0o600, "权限应收紧为 0600");
 }
 
+/// 帳號切換失败後必須回到「乾淨的舊帳號會話」。
+///
+/// 只還原帳密不夠：新帳號在登入過程中可能已在伺服器端留下登入態（cookie），
+/// 不重建後端的話，之後任何一次登入都會被判定為「已登入」，畫面就會出現
+/// 新帳號的資料。
+#[test]
+fn rollback_after_a_failed_switch_rebuilds_the_session() {
+    let built = Arc::new(AtomicUsize::new(0));
+    let harness_built = Arc::clone(&built);
+    let mut harness = Harness::rebuildable(
+        |request: &HttpRequest| match request.url.as_str() {
+            rsa::PUBLIC_KEY_URL => Ok(HttpResponse::new(
+                200,
+                rsa::PUBLIC_KEY_URL,
+                public_key_pem(),
+            )),
+            attendance::LOGIN_URL => Ok(HttpResponse::new(200, ATTENDANCE_POST, login_page())),
+            // CAS 登入成功（在伺服器端建立新帳號的登入態）……
+            ATTENDANCE_POST => Ok(HttpResponse::new(200, ATTENDANCE_TARGET, TARGET_BODY)),
+            // ……但業務 token 交換失敗。
+            ATTENDANCE_EXCHANGE => Ok(HttpResponse::new(
+                500,
+                ATTENDANCE_EXCHANGE,
+                "<html>维护</html>",
+            )),
+            other => panic!("未预期的请求：{other}"),
+        },
+        harness_built,
+    );
+    harness.seed_vault("secret123", &Credentials::new("3120000001", "old-password"));
+    assert_eq!(built.load(Ordering::SeqCst), 2, "建立時兩個後端各建一次");
+
+    let result = harness.dispatch(Job::ChangeAccount {
+        passphrase: "secret123".into(),
+        credentials: Credentials::new("3120000002", "new-password"),
+    });
+
+    assert!(result.is_err(), "收尾失敗的換帳號必須失敗");
+    assert_eq!(
+        built.load(Ordering::SeqCst),
+        6,
+        "換帳號重建一次、回復舊帳號又重建一次：新帳號的 cookie 不得沿用"
+    );
+    assert!(harness.worker.flow.is_none(), "進行中的登入流程應一併作廢");
+    assert_eq!(
+        harness
+            .worker
+            .credentials
+            .as_ref()
+            .map(|credentials| credentials.username.clone()),
+        Some("3120000001".to_owned()),
+        "記憶體中的憑證應還原為舊帳號"
+    );
+    let stored = harness.vault.load("secret123").expect("读取凭据");
+    assert_eq!(
+        stored.username, "3120000001",
+        "保險庫不得被未驗證的憑證覆蓋"
+    );
+}
+
+/// 「重新輸入帳密」必須沿用原本失敗的站點。
+#[test]
+fn retry_with_account_targets_the_site_that_failed() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let tracker = Arc::clone(&seen);
+    let mut harness = harness(move |request: &HttpRequest| {
+        let url = request.url.as_str();
+        tracker.lock().expect("lock").push(url.to_owned());
+        match url {
+            rsa::PUBLIC_KEY_URL => Ok(HttpResponse::new(
+                200,
+                rsa::PUBLIC_KEY_URL,
+                public_key_pem(),
+            )),
+            lms::LOGIN_URL => Ok(HttpResponse::new(200, LMS_POST, login_page())),
+            LMS_POST => Ok(HttpResponse::new(200, LMS_HOME, TARGET_BODY)),
+            LMS_HOME => Ok(HttpResponse::new(200, LMS_HOME, TARGET_BODY)),
+            other => panic!("思源学堂重試不應连到其他站点：{other}"),
+        }
+    });
+
+    harness
+        .dispatch(Job::RetryWithAccount {
+            site: SiteKind::Lms,
+            credentials: Credentials::new("3120000002", "new-password"),
+            passphrase: "secret123".into(),
+        })
+        .expect("思源学堂的重新登入应当成功");
+
+    let urls = seen.lock().expect("lock").clone();
+    assert!(
+        urls.iter().any(|url| url == LMS_POST),
+        "登入必須送到思源学堂：{urls:?}"
+    );
+    assert!(
+        !urls.iter().any(|url| url.contains("bk-kq.xjtu.edu.cn")),
+        "不得因為重試而改走考勤系统：{urls:?}"
+    );
+    assert_eq!(
+        harness.worker.login_site,
+        Some(SiteKind::Lms),
+        "重試站點應記為思源学堂"
+    );
+    let stored = harness.vault.load("secret123").expect("读取凭据");
+    assert_eq!(stored.username, "3120000002", "驗證成功後應寫回新憑證");
+}
+
+/// 設定表單重複輸入**同一帳號**的錯誤密碼時，失敗計數必須累積。
+///
+/// 修復前每次嘗試都無條件清零，`failN` 恆為 0，伺服器要求的圖片驗證碼
+/// 永遠不會出現。
+#[test]
+fn change_account_keeps_failure_count_for_the_same_account() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let recorder = Arc::clone(&seen);
+    let mut harness = harness(move |request: &HttpRequest| {
+        let url = request.url.as_str();
+        if url == rsa::PUBLIC_KEY_URL {
+            return Ok(HttpResponse::new(
+                200,
+                rsa::PUBLIC_KEY_URL,
+                public_key_pem(),
+            ));
+        }
+        if url == attendance::LOGIN_URL {
+            return Ok(HttpResponse::new(200, ATTENDANCE_POST, login_page()));
+        }
+        if let Some(fail_n) = request.form_field("failN") {
+            recorder.lock().expect("lock").push(fail_n.to_owned());
+            // 帳密被拒。
+            return Ok(HttpResponse::new(401, ATTENDANCE_POST, "<html></html>"));
+        }
+        // 驗證碼圖片端點（第四次嘗試才會走到）刻意失敗：不需要寫入真實資料目錄。
+        Err(AppError::network_kind(
+            NetworkKind::Connect,
+            "连接失败".to_owned(),
+        ))
+    });
+
+    let attempt = |harness: &mut Harness| {
+        harness.dispatch(Job::ChangeAccount {
+            passphrase: "secret123".into(),
+            // 與目前生效的憑證同帳號。
+            credentials: Credentials::new("3120000001", "wrong-password"),
+        })
+    };
+
+    for _ in 0..3 {
+        attempt(&mut harness).expect("帳密被拒屬於預期結果");
+    }
+
+    assert_eq!(
+        seen.lock().expect("lock").as_slice(),
+        ["0", "1", "2"],
+        "同帳號重複失敗必須累積（修復前每次都被清零）"
+    );
+    assert_eq!(
+        harness
+            .worker
+            .login_failures
+            .values()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![3],
+        "失敗計數必須保留"
+    );
+
+    // 第四次：已達門檻，不再提交帳密，改為要求圖片驗證碼。
+    assert!(attempt(&mut harness).is_err(), "達到門檻後不應再提交帳密");
+    assert_eq!(
+        seen.lock().expect("lock").len(),
+        3,
+        "第四次嘗試不得再送出帳密"
+    );
+}
+
 /// 憑證檔權限（僅 Unix 有權限位）。
 #[cfg(unix)]
 fn mode(path: &std::path::Path) -> u32 {
@@ -2489,6 +2717,7 @@ fn retry_with_account_always_verifies_over_the_network() {
 
     harness
         .dispatch(Job::RetryWithAccount {
+            site: SiteKind::Attendance,
             credentials: Credentials::new("3120000002", "new-password"),
             passphrase: "secret123".into(),
         })

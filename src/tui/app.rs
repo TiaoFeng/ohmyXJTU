@@ -381,8 +381,8 @@ pub enum FormKind {
     Setup,
     /// 解鎖保險庫。
     Unlock,
-    /// 登入失敗後重新輸入帳號密碼。
-    LoginRetry,
+    /// 登入失敗後重新輸入帳號密碼（附原失敗站點）。
+    LoginRetry(SiteKind),
     /// 修改帳號。
     ChangeAccount,
     /// 修改加密口令。
@@ -446,9 +446,11 @@ impl FormState {
     }
 
     /// 登入失敗後重新輸入帳號密碼（密碼與口令皆遮蔽，欄位一律留空）。
-    pub fn login_retry() -> Self {
+    ///
+    /// `site` 為原本失敗的站點：重試沿用同一個站點，不被另一個站點的可達性牽制。
+    pub fn login_retry(site: SiteKind) -> Self {
         Self::new(
-            FormKind::LoginRetry,
+            FormKind::LoginRetry(site),
             [("账号", false), ("密码", true), ("加密口令", true)]
                 .into_iter()
                 .map(|(label, masked)| FormField {
@@ -501,7 +503,7 @@ impl FormState {
         let sensitive: &[usize] = match self.kind {
             FormKind::Setup => &[0, 1, 3, 4],
             FormKind::Unlock => &[0],
-            FormKind::LoginRetry => &[1, 2],
+            FormKind::LoginRetry(_) => &[1, 2],
             FormKind::ChangeAccount => &[0, 2, 3],
             FormKind::ChangePassphrase => &[0, 1, 2],
         };

@@ -247,6 +247,22 @@ fn plan_redirect(
     if !trusted(host) {
         return Err(redirect_error("重定向到学校网域之外的主机（已中止）"));
     }
+    // WebVPN 代理網址的外層主機都是閘道，真正的目標藏在路徑裡：只檢查外層
+    // 會讓「代理到 http:// 或校外主機」的重導通過，查詢參數（可能含 ticket）
+    // 也會被一起轉送。內層目標必須是 HTTPS 的學校主機，且必須解得開。
+    if host.eq_ignore_ascii_case(webvpn::WEBVPN_HOST)
+        && let Some(target) = webvpn::proxied_target(next.path())
+    {
+        if target.scheme != "https" {
+            return Err(redirect_error("WebVPN 重定向的代理目标不是 HTTPS"));
+        }
+        let inner = target
+            .host
+            .ok_or_else(|| redirect_error("WebVPN 重定向的代理目标无法解析"))?;
+        if !webvpn::is_school_host(&inner) {
+            return Err(redirect_error("WebVPN 重定向的代理目标位于学校网域之外"));
+        }
+    }
 
     let same_origin = same_origin(previous, &next);
     // 307/308 會保留方法與主體：跨來源重送等同把帳密、簡訊碼或業務憑證

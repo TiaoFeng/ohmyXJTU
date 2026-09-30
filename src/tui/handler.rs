@@ -257,7 +257,7 @@ fn build_job(kind: FormKind, values: &FormValues) -> Result<Job, String> {
                 passphrase: values.passphrase.clone(),
             })
         }
-        FormKind::LoginRetry => {
+        FormKind::LoginRetry(site) => {
             if values.username.trim().is_empty() {
                 return Err("账号不能为空".to_owned());
             }
@@ -268,6 +268,7 @@ fn build_job(kind: FormKind, values: &FormValues) -> Result<Job, String> {
                 return Err("请输入加密口令".to_owned());
             }
             Ok(Job::RetryWithAccount {
+                site,
                 credentials: Credentials::new(values.username.trim(), values.password.as_str()),
                 passphrase: values.passphrase.clone(),
             })
@@ -389,7 +390,7 @@ impl FormValues {
                 passphrase: secret_at(0),
                 ..Self::default()
             },
-            FormKind::LoginRetry => Self {
+            FormKind::LoginRetry(_) => Self {
                 username: at(0),
                 password: secret_at(1),
                 passphrase: secret_at(2),
@@ -548,7 +549,7 @@ fn open_credentials_form(app: &mut App, site: SiteKind) {
     let message = login_message(app);
     app.login = Some(Box::new(LoginScreen::Credentials {
         site,
-        form: FormState::login_retry(),
+        form: FormState::login_retry(site),
         message,
     }));
 }

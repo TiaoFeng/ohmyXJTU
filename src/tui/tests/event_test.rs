@@ -495,7 +495,7 @@ fn credentials_app(typed: &str) -> App {
     app.set_screen(Screen::Main);
     app.login = Some(Box::new(LoginScreen::Credentials {
         site: crate::session::SiteKind::Attendance,
-        form: FormState::login_retry(),
+        form: FormState::login_retry(crate::session::SiteKind::Attendance),
         message: "登录失败：用户名或密码错误".to_owned(),
     }));
     if let Some(LoginScreen::Credentials { form, .. }) = app.login.as_deref_mut() {

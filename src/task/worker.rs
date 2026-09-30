@@ -80,6 +80,8 @@ pub enum Job {
     },
     /// 以重新輸入的帳號密碼重試登入，成功後才寫入保險庫。
     RetryWithAccount {
+        /// 原本失敗的站點（重試沿用同一個站點）。
+        site: SiteKind,
         /// 使用者重新輸入的帳號密碼。
         credentials: Credentials,
         /// 加密口令（用於登入成功後更新保險庫）。
@@ -812,12 +814,11 @@ impl Worker {
     /// 登入類任務對應的站點（介面據此決定重試哪個站點）。
     fn login_site_of(&self, job: &Job) -> Option<SiteKind> {
         match job {
-            Job::RetryLogin { site } => Some(*site),
+            Job::RetryLogin { site } | Job::RetryWithAccount { site, .. } => Some(*site),
             Job::SubmitCaptcha(_)
             | Job::RefreshCaptcha
             | Job::SendMfaCode
             | Job::VerifyMfaCode(_)
-            | Job::RetryWithAccount { .. }
             | Job::CancelLogin => self.login_site,
             _ => None,
         }
@@ -865,9 +866,10 @@ impl Worker {
             Job::VerifyMfaCode(code) => self.verify_mfa_code(&code),
             Job::RetryLogin { site } => self.retry_login(site),
             Job::RetryWithAccount {
+                site,
                 credentials,
                 passphrase,
-            } => self.retry_with_account(&passphrase, credentials),
+            } => self.retry_with_account(site, &passphrase, credentials),
             Job::ChangeAccount {
                 passphrase,
                 credentials,
@@ -928,8 +930,8 @@ impl Worker {
         self.relogin_attempts = 0;
         self.pending_data.clear();
         self.cache.clear();
-        // 換帳號：失敗計數屬於舊帳號，一併清除。
-        self.login_failures.clear();
+        // 失敗計數以 (帳號, 後端) 為鍵保存：換了帳號自然從 0 起算，
+        // 同一帳號重試則保留——否則伺服器要求的驗證碼永遠不會出現。
         self.login_failure_key = None;
         self.emit(Event::SessionsCleared {
             account_changed: true,
@@ -1100,22 +1102,38 @@ impl Worker {
         }
     }
 
-    /// 丟棄待存憑證，並把記憶體中的憑證還原為嘗試新憑證前的版本。
+    /// 丟棄待存憑證，還原舊憑證，並作廢切換期間建立的新會話。
     ///
-    /// 新憑證只有在登入成功後才寫入保險庫；取消或憑證被拒時，記憶體中的
-    /// 憑證必須回到保險庫仍保存的舊憑證，否則之後的自動重登會拿一組從未
-    /// 驗證、也沒被保存的憑證去登入。
+    /// 新憑證只有在登入成功後才寫入保險庫；取消、憑證被拒或流程失敗時，
+    /// 記憶體中的憑證必須回到保險庫仍保存的舊憑證，否則之後的自動重登會拿
+    /// 一組從未驗證、也沒被保存的憑證去登入。
+    ///
+    /// 只還原帳密並不夠：新帳號在登入過程中可能已在伺服器端留下登入態
+    ///（cookie）。不重建後端的話，之後任何一次登入都會被判定為「已登入」
+    /// 而略過帳密提交，畫面就會出現新帳號的資料。
     fn discard_pending_vault(&mut self) {
         let Some(pending) = self.pending_vault.take() else {
             return;
         };
-        let Some(previous) = pending.previous else {
-            return;
-        };
-        if let Some(session) = self.session.as_mut() {
-            session.set_credentials(previous.clone());
+        // 進行中的登入流程屬於已放棄的切換：一併作廢。
+        self.flow = None;
+        if let Some(previous) = pending.previous {
+            if let Some(session) = self.session.as_mut() {
+                session.set_credentials(previous.clone());
+            }
+            self.credentials = Some(previous);
         }
-        self.credentials = Some(previous);
+        // 重建後端（新的 cookie jar）以丟棄新帳號留下的登入態；失敗時至少
+        // 留下提示，不靜默帶著舊 cookie 繼續。
+        let reset = self.session.as_mut().map(|session| session.reset_session());
+        if let Some(Err(err)) = reset {
+            self.emit(Event::Notice(format!("无法重置会话：{err}")));
+        }
+        // 切換期間取得的資料與進行中的任務都屬於新帳號：一併作廢。
+        // （排隊中的資料任務不在此列：它們會以還原後的帳號重新執行。）
+        self.generation += 1;
+        self.cache.clear();
+        self.login_failure_key = None;
     }
 
     /// 記錄使用者已同意的用户协议版本；寫入失敗時不變更已保存的版本。
@@ -1342,7 +1360,15 @@ impl Worker {
     }
 
     /// 以使用者重新輸入的憑證重試登入；先驗證口令，登入成功後才寫入保險庫。
-    fn retry_with_account(&mut self, passphrase: &str, credentials: Credentials) -> AppResult<()> {
+    ///
+    /// `site` 為原本失敗的站點：重試不應被另一個站點的可達性牽制
+    ///（例如思源學堂失敗卻要去連考勤系統）。
+    fn retry_with_account(
+        &mut self,
+        site: SiteKind,
+        passphrase: &str,
+        credentials: Credentials,
+    ) -> AppResult<()> {
         // 口令錯誤時回報 [`AppError::WrongPassphrase`]，舊憑證不受影響。
         self.vault.load(passphrase)?;
 
@@ -1350,14 +1376,9 @@ impl Worker {
         self.relogin_attempts = 0;
         // 先記下舊憑證，取消或憑證被拒時才能還原（見 `discard_pending_vault`）。
         let previous = self.credentials.clone();
-        // 重新輸入的是同一帳號時保留失敗計數（伺服器以連續失敗決定是否要求
-        // 驗證碼）；換成別的帳號才重設。
-        let same_account = previous
-            .as_ref()
-            .is_some_and(|previous| previous.username == credentials.username);
-        if !same_account {
-            self.login_failures.clear();
-        }
+        // 失敗計數以 (帳號, 後端) 為鍵保存：重複輸入同一帳號（含目前生效的仍是
+        // 舊帳號的情形）必須保留計數，否則驗證碼永遠不會出現；換成別的帳號時
+        // 它的鍵自然由 0 起算。
         self.login_failure_key = None;
         // 完整走一次帳號切換：重建後端（丟棄舊 cookie）並換用新憑證，
         // 否則站點仍在登入狀態時會直接進入成功分支，完全跳過網路驗證。
@@ -1379,7 +1400,7 @@ impl Worker {
             credentials,
             previous,
         });
-        let result = self.begin_login(SiteKind::Attendance, None);
+        let result = self.begin_login(site, None);
         if result.is_err() {
             // 同 `change_account`：流程連開始都做不到時，待存憑證必須作廢。
             self.discard_pending_vault();

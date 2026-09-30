@@ -116,7 +116,7 @@ fn field_layout_uses_display_width() {
 
 #[test]
 fn draws_form_with_cursor_at_value_column() {
-    let mut form = FormState::login_retry();
+    let mut form = FormState::login_retry(crate::session::SiteKind::Attendance);
     form.focus = 0;
     form.fields[0].value.set("3120000001");
 
@@ -147,7 +147,7 @@ fn draws_form_with_cursor_at_value_column() {
 
 #[test]
 fn masks_sensitive_values_in_form() {
-    let mut form = FormState::login_retry();
+    let mut form = FormState::login_retry(crate::session::SiteKind::Attendance);
     form.focus = 1;
     form.fields[1].value.set("pw-12345");
 
@@ -168,7 +168,7 @@ fn masks_sensitive_values_in_form() {
 
 #[test]
 fn long_value_scrolls_and_keeps_cursor_inside_field() {
-    let mut form = FormState::login_retry();
+    let mut form = FormState::login_retry(crate::session::SiteKind::Attendance);
     form.focus = 0;
     form.fields[0].value.set("x".repeat(80));
 
@@ -195,7 +195,7 @@ fn long_value_scrolls_and_keeps_cursor_inside_field() {
 fn draws_credentials_form_with_previous_failure_note() {
     let screen = LoginScreen::Credentials {
         site: crate::session::SiteKind::Attendance,
-        form: FormState::login_retry(),
+        form: FormState::login_retry(crate::session::SiteKind::Attendance),
         message: "登录失败：用户名或密码错误".to_owned(),
     };
 

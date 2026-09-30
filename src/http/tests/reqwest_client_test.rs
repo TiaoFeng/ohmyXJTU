@@ -574,6 +574,84 @@ fn plan_redirect_rules_for_request_bodies() {
     );
 }
 
+/// WebVPN 重導必須同時驗證**代理目標**，不能只看外層閘道網址。
+///
+/// 外層主機永遠是 `webvpn.xjtu.edu.cn`；只檢查外層會讓「代理到 http:// 或
+/// 校外主機」的重導通過，查詢參數（可能含 ticket）也會被一起轉送。
+#[test]
+fn plan_redirect_validates_the_webvpn_proxy_target() {
+    use super::{is_trusted_redirect_host, plan_redirect};
+    use crate::http::Method;
+
+    let previous =
+        Url::parse(&webvpn::to_webvpn_url("https://bk-kq.xjtu.edu.cn/sa/current").expect("改寫"))
+            .expect("解析");
+    assert_eq!(
+        previous.host_str(),
+        Some(webvpn::WEBVPN_HOST),
+        "測試前提：外層主機是閘道"
+    );
+
+    // 代理到校內主機（HTTPS）：允許，且同一代理目標算同源。
+    let allowed = webvpn::to_webvpn_url("https://bk-kq.xjtu.edu.cn/sa/next").expect("改寫");
+    let plan = plan_redirect(
+        &previous,
+        &allowed,
+        302,
+        Method::Get,
+        false,
+        1,
+        is_trusted_redirect_host,
+    )
+    .expect("代理校內主機應可跟隨");
+    assert!(plan.keep_headers, "同一代理目標應保留自訂標頭");
+
+    // 代理到校外主機：拒絕。
+    let foreign = webvpn::to_webvpn_url("https://evil.example/steal").expect("改寫");
+    let err = plan_redirect(
+        &previous,
+        &foreign,
+        302,
+        Method::Get,
+        false,
+        1,
+        is_trusted_redirect_host,
+    )
+    .expect_err("代理目標在校外時應拒絕");
+    assert!(
+        err.to_string().contains("代理目标位于学校网域之外"),
+        "{err}"
+    );
+
+    // 代理到 http（內層降級）：拒絕。
+    let insecure = webvpn::to_webvpn_url("http://bk-kq.xjtu.edu.cn/sa").expect("改寫");
+    let err = plan_redirect(
+        &previous,
+        &insecure,
+        302,
+        Method::Get,
+        false,
+        1,
+        is_trusted_redirect_host,
+    )
+    .expect_err("代理目標非 HTTPS 時應拒絕");
+    assert!(err.to_string().contains("代理目标不是 HTTPS"), "{err}");
+
+    // 代理目標解不開：身分無法確認，拒絕。
+    let broken = "https://webvpn.xjtu.edu.cn/https/77726476706e69737468656265737421zzzz/x";
+    let err = plan_redirect(
+        &previous,
+        broken,
+        302,
+        Method::Get,
+        false,
+        1,
+        is_trusted_redirect_host,
+    )
+    .expect_err("無法解析的代理目標應拒絕");
+    assert!(err.to_string().contains("代理目标无法解析"), "{err}");
+}
+
 /// 重定向目的主機的信任判斷。
 #[test]
 fn trusted_redirect_hosts() {

@@ -474,6 +474,8 @@ fn handle_login(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
                 KeyCode::Char('r') if input.is_empty() => {
                     action = Some(LoginAction::RefreshCaptcha);
                 }
+                // 驗證碼填錯後仍可放棄本次登入（換帳號時才能拿回舊帳號）。
+                KeyCode::Esc => action = Some(LoginAction::Dismiss),
                 KeyCode::Char('q') if input.is_empty() => action = Some(LoginAction::Quit),
                 _ => edit_line(input, key),
             },
@@ -486,6 +488,8 @@ fn handle_login(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
                     }
                 }
                 KeyCode::Char('s') if input.is_empty() => action = Some(LoginAction::SendMfaCode),
+                // 驗證碼填錯後仍可放棄本次登入（換帳號時才能拿回舊帳號）。
+                KeyCode::Esc => action = Some(LoginAction::Dismiss),
                 KeyCode::Char('q') if input.is_empty() => action = Some(LoginAction::Quit),
                 _ => edit_line(input, key),
             },

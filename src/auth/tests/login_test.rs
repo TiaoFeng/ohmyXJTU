@@ -304,14 +304,21 @@ fn clears_captcha_after_failure() {
     let _ = driver.resume();
     let _ = driver.resume();
     assert_eq!(driver.resume().unwrap(), LoginReply::NeedCaptcha);
+    // 純帳密失敗：不帶驗證碼，因此後續失敗不屬於「可重試的驗證碼錯誤」。
+    assert!(!driver.last_attempt_submitted_captcha());
 
     // 驗證碼錯誤 → 下一次仍必須重新輸入，不能沿用舊碼。
     assert!(matches!(
         driver.submit_captcha("wrong").unwrap(),
         LoginReply::Fail { .. }
     ));
+    // 這次確實送出了驗證碼：呼叫端可據此保留登入流程讓使用者重輸。
+    assert!(driver.last_attempt_submitted_captcha());
     assert_eq!(driver.resume().unwrap(), LoginReply::NeedCaptcha);
     assert_eq!(driver.submit_captcha("right").unwrap(), LoginReply::Success);
+    // 換帳號／重新登入後不得沿用上一次的判定。
+    let _ = driver.start(&credentials(), AccountType::Undergraduate);
+    assert!(!driver.last_attempt_submitted_captcha());
 }
 
 #[test]

@@ -210,6 +210,18 @@ fn apply_event(app: &mut App, event: Event, jobs: &Sender<Job>) {
         Event::LoginFailed { site, message } => {
             set_login_error(app, site, message);
         }
+        Event::VerificationRetry { site, message } => {
+            // 驗證碼填錯：保留原本的驗證碼／簡訊輸入畫面，讓使用者就地重輸，
+            // 不必重新輸入帳號密碼（登入流程仍在工作者端保留）。
+            match app.login.as_deref_mut() {
+                Some(LoginScreen::Mfa { input, error, .. })
+                | Some(LoginScreen::Captcha { input, error, .. }) => {
+                    input.clear();
+                    *error = Some(message);
+                }
+                _ => set_login_error(app, site, message),
+            }
+        }
         Event::LoginSucceeded { site, mode } => {
             app.login = None;
             match mode {
@@ -233,6 +245,17 @@ fn apply_event(app: &mut App, event: Event, jobs: &Sender<Job>) {
         }
         Event::SessionExpired { site } => {
             app.clear_site_mode(site);
+        }
+        Event::SessionDisabled(message) => {
+            // 會話已停用（無法建立乾淨的新會話）：回到解鎖畫面，讓使用者
+            // 重新輸入加密口令以建立一個全新的會話；此前不會再發出任何請求。
+            app.login = None;
+            app.clear_site_modes();
+            app.invalidate_data(true);
+            let mut form = FormState::unlock();
+            form.error = Some(message);
+            app.set_screen(Screen::Unlock(form));
+            app.set_message("会话已停用：请输入加密口令重新解锁");
         }
         Event::LoadingCancelled { target } => {
             // 進行中的載入被取消：解除載入中狀態，保留已取得的部分資料。

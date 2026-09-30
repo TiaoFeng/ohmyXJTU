@@ -14,6 +14,7 @@ use crate::tui::app::{
     AgreementState, App, FlowData, FormState, HomeworkData, LmsLevel, LoginScreen, NavItem, Page,
     ScheduleData, Screen, SettingsState,
 };
+use crate::tui::text::InputLine;
 
 use super::apply_event as apply_event_with_jobs;
 
@@ -661,6 +662,127 @@ fn account_change_discards_pages_and_policy_change_keeps_data() {
     );
     assert!(app.schedule.ready().is_some(), "切换模式后旧资料应保留");
     assert!(!app.homework.is_loading(), "卡住的载入状态应被解除");
+}
+
+#[test]
+fn disabled_session_returns_to_the_unlock_screen() {
+    // 無法建立乾淨的新會話時，必須清掉所有站點狀態與舊資料、關閉登入覆蓋層，
+    // 並回到解鎖畫面；在成功解鎖前不得再顯示任何舊帳號的內容。
+    let mut app = app();
+    app.set_screen(Screen::Main);
+    app.set_site_mode(SiteKind::Attendance, AccessMode::Direct);
+    app.schedule = Page::Ready(ScheduleData::default());
+    app.homework.start_loading("正在汇总作业…");
+    app.login = Some(Box::new(LoginScreen::Progress {
+        note: "正在登录考勤系统…".to_owned(),
+    }));
+
+    apply_event(
+        &mut app,
+        Event::SessionDisabled("无法建立新的会话，已停用当前会话：连接失败".to_owned()),
+    );
+
+    assert!(app.login.is_none(), "登入覆蓋層應關閉");
+    assert_eq!(app.session_label(), "未登录", "站點登入狀態應清除");
+    assert!(app.schedule.is_idle(), "停用會話後舊資料應清空");
+    assert!(app.homework.is_idle(), "卡住的載入狀態應解除");
+    match &app.screen {
+        Screen::Unlock(form) => assert!(
+            form.error
+                .as_deref()
+                .is_some_and(|error| error.contains("已停用当前会话")),
+            "解鎖表單應顯示停用原因：{:?}",
+            form.error
+        ),
+        other => panic!("應回到解鎖畫面，實際為 {other:?}"),
+    }
+    assert!(
+        app.message
+            .as_ref()
+            .is_some_and(|(text, _)| text.contains("会话已停用")),
+        "應提示使用者重新解鎖：{:?}",
+        app.message
+    );
+}
+
+#[test]
+fn verification_retry_keeps_the_mfa_input() {
+    // 簡訊驗證碼填錯：工作者仍保留登入流程，介面必須留在輸入畫面並就地顯示
+    // 錯誤，否則使用者只能重新輸入帳號密碼（甚至重收簡訊）。
+    let mut app = app();
+    app.login = Some(Box::new(LoginScreen::Mfa {
+        phone: Some("138****1234".to_owned()),
+        sent: true,
+        input: InputLine::with_value("000000"),
+        error: None,
+    }));
+
+    apply_event(
+        &mut app,
+        Event::VerificationRetry {
+            site: SiteKind::Attendance,
+            message: "短信验证码不正确，请重试".to_owned(),
+        },
+    );
+
+    match app.login.as_deref() {
+        Some(LoginScreen::Mfa {
+            sent,
+            input,
+            error,
+            phone,
+        }) => {
+            assert!(*sent, "仍應維持「已發送」狀態，不必重發簡訊");
+            assert_eq!(phone.as_deref(), Some("138****1234"));
+            assert!(input.is_empty(), "重輸前應清空輸入框：{:?}", input.value());
+            assert_eq!(error.as_deref(), Some("短信验证码不正确，请重试"));
+        }
+        other => panic!("應留在簡訊驗證畫面，實際為 {other:?}"),
+    }
+
+    // 圖片驗證碼同樣保留輸入畫面。
+    app.login = Some(Box::new(LoginScreen::Captcha {
+        path: PathBuf::from("/tmp/captcha-1.png"),
+        input: InputLine::with_value("a1b2"),
+        error: None,
+    }));
+    apply_event(
+        &mut app,
+        Event::VerificationRetry {
+            site: SiteKind::Attendance,
+            message: "验证码不正确".to_owned(),
+        },
+    );
+    match app.login.as_deref() {
+        Some(LoginScreen::Captcha { input, error, .. }) => {
+            assert!(input.is_empty(), "重輸前應清空驗證碼");
+            assert_eq!(error.as_deref(), Some("验证码不正确"));
+        }
+        other => panic!("應留在驗證碼畫面，實際為 {other:?}"),
+    }
+
+    // 沒有驗證輸入畫面時（例如流程已被取消）：退回一般的失敗提示。
+    app.login = Some(Box::new(LoginScreen::Progress {
+        note: "正在登录考勤系统…".to_owned(),
+    }));
+    apply_event(
+        &mut app,
+        Event::VerificationRetry {
+            site: SiteKind::Attendance,
+            message: "短信验证码不正确，请重试".to_owned(),
+        },
+    );
+    assert!(
+        matches!(
+            app.login.as_deref(),
+            Some(LoginScreen::Failed {
+                site: SiteKind::Attendance,
+                ..
+            })
+        ),
+        "無輸入畫面時應顯示失敗畫面：{:?}",
+        app.login
+    );
 }
 
 #[test]

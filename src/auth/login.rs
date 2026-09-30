@@ -77,6 +77,8 @@ pub struct LoginDriver {
     username: Option<String>,
     encrypted_password: Option<String>,
     captcha_code: String,
+    /// 最近一次提交是否帶了圖片驗證碼（用於判斷失敗可否重試）。
+    captcha_submitted: bool,
     final_response: Option<HttpResponse>,
     /// 本次登入是否直接沿用伺服器上既有的登入態（未提交帳密即完成）。
     used_existing_session: bool,
@@ -124,6 +126,7 @@ impl LoginDriver {
             username: None,
             encrypted_password: None,
             captcha_code: String::new(),
+            captcha_submitted: false,
             final_response: None,
             used_existing_session: false,
         })
@@ -149,6 +152,14 @@ impl LoginDriver {
     /// 換帳號時若為真，代表新憑證從未被伺服器驗證過，不得寫回保險庫。
     pub fn used_existing_session(&self) -> bool {
         self.used_existing_session
+    }
+
+    /// 最近一次提交是否帶了圖片驗證碼。
+    ///
+    /// 帶驗證碼而失敗多半是驗證碼本身填錯：使用者重輸即可，不要當成
+    /// 帳密錯誤而作廢整次登入。
+    pub fn last_attempt_submitted_captcha(&self) -> bool {
+        self.captcha_submitted
     }
 
     /// 本次登入已連續失敗的次數（伺服器以此決定是否要求圖片驗證碼）。
@@ -258,16 +269,17 @@ impl LoginDriver {
         if let Some(status) = data.get("status").and_then(serde_json::Value::as_i64)
             && status != 2
         {
-            return Err(AppError::Server {
-                code: status,
-                message: "验证码校验失败".to_owned(),
-            });
+            // 驗證碼填錯是可重試的：使用者重輸即可，不應作廢整次登入。
+            return Err(AppError::VerificationRetry(
+                "短信验证码不正确，请重试".to_owned(),
+            ));
         }
         Ok(())
     }
 
     /// 登入狀態機的驅動器。
     fn advance(&mut self) -> AppResult<LoginReply> {
+        self.captcha_submitted = false;
         if let Some(response) = self.already_authenticated.take() {
             self.has_login = true;
             self.used_existing_session = true;
@@ -312,6 +324,8 @@ impl LoginDriver {
             .as_ref()
             .map_or(String::new(), |ctx| ctx.state.clone());
 
+        // 這一步真的送出帳密（可能帶驗證碼）：記下來供失敗時判斷可否重試。
+        self.captcha_submitted = !self.captcha_code.is_empty();
         let response = self.post_form(
             &self.post_url.clone(),
             vec![

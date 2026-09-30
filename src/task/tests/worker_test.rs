@@ -17,7 +17,7 @@ use crate::domain::homework::HomeworkState;
 use crate::domain::semester::TermCode;
 use crate::error::NetworkKind;
 use crate::http::fake::{FakeClient, html, json};
-use crate::http::{HttpClient, HttpRequest, HttpResponse};
+use crate::http::{HttpClient, HttpRequest, HttpResponse, Method};
 use crate::session::AccessMode;
 use crate::sites::{attendance, lms};
 
@@ -52,14 +52,28 @@ fn public_key_pem() -> &'static str {
     })
 }
 
-/// 統一認證登入頁（含 `execution`，且關閉 MFA）。
-fn login_page() -> String {
-    r#"<html><head><script>
-    var globalConfig = eval('(' + "{\"mfaEnabled\":false}" + ')');
+/// 統一認證登入頁（含 `execution`）；`mfa_enabled` 控制是否要求簡訊驗證。
+///
+/// 注意：原始碼中的 `\"` 會原樣出現在頁面文字裡，測試裡要改 `mfaEnabled`
+/// 必須比對整段（見下方兩個包裝函式）。
+fn login_page_with(mfa_enabled: bool) -> String {
+    format!(
+        r#"<html><head><script>
+    var globalConfig = eval('(' + "{{\"mfaEnabled\":{mfa_enabled}}}" + ')');
     </script></head><body>
     <input type="hidden" name="execution" value="e1s1" />
     </body></html>"#
-        .to_owned()
+    )
+}
+
+/// 統一認證登入頁（不需要簡訊驗證）。
+fn login_page() -> String {
+    login_page_with(false)
+}
+
+/// 統一認證登入頁（需要簡訊驗證）。
+fn login_page_with_mfa() -> String {
+    login_page_with(true)
 }
 
 /// 假的站點流程；`public_key_failures` 表示前幾次公鑰請求回傳非 PEM 正文。
@@ -100,6 +114,16 @@ fn fake_flow(
 /// 假 HTTP 伺服器的回應函式（可共用給多個假客戶端實例）。
 type SharedResponder = Arc<dyn Fn(&HttpRequest) -> AppResult<HttpResponse> + Send + Sync>;
 
+/// 每次呼叫都產生一個新假客戶端的後端工廠。
+type BackendFactory = Arc<dyn Fn() -> AppResult<Arc<dyn HttpClient>> + Send + Sync>;
+
+/// 建立一個共用回應函式的假客戶端。
+fn fake_client(responder: SharedResponder) -> Arc<dyn HttpClient> {
+    Arc::new(FakeClient::with_responder(move |request| {
+        responder(request)
+    }))
+}
+
 /// 測試用工作執行緒：以假客戶端取代真實網路與資料目錄。
 struct Harness {
     worker: Worker,
@@ -115,7 +139,7 @@ impl Harness {
     fn new(
         responder: impl Fn(&HttpRequest) -> AppResult<HttpResponse> + Send + Sync + 'static,
     ) -> Self {
-        Self::build(responder, None)
+        Self::from_shared(Arc::new(responder), None)
     }
 
     /// 以「每次重建後端都換新客戶端」的工廠建立，並以 `built` 觀察重建次數。
@@ -126,13 +150,35 @@ impl Harness {
         responder: impl Fn(&HttpRequest) -> AppResult<HttpResponse> + Send + Sync + 'static,
         built: Arc<AtomicUsize>,
     ) -> Self {
-        Self::build(responder, Some(built))
+        let responder: SharedResponder = Arc::new(responder);
+        let factory_responder = Arc::clone(&responder);
+        let factory: BackendFactory = Arc::new(move || {
+            built.fetch_add(1, Ordering::SeqCst);
+            Ok(fake_client(Arc::clone(&factory_responder)))
+        });
+        Self::from_shared(responder, Some(factory))
     }
 
-    fn build(
+    /// 以「第 `fail_from` 次呼叫起必定失敗」的工廠建立。
+    ///
+    /// 用於驗證重建失敗時不會繼續沿用被污染的會話。
+    fn with_broken_factory(
         responder: impl Fn(&HttpRequest) -> AppResult<HttpResponse> + Send + Sync + 'static,
-        built: Option<Arc<AtomicUsize>>,
+        calls: Arc<AtomicUsize>,
+        fail_from: usize,
     ) -> Self {
+        let responder: SharedResponder = Arc::new(responder);
+        let factory_responder = Arc::clone(&responder);
+        let factory: BackendFactory = Arc::new(move || {
+            if calls.fetch_add(1, Ordering::SeqCst) >= fail_from {
+                return Err(AppError::config("测试注入：无法建立新的后端"));
+            }
+            Ok(fake_client(Arc::clone(&factory_responder)))
+        });
+        Self::from_shared(responder, Some(factory))
+    }
+
+    fn from_shared(responder: SharedResponder, factory: Option<BackendFactory>) -> Self {
         let dir = TempDir::new().expect("建立暂存目录");
         let vault = Vault::at(dir.path().join("credentials.vault"));
 
@@ -143,37 +189,15 @@ impl Harness {
         };
 
         let credentials = Credentials::new("3120000001", "old-password");
-        let mut session = match built {
+        let mut session = match factory {
             None => {
-                let client = Arc::new(FakeClient::with_responder(responder));
-                let direct: Arc<dyn HttpClient> = client.clone();
-                let webvpn: Arc<dyn HttpClient> = client;
+                let direct: Arc<dyn HttpClient> = fake_client(Arc::clone(&responder));
+                let webvpn: Arc<dyn HttpClient> = fake_client(responder);
                 SessionManager::with_clients(&config, direct, webvpn)
             }
-            Some(built) => {
-                let responder: SharedResponder = Arc::new(responder);
-                let direct_responder = Arc::clone(&responder);
-                let webvpn_responder = Arc::clone(&responder);
-                let direct_count = Arc::clone(&built);
-                let webvpn_count = Arc::clone(&built);
-                SessionManager::with_client_factories(
-                    &config,
-                    Arc::new(move || {
-                        direct_count.fetch_add(1, Ordering::SeqCst);
-                        let responder = Arc::clone(&direct_responder);
-                        Ok(Arc::new(FakeClient::with_responder(move |request| {
-                            responder(request)
-                        })) as Arc<dyn HttpClient>)
-                    }),
-                    Arc::new(move || {
-                        webvpn_count.fetch_add(1, Ordering::SeqCst);
-                        let responder = Arc::clone(&webvpn_responder);
-                        Ok(Arc::new(FakeClient::with_responder(move |request| {
-                            responder(request)
-                        })) as Arc<dyn HttpClient>)
-                    }),
-                )
-                .expect("建立会话管理器")
+            Some(factory) => {
+                SessionManager::with_client_factories(&config, Arc::clone(&factory), factory)
+                    .expect("建立会话管理器")
             }
         };
         session.register(Box::new(AttendanceSite));
@@ -246,12 +270,16 @@ impl Harness {
         match self.worker.dispatch(job) {
             Ok(()) => Ok(()),
             Err(err) => {
-                self.worker.emit(Event::Failed {
-                    what,
-                    message: err.to_string(),
-                    target,
-                    site,
-                });
+                // 與 [`Worker::handle_control`] 一致：驗證碼填錯由工作者回報成
+                // 可重試事件，不再另發一般失敗。
+                if !matches!(err, AppError::VerificationRetry(_)) {
+                    self.worker.emit(Event::Failed {
+                        what,
+                        message: err.to_string(),
+                        target,
+                        site,
+                    });
+                }
                 Err(err)
             }
         }
@@ -2532,6 +2560,55 @@ fn retry_with_account_targets_the_site_that_failed() {
     assert_eq!(stored.username, "3120000002", "驗證成功後應寫回新憑證");
 }
 
+/// 上一次切換尚未結束（例如驗證碼填錯後又改輸另一組帳密）時，失敗的還原目標
+/// 必須是保險庫中真正保存的憑證，而不是記憶體中那組未驗證的新帳號。
+#[test]
+fn rollback_uses_the_vault_credentials_not_an_unverified_pending_account() {
+    let mut harness = harness(|request: &HttpRequest| {
+        // 重新輸入帳密後立刻斷網：登入流程在第一個請求就失敗。
+        Err(AppError::network_kind(
+            NetworkKind::Connect,
+            format!("连接失败：{}", request.url),
+        ))
+    });
+    // 保險庫中保存的是 A；上一次切換（A → B）因驗證碼填錯而仍在進行中。
+    harness.seed_vault("secret123", &Credentials::new("3120000001", "old-password"));
+    harness.worker.credentials = Some(Credentials::new("3120000002", "pending-password"));
+    harness.worker.pending_vault = Some(PendingVault {
+        passphrase: Secret::from("secret123"),
+        credentials: Credentials::new("3120000002", "pending-password"),
+        previous: Some(Credentials::new("3120000001", "old-password")),
+    });
+
+    let err = harness
+        .dispatch(Job::RetryWithAccount {
+            site: SiteKind::Attendance,
+            credentials: Credentials::new("3120000003", "third-password"),
+            passphrase: "secret123".into(),
+        })
+        .expect_err("離線時重新登入必定失敗");
+
+    assert!(
+        err.to_string().contains("连接失败"),
+        "應回報連線失敗：{err}"
+    );
+    assert!(
+        harness.worker.pending_vault.is_none(),
+        "失敗後應丟棄整條待存憑證鏈"
+    );
+    assert_eq!(
+        harness
+            .worker
+            .credentials
+            .as_ref()
+            .map(|credentials| credentials.username.clone()),
+        Some("3120000001".to_owned()),
+        "應還原為保險庫中的 A，而不是上一次未驗證的 B"
+    );
+    let stored = harness.vault.load("secret123").expect("读取凭据");
+    assert_eq!(stored.username, "3120000001", "保險庫內容不得被更動");
+}
+
 /// 設定表單重複輸入**同一帳號**的錯誤密碼時，失敗計數必須累積。
 ///
 /// 修復前每次嘗試都無條件清零，`failN` 恆為 0，伺服器要求的圖片驗證碼
@@ -2598,6 +2675,369 @@ fn change_account_keeps_failure_count_for_the_same_account() {
         seen.lock().expect("lock").len(),
         3,
         "第四次嘗試不得再送出帳密"
+    );
+}
+
+/// 換帳號先經過簡訊驗證、再於收尾（換取業務 token）失敗：必須回復舊帳號。
+///
+/// 修復前 `handle_control` 只對 ChangeAccount／RetryWithAccount 的錯誤善後，
+/// 互動驗證步驟冒出的錯誤會被漏掉：B 的帳密與待存憑證留在記憶體裡，之後
+/// 一次成功的登入就會把它寫進保險庫。
+#[test]
+fn failed_switch_after_mfa_rolls_back_the_new_account() {
+    let mut harness = harness(|request: &HttpRequest| {
+        let url = request.url.as_str();
+        if url == rsa::PUBLIC_KEY_URL {
+            return Ok(HttpResponse::new(
+                200,
+                rsa::PUBLIC_KEY_URL,
+                public_key_pem(),
+            ));
+        }
+        if url == attendance::LOGIN_URL {
+            return Ok(HttpResponse::new(
+                200,
+                ATTENDANCE_POST,
+                login_page_with_mfa(),
+            ));
+        }
+        if url.contains("/mfa/detect") {
+            return Ok(json(serde_json::json!({
+                "code": 0,
+                "data": { "state": "s-1", "need": true }
+            })));
+        }
+        if url.contains("/initByType/securephone") {
+            return Ok(json(serde_json::json!({
+                "code": 0,
+                "data": { "securePhone": "138****1234", "gid": "g-1" }
+            })));
+        }
+        if url.contains("/securephone/send") {
+            return Ok(json(serde_json::json!({
+                "code": 0,
+                "data": { "securePhone": "138****1234", "gid": "g-1" }
+            })));
+        }
+        if url.contains("/securephone/valid") {
+            return Ok(json(
+                serde_json::json!({ "code": 0, "data": { "status": 2 } }),
+            ));
+        }
+        if url == ATTENDANCE_POST {
+            return Ok(HttpResponse::new(200, ATTENDANCE_TARGET, TARGET_BODY));
+        }
+        if url == ATTENDANCE_EXCHANGE {
+            // 收尾階段的終止錯誤。
+            return Ok(HttpResponse::new(
+                500,
+                ATTENDANCE_EXCHANGE,
+                "<html>维护</html>",
+            ));
+        }
+        if url == lms::LOGIN_URL {
+            return Ok(HttpResponse::new(200, LMS_POST, login_page()));
+        }
+        if url == LMS_POST || url == LMS_HOME {
+            return Ok(HttpResponse::new(200, LMS_HOME, TARGET_BODY));
+        }
+        panic!("未预期的请求：{url}");
+    });
+
+    harness
+        .dispatch(Job::ChangeAccount {
+            passphrase: "secret123".into(),
+            credentials: Credentials::new("3120000002", "new-password"),
+        })
+        .expect("換帳號應停在簡訊驗證");
+    assert!(
+        harness.saw(|event| matches!(event, Event::LoginNeedsMfa { .. })),
+        "換帳號應進入簡訊驗證"
+    );
+    harness
+        .dispatch(Job::SendMfaCode)
+        .expect("發送驗證碼应当成功");
+
+    let result = harness.dispatch(Job::VerifyMfaCode(Secret::from("123456")));
+    assert!(result.is_err(), "收尾失敗必須回報錯誤");
+
+    assert!(
+        harness.worker.pending_vault.is_none(),
+        "互動驗證之後才失敗的切換同樣必須丟棄待存憑證"
+    );
+    assert!(harness.worker.flow.is_none(), "失敗的登入流程應一併作廢");
+    assert_eq!(
+        harness
+            .worker
+            .credentials
+            .as_ref()
+            .map(|credentials| credentials.username.clone()),
+        Some("3120000001".to_owned()),
+        "記憶體中的憑證應還原為舊帳號"
+    );
+
+    // 之後思源學堂登入成功：不得把失敗切換的憑證寫進保險庫。
+    harness
+        .dispatch(Job::RetryLogin {
+            site: SiteKind::Lms,
+        })
+        .expect("思源学堂登入应当成功");
+    let stored = harness.vault.load("secret123").expect("读取凭据");
+    assert_eq!(stored.username, "3120000001", "保險庫不得寫入 B 的憑證");
+    assert_eq!(stored.password, "old-password");
+}
+
+/// 簡訊驗證碼填錯是可重試的：不得作廢整次帳號切換。
+#[test]
+fn wrong_mfa_code_keeps_the_pending_switch() {
+    // 第一次提交的驗證碼是錯的，之後接受——用來驗證重輸即可續用同一次登入。
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::clone(&attempts);
+    let mut harness = harness(move |request: &HttpRequest| {
+        let url = request.url.as_str();
+        if url == rsa::PUBLIC_KEY_URL {
+            return Ok(HttpResponse::new(
+                200,
+                rsa::PUBLIC_KEY_URL,
+                public_key_pem(),
+            ));
+        }
+        if url == attendance::LOGIN_URL {
+            return Ok(HttpResponse::new(
+                200,
+                ATTENDANCE_POST,
+                login_page_with_mfa(),
+            ));
+        }
+        if url.contains("/mfa/detect") {
+            return Ok(json(serde_json::json!({
+                "code": 0,
+                "data": { "state": "s-1", "need": true }
+            })));
+        }
+        if url.contains("/initByType/securephone") || url.contains("/securephone/send") {
+            return Ok(json(serde_json::json!({
+                "code": 0,
+                "data": { "securePhone": "138****1234", "gid": "g-1" }
+            })));
+        }
+        if url.contains("/securephone/valid") {
+            // 第一次驗證碼錯誤（狀態非 2），重輸後即通過。
+            let status = if seen.fetch_add(1, Ordering::SeqCst) == 0 {
+                1
+            } else {
+                2
+            };
+            return Ok(json(
+                serde_json::json!({ "code": 0, "data": { "status": status } }),
+            ));
+        }
+        if url == ATTENDANCE_EXCHANGE {
+            return Ok(json(
+                serde_json::json!({ "code": 0, "data": { "tokenValue": "token-1" } }),
+            ));
+        }
+        if request.method == Method::Post {
+            // 帳密表單提交成功（CAS 回跳）。
+            return Ok(HttpResponse::new(200, ATTENDANCE_TARGET, TARGET_BODY));
+        }
+        if url == ATTENDANCE_TARGET {
+            return Ok(HttpResponse::new(200, ATTENDANCE_TARGET, TARGET_BODY));
+        }
+        panic!("未预期的请求：{url}");
+    });
+
+    harness
+        .dispatch(Job::ChangeAccount {
+            passphrase: "secret123".into(),
+            credentials: Credentials::new("3120000002", "new-password"),
+        })
+        .expect("換帳號應停在簡訊驗證");
+    harness
+        .dispatch(Job::SendMfaCode)
+        .expect("發送驗證碼应当成功");
+
+    let err = harness
+        .dispatch(Job::VerifyMfaCode(Secret::from("000000")))
+        .expect_err("驗證碼錯誤應回報錯誤");
+    assert!(err.to_string().contains("短信验证码不正确"), "{err}");
+    assert!(
+        harness.worker.pending_vault.is_some(),
+        "驗證碼填錯時應保留待存憑證，讓使用者重輸後繼續同一次切換"
+    );
+    assert!(
+        harness.worker.flow.is_some(),
+        "登入流程應保留以便重輸驗證碼"
+    );
+    assert_eq!(
+        harness
+            .worker
+            .credentials
+            .as_ref()
+            .map(|credentials| credentials.username.clone()),
+        Some("3120000002".to_owned()),
+        "重輸驗證碼仍應以新帳號進行"
+    );
+    // 介面必須收到「可重輸」的訊號（而不是一般失敗畫面），否則輸入框會被蓋掉。
+    let events = harness.drain_events();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::VerificationRetry { site: SiteKind::Attendance, message }
+                if message.contains("短信验证码不正确")
+        )),
+        "應回報可重試的驗證錯誤：{events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::Failed { .. })),
+        "驗證碼填錯不應彈出一般失敗：{events:?}"
+    );
+
+    // 重輸正確的驗證碼即可續用同一次切換（同一個驅動器、同一個 gid）。
+    let resumed = harness.dispatch(Job::VerifyMfaCode(Secret::from("123456")));
+    assert!(resumed.is_ok(), "正確的驗證碼應能繼續登入：{resumed:?}");
+}
+
+/// 圖片驗證碼填錯同樣是可重試的：不得作廢整次帳號切換。
+#[test]
+fn captcha_mistake_keeps_the_pending_switch() {
+    // 直接以 `handle_reply` 驗證善後規則：不經網路，也不會寫入驗證碼圖片。
+    let mut harness = harness(|_request: &HttpRequest| panic!("本測試不應發出請求"));
+
+    let client: Arc<dyn HttpClient> =
+        Arc::new(FakeClient::with_responder(|request: &HttpRequest| {
+            if request.url == rsa::PUBLIC_KEY_URL {
+                return Ok(HttpResponse::new(
+                    200,
+                    rsa::PUBLIC_KEY_URL,
+                    public_key_pem(),
+                ));
+            }
+            if request.url == attendance::LOGIN_URL {
+                return Ok(HttpResponse::new(200, ATTENDANCE_POST, login_page()));
+            }
+            // 帳密／驗證碼被拒。
+            Ok(HttpResponse::new(401, ATTENDANCE_POST, "<html></html>"))
+        }));
+    let mut driver =
+        LoginDriver::new(client, attendance::LOGIN_URL, &"0".repeat(32)).expect("建立登入驅動器");
+    // 已達門檻：直接進入驗證碼流程（不需先失敗三次）。
+    driver.set_fail_count(3);
+    assert_eq!(
+        driver
+            .start(
+                &Credentials::new("3120000002", "new-password"),
+                AccountType::Undergraduate
+            )
+            .expect("啟動登入"),
+        LoginReply::NeedCaptcha
+    );
+    let reply = driver.submit_captcha("bad-code").expect("提交驗證碼");
+    assert!(matches!(reply, LoginReply::Fail { .. }), "{reply:?}");
+    assert!(
+        driver.last_attempt_submitted_captcha(),
+        "測試前提：這次提交帶了驗證碼"
+    );
+
+    // 模擬「換帳號進行中」的狀態。
+    harness.worker.credentials = Some(Credentials::new("3120000002", "new-password"));
+    harness.worker.pending_vault = Some(PendingVault {
+        passphrase: Secret::from("secret123"),
+        credentials: Credentials::new("3120000002", "new-password"),
+        previous: Some(Credentials::new("3120000001", "old-password")),
+    });
+    harness.worker.flow = Some(LoginFlow {
+        site: SiteKind::Attendance,
+        driver: Box::new(driver),
+        retry: None,
+    });
+
+    harness
+        .worker
+        .handle_reply(reply)
+        .expect("處理登入回覆不應出錯");
+
+    assert!(
+        harness.worker.pending_vault.is_some(),
+        "驗證碼填錯時應保留待存憑證，讓使用者重輸後繼續同一次切換"
+    );
+    assert!(
+        harness.worker.flow.is_some(),
+        "登入流程應保留以便重輸驗證碼"
+    );
+    assert!(
+        harness.saw(|event| matches!(event, Event::LoginFailed { .. })),
+        "仍應回報登入失敗（畫面顯示驗證碼錯誤）"
+    );
+}
+
+/// 回復舊帳號時若無法建立乾淨的會話，必須停用會話而不是繼續用新帳號的 cookie。
+#[test]
+fn rollback_without_a_clean_session_disables_the_session() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    // 第 0／1 次是建立時；第 2／3 次是換帳號的重建；第 4 次起（回復舊帳號
+    // 的重建）一律失敗。
+    let mut harness = Harness::with_broken_factory(
+        |request: &HttpRequest| match request.url.as_str() {
+            rsa::PUBLIC_KEY_URL => Ok(HttpResponse::new(
+                200,
+                rsa::PUBLIC_KEY_URL,
+                public_key_pem(),
+            )),
+            attendance::LOGIN_URL => Ok(HttpResponse::new(200, ATTENDANCE_POST, login_page())),
+            ATTENDANCE_POST => Ok(HttpResponse::new(200, ATTENDANCE_TARGET, TARGET_BODY)),
+            ATTENDANCE_EXCHANGE => Ok(HttpResponse::new(
+                500,
+                ATTENDANCE_EXCHANGE,
+                "<html>维护</html>",
+            )),
+            // 會話若沒被停用，後續任何請求都會走到這裡（測試即失敗）。
+            other => panic!("會話停用後不得再發出請求：{other}"),
+        },
+        Arc::clone(&calls),
+        4,
+    );
+    harness.seed_vault("secret123", &Credentials::new("3120000001", "old-password"));
+
+    let result = harness.dispatch(Job::ChangeAccount {
+        passphrase: "secret123".into(),
+        credentials: Credentials::new("3120000002", "new-password"),
+    });
+    assert!(result.is_err(), "收尾失敗的換帳號必須失敗");
+
+    assert!(
+        harness.worker.session.is_none(),
+        "無法建立乾淨的會話時必須停用會話（不得繼續帶新帳號的 cookie）"
+    );
+    assert!(
+        harness.saw(|event| matches!(event, Event::SessionDisabled(_))),
+        "應回報會話已停用，讓介面回到解鎖畫面"
+    );
+    assert_eq!(
+        harness
+            .worker
+            .credentials
+            .as_ref()
+            .map(|credentials| credentials.username.clone()),
+        Some("3120000001".to_owned()),
+        "憑證仍應還原為舊帳號"
+    );
+
+    // 後續資料任務不得發出任何請求（responder 會 panic）。
+    harness
+        .dispatch(Job::LoadCourses { force: false })
+        .expect("資料任務失敗不應冒泡為任務錯誤");
+    assert!(
+        harness.saw(|event| matches!(
+            event,
+            Event::Failed {
+                target: FailedTarget::Courses,
+                ..
+            }
+        )),
+        "資料任務應回報失敗（會話尚未建立）"
     );
 }
 

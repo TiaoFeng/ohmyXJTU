@@ -694,6 +694,14 @@ fn deadline_list_label(value: Option<&str>, compact: bool) -> String {
     )
 }
 
+/// 提交記錄時間：解析後統一以校園時區（+08:00）顯示，解析失敗時回退原始字串。
+fn submission_time_label(value: Option<&str>) -> String {
+    parse_time(value).map_or_else(
+        || value.map_or_else(|| "未知时间".to_owned(), |raw| raw.trim().to_owned()),
+        |time| time.format("%Y-%m-%d %H:%M").to_string(),
+    )
+}
+
 fn homework_lines(item: &HomeworkItem) -> Vec<Line<'static>> {
     let mut lines = vec![
         Line::from(Span::styled(
@@ -1153,7 +1161,7 @@ fn detail_lines(detail: &ActivityDetailView) -> Vec<Line<'static>> {
                     lines.push(Line::from(Span::styled(
                         format!(
                             "· {}（最新版本：{}）{score}",
-                            submission.timestamp().unwrap_or("未知时间"),
+                            submission_time_label(submission.timestamp()),
                             if submission.is_latest_version.unwrap_or(false) {
                                 "是"
                             } else {

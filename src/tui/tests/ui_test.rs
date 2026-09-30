@@ -14,7 +14,7 @@ use crate::domain::homework::{HomeworkGroup, HomeworkInput, HomeworkItem, aggreg
 use crate::domain::semester::TermCode;
 use crate::session::{AccessMode, SiteKind};
 use crate::sites::attendance::FlowRecord;
-use crate::sites::lms::{ActivityKind, LmsActivity, LmsCourse};
+use crate::sites::lms::{ActivityKind, LmsActivity, LmsCourse, LmsSubmissionList};
 use crate::task::HomeworkIssue;
 use crate::tui::app::{
     ActivityDetailView, AgreementState, App, FlowData, FormState, HomeworkData, LessonEntry,
@@ -606,6 +606,53 @@ fn activity_detail_hides_submission_section_for_non_homework() {
     );
 }
 
+#[test]
+fn activity_detail_converts_submission_times_to_school_time() {
+    // 脫敏樣本：UTC（`Z`）與未帶時區的提交時間混合。
+    let list: LmsSubmissionList = serde_json::from_str(
+        r#"{"list":[
+            {"id":1,"submitted_at":"2026-09-20T02:00:00Z","is_latest_version":true},
+            {"id":2,"submitted_at":"2026-09-21 09:30:00","is_latest_version":false}
+        ]}"#,
+    )
+    .expect("脱敏样本");
+
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Lms;
+    app.lms.level = LmsLevel::Detail;
+    app.lms.detail = Page::Ready(ActivityDetailView {
+        id: "1".to_owned(),
+        title: "作业A".to_owned(),
+        kind: ActivityKind::Homework,
+        end_time: Some("2026-09-25T15:59:59.000Z".to_owned()),
+        submit_by_group: false,
+        submissions: Some(list.list),
+        note: None,
+    });
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(
+        text.contains("2026-09-20 10:00"),
+        "UTC 提交時間應換算為 +08:00：\n{text}"
+    );
+    assert!(
+        text.contains("2026-09-21 09:30"),
+        "未帶時區的提交時間維持原樣：\n{text}"
+    );
+    assert!(
+        !text.contains("T02:00:00"),
+        "不應顯示原始 ISO 字串：\n{text}"
+    );
+    assert!(
+        text.contains("截止：2026-09-25 23:59"),
+        "詳情截止時間也應換算：\n{text}"
+    );
+}
+
 fn flow_record(id: &str, place: Option<&str>, time: Option<&str>, effective: bool) -> FlowRecord {
     FlowRecord {
         id: id.to_owned(),
@@ -1181,7 +1228,7 @@ fn homework_rows_trade_group_and_title_detail_when_narrow() {
             course_name: "马克思主义基本原理概论".to_owned(),
             activity_id: "a-2".to_owned(),
             title: "社会实践报告与社会调查作业".to_owned(),
-            end_time: Some("2026-10-08 23:59:59".to_owned()),
+            end_time: Some("2026-10-08T15:59:59.000Z".to_owned()),
             submit_by_group: true,
             submission_count: Some(0),
             note: None,
@@ -1282,7 +1329,7 @@ fn homework_rows_show_full_names_when_terminal_is_wide() {
                 course_name: "微电子电路基础".to_owned(),
                 activity_id: "a-1".to_owned(),
                 title: "第五章作业（含附件）".to_owned(),
-                end_time: Some("2026-10-12 15:59:59".to_owned()),
+                end_time: Some("2026-10-12T15:59:59.000Z".to_owned()),
                 submit_by_group: false,
                 submission_count: Some(0),
                 note: None,
@@ -1311,8 +1358,8 @@ fn homework_rows_show_full_names_when_terminal_is_wide() {
         "足夠寬時標題應完整顯示：\n{text}"
     );
     assert!(
-        text.contains("截止 2026-10-12 15:59"),
-        "截止時間應完整顯示：\n{text}"
+        text.contains("截止 2026-10-12 23:59"),
+        "UTC 截止時間應換算為 +08:00 顯示：\n{text}"
     );
 }
 
@@ -1357,7 +1404,7 @@ fn activity_rows_align_title_and_deadline_columns() {
             id: "1".to_owned(),
             kind: "homework".to_owned(),
             title: Some("作业一".to_owned()),
-            end_time: Some("2026-10-08 23:59:59".to_owned()),
+            end_time: Some("2026-10-08T15:59:59.000Z".to_owned()),
             submit_by_group: Some(false),
             ..lms_activity("1", "homework", None)
         },
@@ -1386,6 +1433,10 @@ fn activity_rows_align_title_and_deadline_columns() {
         column_of(&first, "2026-10-08"),
         column_of(&second, "2026-09-20"),
         "截止欄起點必須一致：\n{first}\n{second}"
+    );
+    assert!(
+        first.contains("2026-10-08 23:59"),
+        "UTC 截止時間應換算為 +08:00：\n{first}"
     );
 }
 

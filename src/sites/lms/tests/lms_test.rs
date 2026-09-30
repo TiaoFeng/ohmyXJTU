@@ -64,7 +64,7 @@ fn parses_activities_and_kinds() {
             "course_id": "4711",
             "type": "homework",
             "title": "第 3 次作业",
-            "end_time": "2026-09-30T23:59:00+08:00",
+            "end_time": "2026-09-30T15:59:00.000Z",
             "submit_by_group": false
         },
         {
@@ -82,6 +82,11 @@ fn parses_activities_and_kinds() {
     assert_eq!(activities[1].kind(), ActivityKind::Material);
     assert_eq!(activities[1].display_title(), "课件");
     assert_eq!(activities[0].course_id.as_deref(), Some("4711"));
+    assert_eq!(
+        activities[0].end_time.as_deref(),
+        Some("2026-09-30T15:59:00.000Z"),
+        "模型保留原始字串，換算只發生在解析與顯示層"
+    );
 }
 
 #[test]

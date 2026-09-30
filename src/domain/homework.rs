@@ -202,18 +202,20 @@ fn sort_key(item: &HomeworkItem) -> (HomeworkGroup, u8, i64, &str, &str, &str) {
 
 /// 解析思源學堂的時間字串。
 ///
-/// 支援帶時區的 RFC3339、`YYYY-MM-DD HH:MM:SS` 與 `YYYY-MM-DDTHH:MM:SS`；
-/// 未帶時區者一律視為中國標準時間（+08:00）。
+/// 支援帶時區的 RFC3339、`YYYY-MM-DD HH:MM:SS` 與 `YYYY-MM-DDTHH:MM:SS`。
+/// 回傳的瞬間一律以校園時區（中國標準時間，+08:00）表示：帶時區者（如 API 的
+/// UTC `Z`／`+00:00`）先換算，未帶時區者視為 +08:00。排序與逾期判定使用絕對
+/// 瞬間（`timestamp()`／比較），不受顯示時區影響。
 pub fn parse_time(value: Option<&str>) -> Option<DateTime<FixedOffset>> {
     let value = value?.trim();
     if value.is_empty() {
         return None;
     }
+    let offset = FixedOffset::east_opt(8 * 3600)?;
     if let Ok(time) = DateTime::parse_from_rfc3339(value) {
-        return Some(time);
+        return Some(time.with_timezone(&offset));
     }
 
-    let offset = FixedOffset::east_opt(8 * 3600)?;
     for format in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"] {
         if let Ok(naive) = NaiveDateTime::parse_from_str(value, format) {
             return offset.from_local_datetime(&naive).single();

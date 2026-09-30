@@ -52,12 +52,33 @@ fn marks_overdue_only_when_deadline_passed() {
 }
 
 #[test]
+fn judges_overdue_by_instant_across_time_offsets() {
+    // now 固定為 2026-09-28T12:00:00+08:00；UTC 截止時間以絕對瞬間比較。
+    assert_eq!(
+        judge(Some(0), Some("2026-09-28T15:59:00Z"), now()),
+        HomeworkState::Pending,
+        "15:59Z 即 23:59+08:00，尚未逾期"
+    );
+    assert_eq!(
+        judge(Some(0), Some("2026-09-28T01:00:00Z"), now()),
+        HomeworkState::Overdue,
+        "01:00Z 即 09:00+08:00，已逾期"
+    );
+    assert_eq!(
+        judge(Some(0), Some("2026-09-28T04:00:00Z"), now()),
+        HomeworkState::Pending,
+        "與 now 同一瞬間（12:00+08:00）不算逾期"
+    );
+}
+
+#[test]
 fn aggregates_by_group_and_deadline() {
+    // 混用 UTC（`Z`）與 +08:00 字串：排序依絕對瞬間。
     let items = vec![
         input("无截止时间", None, Some(0)),
         input("已提交", Some("2026-09-30T23:59:00+08:00"), Some(2)),
-        input("逾期作业", Some("2026-09-26T23:59:00+08:00"), Some(0)),
-        input("即将到期", Some("2026-09-29T23:59:00+08:00"), Some(0)),
+        input("逾期作业", Some("2026-09-26T15:59:00Z"), Some(0)),
+        input("即将到期", Some("2026-09-29T15:59:00Z"), Some(0)),
         input("待核实作业", Some("2026-09-30T23:59:00+08:00"), None),
     ];
 
@@ -135,4 +156,23 @@ fn parses_lms_time_formats() {
     assert_eq!(parse_time(Some("  ")), None);
     assert_eq!(parse_time(None), None);
     assert_eq!(parse_time(Some("看不懂的时间")), None);
+}
+
+#[test]
+fn normalizes_utc_lms_times_to_school_offset() {
+    // 思源學堂以 UTC（`Z` 或 `+00:00`）傳送時間；解析結果一律換算為 +08:00。
+    for value in ["2026-10-12T15:59:59.000Z", "2026-10-12T15:59:59+00:00"] {
+        let time = parse_time(Some(value)).expect("应可解析");
+        assert_eq!(time.offset().local_minus_utc(), 8 * 3600, "{value}");
+        assert_eq!(
+            time.format("%Y-%m-%d %H:%M").to_string(),
+            "2026-10-12 23:59",
+            "{value}"
+        );
+    }
+    // 有無毫秒、`Z` 或 `+00:00` 都不得改變瞬間。
+    assert_eq!(
+        parse_time(Some("2026-10-12T15:59:59Z")).map(|time| time.timestamp()),
+        parse_time(Some("2026-10-12T15:59:59.000Z")).map(|time| time.timestamp())
+    );
 }

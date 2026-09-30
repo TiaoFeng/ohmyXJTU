@@ -194,6 +194,7 @@ fn long_value_scrolls_and_keeps_cursor_inside_field() {
 #[test]
 fn draws_credentials_form_with_previous_failure_note() {
     let screen = LoginScreen::Credentials {
+        site: crate::session::SiteKind::Attendance,
         form: FormState::login_retry(),
         message: "登录失败：用户名或密码错误".to_owned(),
     };

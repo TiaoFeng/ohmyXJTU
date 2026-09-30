@@ -178,6 +178,49 @@ fn parses_user_id_from_loose_javascript_page() {
 }
 
 #[test]
+fn post_login_rejects_maintenance_and_login_pages() {
+    use std::sync::Arc;
+
+    use crate::http::HttpResponse;
+    use crate::http::fake::FakeClient;
+    use crate::session::{AccessMode, PostLogin};
+
+    // 5xx 維護頁：不得標記站點已登入。
+    let client = Arc::new(FakeClient::new(vec![HttpResponse::new(
+        500,
+        "https://lms.xjtu.edu.cn/user/index",
+        "<html>系统维护中</html>",
+    )]));
+    let context = PostLogin::new(client.as_ref(), AccessMode::Direct, None);
+    let err = LmsSite
+        .post_login(&context)
+        .expect_err("維護頁不得視為登入成功");
+    assert!(matches!(err, AppError::Http { status: 500 }), "{err:?}");
+
+    // 被導回統一認證：同樣不是登入成功。
+    let client = Arc::new(FakeClient::new(vec![HttpResponse::new(
+        200,
+        "https://login.xjtu.edu.cn/cas/login?service=lms",
+        "<html></html>",
+    )]));
+    let context = PostLogin::new(client.as_ref(), AccessMode::Direct, None);
+    let err = LmsSite
+        .post_login(&context)
+        .expect_err("登入頁不得視為登入成功");
+    assert!(matches!(err, AppError::SessionExpired), "{err:?}");
+
+    // 正常首頁：應取得使用者識別碼。
+    let client = Arc::new(FakeClient::new(vec![HttpResponse::new(
+        200,
+        "https://lms.xjtu.edu.cn/user/index",
+        r#"<script>var globalData = {"user":{"id":7788},"dept":{}};</script>"#,
+    )]));
+    let context = PostLogin::new(client.as_ref(), AccessMode::Direct, None);
+    let login = LmsSite.post_login(&context).expect("正常首頁應可登入");
+    assert_eq!(login.user_id.as_deref(), Some("7788"));
+}
+
+#[test]
 fn effective_count_excludes_old_versions() {
     let value = json!({
         "list": [

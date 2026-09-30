@@ -9,6 +9,23 @@ use serde::de::DeserializeOwned;
 use crate::error::{AppError, AppResult};
 use crate::http::HttpResponse;
 
+/// 確認登入收尾取得的是有效回應（非維護頁或登入頁）。
+///
+/// 站點的登入收尾（例如思源學堂的 `/user/index`）即使遇到 5xx 維護頁或被導回
+/// 登入頁，仍會回傳可讀的 HTML。不檢查就會把站點標記為已登入：之後的查詢
+/// 全部以「待核实」收場，使用者卻只看到「登入成功」。
+pub fn ensure_authenticated(response: &HttpResponse) -> AppResult<()> {
+    if response.status >= 500 {
+        return Err(AppError::Http {
+            status: response.status,
+        });
+    }
+    if crate::session::site::is_auth_failure(response) {
+        return Err(AppError::SessionExpired);
+    }
+    response.error_for_status()
+}
+
 /// 解開 `{code, message, data}` 外殼，並把 `data` 解析為指定型別。
 pub fn unwrap_envelope<T: DeserializeOwned>(
     response: &HttpResponse,

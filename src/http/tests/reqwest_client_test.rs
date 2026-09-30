@@ -6,12 +6,15 @@
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use url::Url;
+
 use super::ReqwestClient;
+use crate::auth::webvpn;
 use crate::error::{AppError, NetworkKind};
 use crate::http::{HttpClient, HttpRequest};
 
@@ -24,11 +27,22 @@ fn serve(
     connections: usize,
     responder: impl Fn(usize, &str) -> Vec<u8> + Send + 'static,
 ) -> (String, Arc<AtomicUsize>) {
+    let (base, hits, _requests) = serve_recording(connections, responder);
+    (base, hits)
+}
+
+/// 與 [`serve`] 相同，但另外記錄每個連線收到的原始請求文字。
+fn serve_recording(
+    connections: usize,
+    responder: impl Fn(usize, &str) -> Vec<u8> + Send + 'static,
+) -> (String, Arc<AtomicUsize>, Arc<Mutex<Vec<String>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("绑定本地端口");
     let addr = listener.local_addr().expect("取得本地地址");
     let base = format!("http://{addr}");
     let hits = Arc::new(AtomicUsize::new(0));
+    let recorded = Arc::new(Mutex::new(Vec::new()));
     let counter = Arc::clone(&hits);
+    let requests = Arc::clone(&recorded);
 
     let server_base = base.clone();
     thread::spawn(move || {
@@ -39,14 +53,26 @@ fn serve(
             counter.fetch_add(1, Ordering::SeqCst);
             let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
             let mut buffer = [0_u8; 4096];
-            let _ = stream.read(&mut buffer);
+            let read = stream.read(&mut buffer).unwrap_or_default();
+            requests
+                .lock()
+                .expect("请求记录锁")
+                .push(String::from_utf8_lossy(&buffer[..read]).into_owned());
             let response = responder(index, &server_base);
             let _ = stream.write_all(&response);
             let _ = stream.flush();
         }
     });
 
-    (base, hits)
+    (base, hits, recorded)
+}
+
+/// 指定狀態碼與 `Location` 的重定向回應。
+fn redirect_response(status: u16, location: &str) -> Vec<u8> {
+    format!(
+        "HTTP/1.1 {status} Moved\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    )
+    .into_bytes()
 }
 
 /// 考勤入口 302 回應的原始形態：`Content-Security-Policy` 以裸 LF 折行。
@@ -79,6 +105,11 @@ fn client() -> ReqwestClient {
     ReqwestClient::new("ohmyXJTU-test").expect("建立 HTTP 客户端")
 }
 
+/// 不檢查重定向目的地的客戶端（本機假伺服器用；信任規則由純函式測試涵蓋）。
+fn insecure_client() -> ReqwestClient {
+    ReqwestClient::new_insecure_for_tests("ohmyXJTU-test").expect("建立 HTTP 客户端")
+}
+
 /// 多行標頭不應再讓請求失敗；重定向仍被正確跟隨。
 #[test]
 fn follows_redirect_with_obsolete_multiline_headers() {
@@ -90,7 +121,7 @@ fn follows_redirect_with_obsolete_multiline_headers() {
         }
     });
 
-    let response = client()
+    let response = insecure_client()
         .send(HttpRequest::get(format!("{base}/portal")))
         .expect("多行標頭的 302 應可解析並跟隨");
 
@@ -273,4 +304,311 @@ fn classifies_connection_refused() {
         AppError::Network { kind, .. } => assert_eq!(*kind, NetworkKind::Connect),
         other => panic!("應為網路錯誤，實際：{other:?}"),
     }
+}
+
+/// 同源重定向：自訂標頭保留。
+#[test]
+fn same_origin_redirect_keeps_custom_headers() {
+    let (base, hits, requests) = serve_recording(2, |index, base| {
+        if index == 0 {
+            redirect_response(302, &format!("{base}/ok"))
+        } else {
+            ok_response("{}")
+        }
+    });
+
+    insecure_client()
+        .send(HttpRequest::get(format!("{base}/portal")).header("X-Business-Token", "token-1"))
+        .expect("同源重定向應可跟隨");
+
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
+    let requests = requests.lock().expect("请求记录锁");
+    assert!(
+        requests[1]
+            .to_ascii_lowercase()
+            .contains("x-business-token"),
+        "同源應保留憑證：{}",
+        requests[1]
+    );
+}
+
+/// 跨主機重定向：跟隨，但不得重送自訂標頭（業務憑證）。
+///
+/// 同一台伺服器以不同主機名（`127.0.0.1` → `localhost`）代表跨來源，
+/// 既不影響可達性，又能驗證逐跳的標頭規則。
+#[test]
+fn cross_origin_redirect_drops_custom_headers() {
+    let (base, hits, requests) = serve_recording(2, |index, base| {
+        if index == 0 {
+            let port = Url::parse(base)
+                .expect("解析服务器地址")
+                .port()
+                .expect("端口");
+            redirect_response(302, &format!("http://localhost:{port}/ok"))
+        } else {
+            ok_response("{}")
+        }
+    });
+
+    let response = insecure_client()
+        .send(
+            HttpRequest::get(format!("{base}/portal"))
+                .header("X-Business-Token", "token-1")
+                .header("Referer", "https://lms.xjtu.edu.cn/"),
+        )
+        .expect("跨主機重定向應可跟隨");
+
+    assert_eq!(response.status, 200);
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
+    let requests = requests.lock().expect("请求记录锁");
+    let first = requests[0].to_ascii_lowercase();
+    let second = requests[1].to_ascii_lowercase();
+    assert!(
+        first.contains("x-business-token"),
+        "首跳應帶憑證（測試前提）：{first}"
+    );
+    assert!(
+        !second.contains("x-business-token"),
+        "跨主機不得重送憑證：{second}"
+    );
+    assert!(
+        !second.contains("referer"),
+        "跨主機不得重送來源標頭：{second}"
+    );
+}
+
+/// 跨來源 307：拒絕重送請求主體，且不得再送出第二個請求。
+#[test]
+fn cross_origin_307_is_rejected_without_resending_the_body() {
+    let (base, hits) = serve(1, |_index, base| {
+        let port = Url::parse(base)
+            .expect("解析服务器地址")
+            .port()
+            .expect("端口");
+        redirect_response(307, &format!("http://localhost:{port}/submit"))
+    });
+
+    let err = insecure_client()
+        .send(HttpRequest::post_form(
+            format!("{base}/submit"),
+            [("password", "__RSA__secret")],
+        ))
+        .expect_err("跨來源 307 應被拒絕");
+
+    match &err {
+        AppError::Network { kind, .. } => assert_eq!(*kind, NetworkKind::Redirect),
+        other => panic!("應為重定向錯誤，實際：{other:?}"),
+    }
+    assert!(
+        err.to_string().contains("拒绝把请求主体重送到其他来源"),
+        "{err}"
+    );
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        1,
+        "被拒絕時不得再送出第二個請求"
+    );
+}
+
+/// 同源 307：保留方法與請求主體。
+#[test]
+fn same_origin_307_resends_the_body() {
+    let (base, hits, requests) = serve_recording(2, |index, base| {
+        if index == 0 {
+            redirect_response(307, &format!("{base}/next"))
+        } else {
+            ok_response("{}")
+        }
+    });
+
+    let response = insecure_client()
+        .send(HttpRequest::post_form(
+            format!("{base}/submit"),
+            [("password", "__RSA__secret")],
+        ))
+        .expect("同源 307 應重送主體");
+
+    assert_eq!(response.status, 200);
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
+    let requests = requests.lock().expect("请求记录锁");
+    assert!(
+        requests[1].contains("__RSA__secret"),
+        "同源 307 應保留請求主體：{}",
+        requests[1]
+    );
+}
+
+/// 重定向決策矩陣（純函式）：同源保留標頭、跨源剝奪、降級與不可信主機拒絕。
+#[test]
+fn plan_redirect_keeps_headers_only_for_same_origin() {
+    use super::{MAX_REDIRECTS, is_trusted_redirect_host, plan_redirect};
+
+    let school = Url::parse("https://lms.xjtu.edu.cn/api/x").expect("解析");
+
+    // 同源（相對路徑）：自訂標頭可保留。
+    let plan = plan_redirect(
+        &school,
+        "/api/y",
+        302,
+        crate::http::Method::Get,
+        false,
+        1,
+        is_trusted_redirect_host,
+    )
+    .expect("同源應可跟隨");
+    assert_eq!(plan.url, "https://lms.xjtu.edu.cn/api/y");
+    assert!(plan.keep_headers, "同源應保留自訂標頭");
+
+    // 校內跨主機：跟隨但丟棄自訂標頭。
+    let plan = plan_redirect(
+        &school,
+        "https://bk-kq.xjtu.edu.cn/sa",
+        302,
+        crate::http::Method::Get,
+        false,
+        1,
+        is_trusted_redirect_host,
+    )
+    .expect("校內跨主機應可跟隨");
+    assert!(!plan.keep_headers, "跨主機不得保留自訂標頭");
+
+    // 非學校網域：拒絕。
+    let err = plan_redirect(
+        &school,
+        "https://evil.example/steal",
+        302,
+        crate::http::Method::Get,
+        false,
+        1,
+        is_trusted_redirect_host,
+    )
+    .expect_err("校外主機應被拒絕");
+    assert!(
+        matches!(
+            err,
+            AppError::Network {
+                kind: NetworkKind::Redirect,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    assert!(err.to_string().contains("学校网域之外"), "{err}");
+
+    // HTTPS → HTTP 降級：拒絕。
+    let err = plan_redirect(
+        &school,
+        "http://lms.xjtu.edu.cn/api/y",
+        302,
+        crate::http::Method::Get,
+        false,
+        1,
+        is_trusted_redirect_host,
+    )
+    .expect_err("降級應被拒絕");
+    assert!(err.to_string().contains("降级"), "{err}");
+
+    // 跳數超限：拒絕。
+    let err = plan_redirect(
+        &school,
+        "/api/y",
+        302,
+        crate::http::Method::Get,
+        false,
+        MAX_REDIRECTS + 1,
+        is_trusted_redirect_host,
+    )
+    .expect_err("跳數超限應被拒絕");
+    assert!(err.to_string().contains("次数过多"), "{err}");
+}
+
+/// 重定向的方法與主體規則（純函式）。
+#[test]
+fn plan_redirect_rules_for_request_bodies() {
+    use super::{is_trusted_redirect_host, plan_redirect};
+
+    let login = Url::parse("https://login.xjtu.edu.cn/cas/login").expect("解析");
+
+    // 301/302/303 的 POST：轉為 GET 且不重送主體。
+    let plan = plan_redirect(
+        &login,
+        "/cas/next",
+        302,
+        crate::http::Method::Post,
+        true,
+        1,
+        is_trusted_redirect_host,
+    )
+    .expect("302 應可跟隨");
+    assert_eq!(plan.method, crate::http::Method::Get);
+    assert!(!plan.keep_body);
+
+    // 307 同源：保留方法與主體。
+    let plan = plan_redirect(
+        &login,
+        "/cas/next",
+        307,
+        crate::http::Method::Post,
+        true,
+        1,
+        is_trusted_redirect_host,
+    )
+    .expect("同源 307 應可跟隨");
+    assert_eq!(plan.method, crate::http::Method::Post);
+    assert!(plan.keep_body);
+
+    // 307 跨來源：拒絕（等同把帳密重送到別的主機）。
+    let err = plan_redirect(
+        &login,
+        "https://bk-kq.xjtu.edu.cn/sa",
+        307,
+        crate::http::Method::Post,
+        true,
+        1,
+        is_trusted_redirect_host,
+    )
+    .expect_err("跨來源 307 應被拒絕");
+    assert!(
+        err.to_string().contains("拒绝把请求主体重送到其他来源"),
+        "{err}"
+    );
+}
+
+/// 重定向目的主機的信任判斷。
+#[test]
+fn trusted_redirect_hosts() {
+    use super::is_trusted_redirect_host;
+
+    assert!(is_trusted_redirect_host("lms.xjtu.edu.cn"));
+    assert!(is_trusted_redirect_host("xjtu.edu.cn"));
+    assert!(is_trusted_redirect_host("webvpn.xjtu.edu.cn"));
+    assert!(!is_trusted_redirect_host("xjtu.edu.cn.evil.com"));
+    assert!(!is_trusted_redirect_host("evil.com"));
+    assert!(!is_trusted_redirect_host("127.0.0.1"));
+}
+
+/// WebVPN 代理網址以**代理目標**判定同源，而非外層主機。
+#[test]
+fn webvpn_proxy_targets_define_the_origin() {
+    use super::same_origin;
+
+    let first = webvpn::to_webvpn_url("https://bk-kq.xjtu.edu.cn/sa").expect("改寫");
+    let same_target = webvpn::to_webvpn_url("https://bk-kq.xjtu.edu.cn/sa/next").expect("改寫");
+    let other_target = webvpn::to_webvpn_url("https://lms.xjtu.edu.cn/sa").expect("改寫");
+
+    let first = Url::parse(&first).expect("解析");
+    let same_target = Url::parse(&same_target).expect("解析");
+    let other_target = Url::parse(&other_target).expect("解析");
+
+    assert_eq!(
+        first.host_str(),
+        other_target.host_str(),
+        "外層主機相同（測試前提）"
+    );
+    assert!(same_origin(&first, &same_target), "同一代理目標應視為同源");
+    assert!(!same_origin(&first, &other_target), "代理目標不同即為跨源");
+
+    // 代理目標解不開：保守視為跨源。
+    let broken = Url::parse("https://webvpn.xjtu.edu.cn/https/zzzz/broken").expect("解析");
+    assert!(!same_origin(&broken, &broken), "無法判定時應視為跨源");
 }

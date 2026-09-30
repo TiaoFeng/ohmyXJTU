@@ -45,6 +45,46 @@ pub fn is_school_host(host: &str) -> bool {
     host == "xjtu.edu.cn" || host.ends_with(".xjtu.edu.cn")
 }
 
+/// WebVPN 代理路徑的目標資訊。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProxiedTarget {
+    /// 目標訪問方式（`http`／`https`）。
+    pub scheme: String,
+    /// 目標主機（主機名解密失敗時為 `None`）。
+    pub host: Option<String>,
+    /// 目標埠（網址未指定時為 `None`）。
+    pub port: Option<u16>,
+    /// 目標路徑（含開頭的 `/`）。
+    pub path: String,
+}
+
+/// 解析 WebVPN 代理路徑（形如 `/https[-port]/<前綴+密文>/<目標路徑>`）。
+///
+/// 不是代理路徑時回 `None`。主機名解密失敗仍會回傳其餘欄位，由呼叫端決定
+/// 要多保守。外層主機都是 `webvpn.xjtu.edu.cn`，不代表內層目的站點相同，
+/// 因此需要比較來源時一律以此結果為準。
+pub fn proxied_target(path: &str) -> Option<ProxiedTarget> {
+    let rest = path.trim_start_matches('/');
+    let (scheme, rest) = rest.split_once('/')?;
+    let (scheme, port) = match scheme.split_once('-') {
+        Some((scheme, port)) => (scheme, port.parse::<u16>().ok()),
+        None => (scheme, None),
+    };
+    if !matches!(scheme, "https" | "http") {
+        return None;
+    }
+    let (cipher, rest) = rest.split_once('/')?;
+    let host = cipher
+        .strip_prefix(PREFIX)
+        .and_then(|hex| decrypt_host(hex).ok());
+    Some(ProxiedTarget {
+        scheme: scheme.to_owned(),
+        host,
+        port,
+        path: format!("/{rest}"),
+    })
+}
+
 /// 判斷網址是否需要改寫為 WebVPN 網址。
 ///
 /// 只改寫 `xjtu.edu.cn` 及其子網域，且 WebVPN 本身不再改寫，避免無限遞迴。

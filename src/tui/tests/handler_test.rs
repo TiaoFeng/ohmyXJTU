@@ -473,6 +473,7 @@ fn failed_app(message: &str) -> App {
     let mut app = App::new(AccessPolicy::Auto);
     app.set_screen(Screen::Main);
     app.login = Some(Box::new(LoginScreen::Failed {
+        site: crate::session::SiteKind::Attendance,
         message: message.to_owned(),
     }));
     app
@@ -495,7 +496,12 @@ fn failed_screen_retries_with_saved_credentials_or_quits() {
     let mut app = failed_app("登录失败：用户名或密码错误");
 
     press(&mut app, &jobs, KeyCode::Enter);
-    assert!(matches!(rx.try_recv(), Ok(Job::RetryLogin)));
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(Job::RetryLogin {
+            site: crate::session::SiteKind::Attendance
+        })
+    ));
     assert!(
         matches!(app.login.as_deref(), Some(LoginScreen::Progress { .. })),
         "重試時應顯示進度覆蓋層"
@@ -546,7 +552,7 @@ fn failed_screen_opens_credentials_form() {
     // esc 回到失敗畫面，並保留原本的錯誤訊息。
     press(&mut app, &jobs, KeyCode::Esc);
     match app.login.as_deref() {
-        Some(LoginScreen::Failed { message }) => {
+        Some(LoginScreen::Failed { message, .. }) => {
             assert_eq!(message, "登录失败：用户名或密码错误");
         }
         other => panic!("应回到失败画面，实际为 {other:?}"),

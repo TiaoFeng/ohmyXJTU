@@ -107,6 +107,78 @@ fn ok_response() -> AppResult<HttpResponse> {
     ))
 }
 
+/// 換帳號必須重建後端：舊的 cookie jar 不得被沿用。
+///
+/// 只清狀態表不足以丟棄舊帳號在服務端留下的 SSO cookie；殘留的登入態會讓
+/// 新的登入流程被判定為「已登入」而略過帳密提交。
+#[test]
+fn reset_session_rebuilds_both_backends_and_clears_state() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let config = Config {
+        visitor_id: "0".repeat(32),
+        access_policy: AccessPolicy::Direct,
+        ..Config::default()
+    };
+
+    // 兩個後端共用一個計數器：重建時必須各自換成全新的實例。
+    let built = Arc::new(AtomicUsize::new(0));
+    let direct_counter = Arc::clone(&built);
+    let webvpn_counter = Arc::clone(&built);
+    let direct_factory: super::ClientFactory = Arc::new(move || {
+        direct_counter.fetch_add(1, Ordering::SeqCst);
+        Ok(Arc::new(FakeClient::with_responder(|_| {
+            Ok(HttpResponse::new(
+                200,
+                "https://lms.xjtu.edu.cn/user/index",
+                LOGIN_PAGE.as_bytes(),
+            ))
+        })) as Arc<dyn HttpClient>)
+    });
+    let webvpn_factory: super::ClientFactory = Arc::new(move || {
+        webvpn_counter.fetch_add(1, Ordering::SeqCst);
+        Ok(Arc::new(FakeClient::with_responder(|_| {
+            Ok(HttpResponse::new(
+                200,
+                "https://lms.xjtu.edu.cn/user/index",
+                LOGIN_PAGE.as_bytes(),
+            ))
+        })) as Arc<dyn HttpClient>)
+    });
+
+    let mut manager =
+        SessionManager::with_client_factories(&config, direct_factory, webvpn_factory)
+            .expect("建立会话管理器");
+    assert_eq!(built.load(Ordering::SeqCst), 2, "建立時兩個後端各建一次");
+
+    manager.register(Box::new(TestLmsSite));
+    manager.mark_logged_in(SiteKind::Lms, AccessMode::Direct, Vec::new());
+    assert!(manager.is_logged_in(SiteKind::Lms));
+
+    manager.reset_session().expect("重建会话");
+
+    assert_eq!(
+        built.load(Ordering::SeqCst),
+        4,
+        "重建時兩個後端都必須換成新實例（新的 cookie jar）"
+    );
+    assert!(
+        !manager.is_logged_in(SiteKind::Lms),
+        "重建後不得殘留舊的站點登入態"
+    );
+    assert!(manager.access_mode(SiteKind::Lms).is_none());
+    assert!(manager.resolved_access_mode(SiteKind::Lms).is_none());
+
+    // 下一次登入必須重新走完整流程（不會被判定為已登入）。
+    let stage = manager
+        .next_login_step(SiteKind::Lms)
+        .expect("取得登录步骤");
+    assert!(
+        matches!(stage, LoginStage::Drive(_)),
+        "重建後應重新驅動登入流程"
+    );
+}
+
 #[test]
 fn direct_policy_never_probes_campus_network() {
     let (mut manager, direct, _) = manager_with(AccessPolicy::Direct, |_| {

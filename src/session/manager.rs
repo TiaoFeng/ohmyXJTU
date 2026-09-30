@@ -43,6 +43,18 @@ struct Backend {
     logged_in: bool,
 }
 
+/// 建立 HTTP 後端的工廠。
+///
+/// 換帳號時必須取得**全新**的連線池與 cookie jar：只清狀態表不足以丟棄舊帳號
+/// 留下的 SSO cookie，殘留的登入態會讓新帳號的登入被判定為「已登入」而略過
+/// 帳密提交，之後卻把未經驗證的憑證寫回保險庫。
+type ClientFactory = Arc<dyn Fn() -> AppResult<Arc<dyn HttpClient>> + Send + Sync>;
+
+/// 正式執行使用的後端工廠：每次呼叫都建立一個新的 reqwest 客戶端。
+fn reqwest_factory() -> ClientFactory {
+    Arc::new(|| Ok(Arc::new(ReqwestClient::new(DESKTOP_USER_AGENT)?) as Arc<dyn HttpClient>))
+}
+
 /// 站點狀態。
 struct SiteState {
     access_mode: AccessMode,
@@ -72,40 +84,41 @@ pub struct SessionManager {
     credentials: Option<Credentials>,
     /// 已送出的站點請求數（診斷用；不含校園網探測）。
     requests: usize,
+    /// 直連後端工廠（[`Self::reset_session`] 據此重建直連後端）。
+    direct_factory: ClientFactory,
+    /// WebVPN 後端工廠。
+    webvpn_factory: ClientFactory,
 }
 
 impl SessionManager {
     /// 建立會話管理器。
     pub fn new(config: &Config) -> AppResult<Self> {
-        let direct = Backend {
-            client: Arc::new(ReqwestClient::new(DESKTOP_USER_AGENT)?),
-            logged_in: false,
-        };
-        let webvpn = Backend {
-            client: Arc::new(ReqwestClient::new(DESKTOP_USER_AGENT)?),
-            logged_in: false,
-        };
-        Ok(Self::from_backends(config, direct, webvpn))
+        Self::from_factories(config, reqwest_factory(), reqwest_factory())
     }
 
     /// 以指定的後端建立管理器（測試用，避免真實網路）。
+    ///
+    /// 工廠固定回傳同一個注入的後端，因此 [`Self::reset_session`] 不會換掉它；
+    /// 需要驗證「換帳號會丟棄舊 cookie jar」時改用 [`Self::with_client_factories`]。
     #[cfg(test)]
     pub fn with_clients(
         config: &Config,
         direct: Arc<dyn HttpClient>,
         webvpn: Arc<dyn HttpClient>,
     ) -> Self {
-        Self::from_backends(
-            config,
-            Backend {
-                client: direct,
-                logged_in: false,
-            },
-            Backend {
-                client: webvpn,
-                logged_in: false,
-            },
-        )
+        let direct_factory: ClientFactory = Arc::new(move || Ok(Arc::clone(&direct)));
+        let webvpn_factory: ClientFactory = Arc::new(move || Ok(Arc::clone(&webvpn)));
+        Self::from_factories(config, direct_factory, webvpn_factory).expect("建立测试用会话管理器")
+    }
+
+    /// 以指定的後端工廠建立管理器（測試用）：每次重建後端都會呼叫工廠。
+    #[cfg(test)]
+    pub fn with_client_factories(
+        config: &Config,
+        direct_factory: ClientFactory,
+        webvpn_factory: ClientFactory,
+    ) -> AppResult<Self> {
+        Self::from_factories(config, direct_factory, webvpn_factory)
     }
 
     /// 直接標記站點已登入（跳過登入流程，測試用）。
@@ -130,11 +143,26 @@ impl SessionManager {
         }
     }
 
-    fn from_backends(config: &Config, direct: Backend, webvpn: Backend) -> Self {
-        Self {
+    /// 依後端工廠建立管理器。
+    fn from_factories(
+        config: &Config,
+        direct_factory: ClientFactory,
+        webvpn_factory: ClientFactory,
+    ) -> AppResult<Self> {
+        let direct = Backend {
+            client: direct_factory()?,
+            logged_in: false,
+        };
+        let webvpn = Backend {
+            client: webvpn_factory()?,
+            logged_in: false,
+        };
+        Ok(Self {
             policy: config.access_policy,
             visitor_id: config.visitor_id.clone(),
             adapters: Vec::new(),
+            direct_factory,
+            webvpn_factory,
             direct,
             webvpn,
             probe: None,
@@ -143,7 +171,7 @@ impl SessionManager {
             pending: None,
             sites: HashMap::new(),
             credentials: None,
-        }
+        })
     }
 
     /// 註冊站點擴充點。
@@ -182,19 +210,45 @@ impl SessionManager {
         self.sites.contains_key(&site)
     }
 
-    /// 清除所有站點的登入狀態與已解析結果（換帳號時使用）。
+    /// 重建兩個 HTTP 後端並清除所有站點狀態（換帳號時使用）。
     ///
-    /// 與 [`Self::set_access_policy`] 不同，不動訪問策略；WebVPN 的登入態也一併失效，
-    /// 下一次 [`Self::next_login_step`] 會重新登入各站點。
-    pub fn clear_logins(&mut self) {
+    /// 與 [`Self::set_access_policy`] 不同，不動訪問策略。舊帳號在服務端留下的
+    /// SSO cookie 會連同舊後端一起被丟棄（只清狀態表不會清 cookie jar），
+    /// 因此下一次 [`Self::next_login_step`] 一定會重新提交憑證。
+    ///
+    /// 目前已解析的路由、探測快取與站點登入態一併失效。
+    pub fn reset_session(&mut self) -> AppResult<()> {
+        // 兩個後端都先建好才指派：任一失敗時現有會話維持原狀。
+        let direct = (self.direct_factory)()?;
+        let webvpn = (self.webvpn_factory)()?;
+        self.direct = Backend {
+            client: direct,
+            logged_in: false,
+        };
+        self.webvpn = Backend {
+            client: webvpn,
+            logged_in: false,
+        };
+        self.reset_state();
+        Ok(())
+    }
+
+    /// 清除站點登入狀態、已解析的路由與校園網探測快取。
+    fn reset_state(&mut self) {
+        self.probe = None;
         self.resolved.clear();
+        self.pending = None;
         self.sites.clear();
-        self.webvpn.logged_in = false;
     }
 
     /// 站點目前使用的訪問方式（尚未解析時為 `None`）。
     pub fn access_mode(&self, site: SiteKind) -> Option<AccessMode> {
         self.sites.get(&site).map(|state| state.access_mode)
+    }
+
+    /// 站點已解析的訪問方式（尚未完成登入也會回傳；用於區分登入失敗的後端）。
+    pub fn resolved_access_mode(&self, site: SiteKind) -> Option<AccessMode> {
+        self.resolved.get(&site).copied()
     }
 
     /// 已送出的站點請求數（診斷用；不含校園網探測）。

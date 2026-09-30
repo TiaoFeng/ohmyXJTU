@@ -19,6 +19,7 @@ use crate::config::Config;
 use crate::credentials::Vault;
 use crate::domain::homework::HomeworkGroup;
 use crate::error::{AppError, AppResult};
+use crate::session::SiteKind;
 use crate::task::{self, Event, FailedTarget, Job};
 
 use app::{
@@ -206,8 +207,8 @@ fn apply_event(app: &mut App, event: Event, jobs: &Sender<Job>) {
                 error,
             }));
         }
-        Event::LoginFailed(message) => {
-            set_login_error(app, message);
+        Event::LoginFailed { site, message } => {
+            set_login_error(app, site, message);
         }
         Event::LoginSucceeded { site, mode } => {
             app.login = None;
@@ -381,12 +382,14 @@ fn apply_event(app: &mut App, event: Event, jobs: &Sender<Job>) {
             what,
             message,
             target,
+            site,
         } => {
             // 錯誤只標記受影響的頁面；其他頁面保持原狀。
             app.fail_target(target, &message);
             let text = format!("{what}失败：{message}");
+            let login_site = site.unwrap_or(SiteKind::Attendance);
             match target {
-                FailedTarget::Login => set_login_error(app, text.clone()),
+                FailedTarget::Login => set_login_error(app, login_site, text.clone()),
                 FailedTarget::Settings => {
                     // 設定保存失敗：保留彈窗與草稿，僅解除「保存中」；
                     // 設定表單失敗則就地顯示錯誤並恢復輸入。
@@ -425,6 +428,7 @@ fn apply_event(app: &mut App, event: Event, jobs: &Sender<Job>) {
             // 卡在一個不會再有後續事件的畫面（連 r 都無法刷新）。
             if matches!(app.login.as_deref(), Some(LoginScreen::Progress { .. })) {
                 app.login = Some(Box::new(LoginScreen::Failed {
+                    site: login_site,
                     message: format!("登录未完成：{message}"),
                 }));
             }
@@ -439,14 +443,14 @@ fn now_clock() -> String {
 }
 
 /// 顯示登入錯誤：憑證表單就地顯示，其餘登入畫面回到失敗畫面。
-fn set_login_error(app: &mut App, message: String) {
+fn set_login_error(app: &mut App, site: SiteKind, message: String) {
     match app.login.as_deref_mut() {
         Some(LoginScreen::Credentials { form, .. }) => {
             form.busy = false;
             form.error = Some(message);
         }
         // 已有其他登入畫面（進度、驗證碼、簡訊、失敗）：就地切換成失敗畫面。
-        Some(_) => app.login = Some(Box::new(LoginScreen::Failed { message })),
+        Some(_) => app.login = Some(Box::new(LoginScreen::Failed { site, message })),
         // 使用者已關閉覆蓋層：不要用遲到的失敗事件把彈窗重新彈出來。
         None => {}
     }

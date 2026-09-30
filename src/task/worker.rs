@@ -73,8 +73,11 @@ pub enum Job {
     SendMfaCode,
     /// 提交簡訊驗證碼（自動零化）。
     VerifyMfaCode(Secret),
-    /// 重新開始登入（登入失敗後重試）。
-    RetryLogin,
+    /// 重新開始登入（登入失敗後重試；沿用實際失敗的站點）。
+    RetryLogin {
+        /// 要重新登入的站點。
+        site: SiteKind,
+    },
     /// 以重新輸入的帳號密碼重試登入，成功後才寫入保險庫。
     RetryWithAccount {
         /// 使用者重新輸入的帳號密碼。
@@ -160,7 +163,7 @@ impl Job {
             Self::Unlock { .. } => "解锁凭证".to_owned(),
             Self::SubmitCaptcha(_) | Self::RefreshCaptcha => "验证码".to_owned(),
             Self::SendMfaCode | Self::VerifyMfaCode(_) => "短信验证".to_owned(),
-            Self::RetryLogin => "登录".to_owned(),
+            Self::RetryLogin { .. } => "登录".to_owned(),
             Self::RetryWithAccount { .. } => "重新输入账户".to_owned(),
             Self::LoadSchedule => "课表".to_owned(),
             Self::LoadHomework { .. } => "作业".to_owned(),
@@ -250,8 +253,13 @@ pub enum Event {
         /// 是否已發送驗證碼。
         sent: bool,
     },
-    /// 登入失敗。
-    LoginFailed(String),
+    /// 登入失敗（附站點，介面重試時沿用同一個站點）。
+    LoginFailed {
+        /// 登入失敗的站點。
+        site: SiteKind,
+        /// 失敗訊息。
+        message: String,
+    },
     /// 登入成功（附完成登入的站點與實際訪問方式）。
     LoginSucceeded {
         /// 完成登入的站點。
@@ -318,6 +326,8 @@ pub enum Event {
         message: String,
         /// 失敗所屬的介面位置。
         target: FailedTarget,
+        /// 失敗所屬的站點（登入類任務才有；供介面重試同一站點）。
+        site: Option<SiteKind>,
     },
 }
 
@@ -411,6 +421,38 @@ struct PendingVault {
     previous: Option<Credentials>,
 }
 
+/// 資料載入失敗，連同真正失敗的站點。
+///
+/// 作業載入會先向考勤系統查當前學期、再向思源學堂查課程與提交記錄；只看任務
+/// 種類（`Job::LoadHomework` → 思源學堂）會把考勤系統的登入失效誤報成思源學堂，
+/// 重登與錯誤訊息都會指到錯的站點。
+struct SiteFailure {
+    /// 實際失敗的站點。
+    site: SiteKind,
+    /// 原始錯誤。
+    err: AppError,
+}
+
+impl SiteFailure {
+    /// 考勤系統的失敗。
+    fn attendance(err: AppError) -> Self {
+        Self {
+            site: SiteKind::Attendance,
+            err,
+        }
+    }
+}
+
+impl From<AppError> for SiteFailure {
+    /// 作業載入的錯誤預設屬於思源學堂；考勤系統須以 [`SiteFailure::attendance`] 標記。
+    fn from(err: AppError) -> Self {
+        Self {
+            site: SiteKind::Lms,
+            err,
+        }
+    }
+}
+
 /// 背景工作執行緒。
 struct Worker {
     jobs: Receiver<Job>,
@@ -422,6 +464,21 @@ struct Worker {
     flow: Option<LoginFlow>,
     retry: Option<Job>,
     pending_vault: Option<PendingVault>,
+    /// 最近一次登入嘗試的站點：失敗訊息與介面重試據此定位，
+    /// 不依赖任務種類猜測（考勤與思源學堂都可能發起登入）。
+    login_site: Option<SiteKind>,
+    /// 本次登入是否真的向伺服器提交過帳密。
+    ///
+    /// 伺服器端仍有登入態時，驅動器會直接回報成功而完全不提交帳密；
+    /// 這種「登入」不能證明換帳號時的新憑證可用，不得寫回保險庫。
+    login_submitted_credentials: bool,
+    /// 各（帳號, 後端）已連續失敗的登入次數。
+    ///
+    /// 伺服器端的驗證碼門檻以「同一帳號連續失敗」計算，而驅動器每次重試都會
+    /// 重建；次數保存於此並在重建後注入，門檻才達得到。
+    login_failures: HashMap<(String, Option<AccessMode>), u32>,
+    /// 最近一次登入嘗試的計數鍵值（帳號 + 後端）。
+    login_failure_key: Option<(String, Option<AccessMode>)>,
     /// 最近一次取得的驗證碼圖片路徑（登入結束或重新開始時刪除）。
     captcha_path: Option<PathBuf>,
     /// 待執行的資料任務（依序、已去重）。
@@ -644,6 +701,10 @@ pub fn spawn(config: Config, vault: Vault) -> AppResult<(Sender<Job>, Receiver<E
         flow: None,
         retry: None,
         pending_vault: None,
+        login_site: None,
+        login_submitted_credentials: false,
+        login_failures: HashMap::new(),
+        login_failure_key: None,
         captcha_path: None,
         pending_data: VecDeque::new(),
         generation: 0,
@@ -719,10 +780,20 @@ impl Worker {
         let shutdown = matches!(job, Job::Shutdown);
         let what = job.label();
         let target = failed_target_of(&job);
+        let site = self.login_site_of(&job);
+        // 帳號切換失敗時必須丟棄待存憑證：否則稍後任何一次登入成功都會用它
+        // 寫回保險庫，把未驗證的新帳密或已變更的口令蓋回檔案。
+        let rolls_back = matches!(
+            job,
+            Job::ChangeAccount { .. } | Job::RetryWithAccount { .. }
+        );
         if let Err(err) = self.dispatch_control(job) {
             // 登入類任務出錯即視為本次登入結束：清掉暫存的驗證碼圖片。
             if target == FailedTarget::Login {
                 self.clear_captcha();
+            }
+            if rolls_back {
+                self.discard_pending_vault();
             }
             self.emit(Event::Failed {
                 what: if what.is_empty() {
@@ -732,13 +803,30 @@ impl Worker {
                 },
                 message: err.to_string(),
                 target,
+                site,
             });
         }
         shutdown
     }
 
+    /// 登入類任務對應的站點（介面據此決定重試哪個站點）。
+    fn login_site_of(&self, job: &Job) -> Option<SiteKind> {
+        match job {
+            Job::RetryLogin { site } => Some(*site),
+            Job::SubmitCaptcha(_)
+            | Job::RefreshCaptcha
+            | Job::SendMfaCode
+            | Job::VerifyMfaCode(_)
+            | Job::RetryWithAccount { .. }
+            | Job::CancelLogin => self.login_site,
+            _ => None,
+        }
+    }
+
     /// 回報資料任務失敗。
-    fn emit_failed(&self, job: &Job, err: AppError) {
+    ///
+    /// `site` 為實際失敗的站點；無法判定時為 `None`（介面就不會把它當成登入失敗）。
+    fn emit_failed(&self, job: &Job, site: Option<SiteKind>, err: AppError) {
         let what = job.label();
         self.emit(Event::Failed {
             what: if what.is_empty() {
@@ -748,6 +836,7 @@ impl Worker {
             },
             message: err.to_string(),
             target: failed_target_of(job),
+            site,
         });
     }
 
@@ -774,7 +863,7 @@ impl Worker {
             Job::RefreshCaptcha => self.refresh_captcha(),
             Job::SendMfaCode => self.send_mfa_code(),
             Job::VerifyMfaCode(code) => self.verify_mfa_code(&code),
-            Job::RetryLogin => self.retry_login(),
+            Job::RetryLogin { site } => self.retry_login(site),
             Job::RetryWithAccount {
                 credentials,
                 passphrase,
@@ -825,10 +914,13 @@ impl Worker {
         // 記下舊憑證：登入失敗時還原記憶體中的憑證，避免用未驗證的新憑證繼續作業。
         let previous = self.credentials.clone();
         // 換帳號：舊帳號的站點登入狀態、快取與頁面資料一律作廢，並換用新憑證登入。
+        // 必須重建後端（全新 cookie jar）：只清狀態表不足以丟棄舊帳號在服務端
+        // 留下的 SSO cookie，殘留登入態會讓新帳號的登入被判定為「已登入」
+        // 而略過帳密提交。
         {
             let session = self.session_mut()?;
             session.set_credentials(credentials.clone());
-            session.clear_logins();
+            session.reset_session()?;
         }
         self.credentials = Some(credentials.clone());
         self.retry = None;
@@ -836,6 +928,9 @@ impl Worker {
         self.relogin_attempts = 0;
         self.pending_data.clear();
         self.cache.clear();
+        // 換帳號：失敗計數屬於舊帳號，一併清除。
+        self.login_failures.clear();
+        self.login_failure_key = None;
         self.emit(Event::SessionsCleared {
             account_changed: true,
         });
@@ -847,7 +942,14 @@ impl Worker {
             previous,
         });
         // 立即登入以驗證新憑證（失敗時介面顯示登入錯誤，舊憑證保持不變）。
-        self.begin_login(SiteKind::Attendance, None)
+        let result = self.begin_login(SiteKind::Attendance, None);
+        if result.is_err() {
+            // 登入連開始都做不到（離線、登入頁取不到…）：本次帳號切換到此結束，
+            // 待存憑證必須作廢，否則之後任何一次登入成功都會用它寫回保險庫——
+            // 若期間使用者又改了口令，還會把新口令蓋回舊口令。
+            self.discard_pending_vault();
+        }
+        result
     }
 
     /// 憑證檔權限若過寬（例如由他處複製進來而帶有 0644），收緊並告知使用者。
@@ -865,6 +967,9 @@ impl Worker {
 
     fn change_passphrase(&mut self, old: &str, new: &str) -> AppResult<()> {
         self.vault.change_passphrase(old, new)?;
+        // 待存憑證是以舊口令加密的計畫：口令已改變，該計畫立即失效（並還原舊憑證），
+        // 否則稍後登入成功會用舊口令覆寫保險庫，把新口令蓋回去。
+        self.discard_pending_vault();
         self.emit(Event::PassphraseUpdated);
         Ok(())
     }
@@ -893,6 +998,9 @@ impl Worker {
         self.retry = None;
         // 待存憑證屬於舊帳號：換帳號後一律作廢。
         self.pending_vault = None;
+        // 舊帳號的登入失敗計數不再適用。
+        self.login_failures.clear();
+        self.login_failure_key = None;
         // 換帳號後舊任務與快取一律作廢，進行中的資料任務不再回報。
         self.generation += 1;
         self.relogin_attempts = 0;
@@ -944,14 +1052,52 @@ impl Worker {
         self.discard_pending_vault();
         // 等待重登的任務不會再被重試：明確收斂它的頁面，否則該頁會永遠停在
         //「載入中」（登入互動期間資料任務一律延後，取消後沒有事件會再觸發）。
+        self.settle_pending_retry();
+        self.clear_captcha();
+        self.emit(Event::Notice("已取消登录流程，可重新刷新页面".to_owned()));
+        Ok(())
+    }
+
+    /// 丟棄等待重登的資料任務，並通知介面收斂該頁的載入狀態。
+    fn settle_pending_retry(&mut self) {
         if let Some(job) = self.retry.take() {
             self.emit(Event::LoadingCancelled {
                 target: failed_target_of(&job),
             });
         }
-        self.clear_captcha();
-        self.emit(Event::Notice("已取消登录流程，可重新刷新页面".to_owned()));
-        Ok(())
+    }
+
+    /// 登入失敗計數的鍵值：同帳號且同後端（直連／WebVPN）才累計。
+    fn login_failure_key_for(
+        &self,
+        username: &str,
+        site: SiteKind,
+    ) -> (String, Option<AccessMode>) {
+        (
+            username.to_owned(),
+            self.session
+                .as_ref()
+                .and_then(|session| session.resolved_access_mode(site)),
+        )
+    }
+
+    /// 保存目前登入嘗試的失敗次數。
+    fn store_login_failures(&mut self, count: u32) {
+        let Some(key) = self.login_failure_key.clone() else {
+            return;
+        };
+        if count == 0 {
+            self.login_failures.remove(&key);
+        } else {
+            self.login_failures.insert(key, count);
+        }
+    }
+
+    /// 清除目前登入嘗試的失敗次數（登入成功時）。
+    fn clear_login_failures(&mut self) {
+        if let Some(key) = self.login_failure_key.take() {
+            self.login_failures.remove(&key);
+        }
     }
 
     /// 丟棄待存憑證，並把記憶體中的憑證還原為嘗試新憑證前的版本。
@@ -991,6 +1137,10 @@ impl Worker {
             .credentials
             .clone()
             .ok_or_else(|| AppError::config("尚未解锁凭证"))?;
+        // 記下本次登入的站點：失敗訊息與介面重試都要能指出是哪個站點。
+        self.login_site = Some(site);
+        // 新的一輪登入：重新觀察是否真的提交過帳密。
+        self.login_submitted_credentials = false;
         // 重新開始登入時丟棄上一個（多半已失敗的）流程與其驗證碼圖片。
         self.flow = None;
         self.clear_captcha();
@@ -1013,7 +1163,17 @@ impl Worker {
         match stage {
             LoginStage::Done => self.finish_login(site, retry),
             LoginStage::Drive(mut driver) => {
+                // 沿用同帳號、同後端的失敗次數：伺服器端的驗證碼門檻以連續失敗
+                // 次數計算，重試時歸零會讓驗證碼永遠不會被要求。
+                let key = self.login_failure_key_for(&credentials.username, site);
+                driver.set_fail_count(self.login_failures.get(&key).copied().unwrap_or(0));
+                self.login_failure_key = Some(key);
                 let reply = driver.start(&credentials, AccountType::Undergraduate)?;
+                // 同一次登入可能經過多個驅動器（WebVPN 後端 → 站點），
+                // 只要其中任一個提交過帳密，就算驗證過新憑證。
+                self.login_submitted_credentials |= !driver.used_existing_session();
+                let failures = driver.fail_count();
+                self.store_login_failures(failures);
                 self.flow = Some(LoginFlow {
                     site,
                     driver,
@@ -1025,14 +1185,28 @@ impl Worker {
     }
 
     fn handle_reply(&mut self, reply: LoginReply) -> AppResult<()> {
+        // 先把驅動器目前的失敗次數存回：失敗即丟棄驅動器，下次重試會重建，
+        // 次數必須活過重建，伺服器要求的驗證碼才會出現。
+        let failures = self.flow.as_ref().map(|flow| flow.driver.fail_count());
+        if let Some(failures) = failures {
+            self.store_login_failures(failures);
+        }
         match reply {
-            LoginReply::Success => self.complete_flow(),
+            LoginReply::Success => {
+                // 登入成功：該帳號的失敗計數歸零。
+                self.clear_login_failures();
+                self.complete_flow()
+            }
             LoginReply::Fail { message } => {
+                let site = self.flow.as_ref().map(|flow| flow.site);
                 self.flow = None;
                 // 憑證被拒：丟棄待存憑證（並還原舊憑證），不覆蓋保險庫中的舊憑證。
                 self.discard_pending_vault();
                 self.clear_captcha();
-                self.emit(Event::LoginFailed(message));
+                self.emit(Event::LoginFailed {
+                    site: site.or(self.login_site).unwrap_or(SiteKind::Attendance),
+                    message,
+                });
                 Ok(())
             }
             LoginReply::NeedCaptcha => {
@@ -1078,6 +1252,15 @@ impl Worker {
     fn finish_login(&mut self, site: SiteKind, retry: Option<Job>) -> AppResult<()> {
         // 登入成功：驗證碼圖片不再需要，立即清除。
         self.clear_captcha();
+        // 換帳號時若整個流程都沒有提交帳密，代表伺服器端仍有舊帳號的登入態，
+        // 新憑證從未被驗證：不得寫回保險庫（只丟棄待存狀態並回報錯誤）。
+        if self.pending_vault.is_some() && !self.login_submitted_credentials {
+            self.discard_pending_vault();
+            self.settle_pending_retry();
+            return Err(AppError::protocol(
+                "当前会话仍处于登录状态，无法验证新账号（已保留原有凭证）",
+            ));
+        }
         // 登入成功後才更新保險庫，失敗的憑證不會覆蓋舊憑證。
         self.commit_pending_vault();
         let mode = self
@@ -1097,10 +1280,20 @@ impl Worker {
     }
 
     /// 把等待中的憑證寫入保險庫；寫入失敗不影響已完成的登入。
+    ///
+    /// 等待期間加密口令可能已被更改（例如換帳號失敗後改口令）：寫入前先確認
+    /// 待存口令仍能解開現行檔案，否則寫入會把保險庫改回舊口令、新口令失效。
     fn commit_pending_vault(&mut self) {
         let Some(pending) = self.pending_vault.take() else {
             return;
         };
+
+        if self.vault.load(&pending.passphrase).is_err() {
+            self.emit(Event::Notice(
+                "登录成功，但加密口令已变更，未保存新的账号凭据".to_owned(),
+            ));
+            return;
+        }
 
         match self.vault.store(&pending.passphrase, &pending.credentials) {
             Ok(()) => self.emit(Event::AccountUpdated),
@@ -1142,10 +1335,10 @@ impl Worker {
         self.handle_reply(reply)
     }
 
-    fn retry_login(&mut self) -> AppResult<()> {
+    fn retry_login(&mut self, site: SiteKind) -> AppResult<()> {
         // 使用者手動重試：自動重登額度重新計算。
         self.relogin_attempts = 0;
-        self.begin_login(SiteKind::Attendance, None)
+        self.begin_login(site, None)
     }
 
     /// 以使用者重新輸入的憑證重試登入；先驗證口令，登入成功後才寫入保險庫。
@@ -1157,14 +1350,41 @@ impl Worker {
         self.relogin_attempts = 0;
         // 先記下舊憑證，取消或憑證被拒時才能還原（見 `discard_pending_vault`）。
         let previous = self.credentials.clone();
-        self.session_mut()?.set_credentials(credentials.clone());
+        // 重新輸入的是同一帳號時保留失敗計數（伺服器以連續失敗決定是否要求
+        // 驗證碼）；換成別的帳號才重設。
+        let same_account = previous
+            .as_ref()
+            .is_some_and(|previous| previous.username == credentials.username);
+        if !same_account {
+            self.login_failures.clear();
+        }
+        self.login_failure_key = None;
+        // 完整走一次帳號切換：重建後端（丟棄舊 cookie）並換用新憑證，
+        // 否則站點仍在登入狀態時會直接進入成功分支，完全跳過網路驗證。
+        {
+            let session = self.session_mut()?;
+            session.set_credentials(credentials.clone());
+            session.reset_session()?;
+        }
         self.credentials = Some(credentials.clone());
+        // 舊帳號的站點登入狀態、快取與頁面資料一律作廢。
+        self.generation += 1;
+        self.pending_data.clear();
+        self.cache.clear();
+        self.emit(Event::SessionsCleared {
+            account_changed: true,
+        });
         self.pending_vault = Some(PendingVault {
             passphrase: Secret::from(passphrase),
             credentials,
             previous,
         });
-        self.begin_login(SiteKind::Attendance, None)
+        let result = self.begin_login(SiteKind::Attendance, None);
+        if result.is_err() {
+            // 同 `change_account`：流程連開始都做不到時，待存憑證必須作廢。
+            self.discard_pending_vault();
+        }
+        result
     }
 
     fn driver(&self) -> AppResult<&LoginDriver> {
@@ -1210,7 +1430,10 @@ impl Worker {
         match self.load_once(&job) {
             Ok(Some(event)) => self.emit(event),
             Ok(None) => {}
-            Err(err) => self.report_data_failure(job, generation, err),
+            Err(err) => match site_of(&job) {
+                Some(site) => self.report_data_failure(site, job, generation, err),
+                None => self.emit_failed(&job, None, err),
+            },
         }
     }
 
@@ -1294,15 +1517,13 @@ impl Worker {
     }
 
     /// 資料任務失敗的統一處理：有限回退 → 重新登入 → 回報錯誤。
-    fn report_data_failure(&mut self, job: Job, generation: u64, err: AppError) {
+    ///
+    /// `site` 為實際失敗的站點，由呼叫端決定（不一律從任務種類推導）。
+    fn report_data_failure(&mut self, site: SiteKind, job: Job, generation: u64, err: AppError) {
         // 代際已變（帳號或訪問模式被切換）：舊任務的錯誤直接忽略。
         if generation != self.generation {
             return;
         }
-        let Some(site) = site_of(&job) else {
-            self.emit_failed(&job, err);
-            return;
-        };
 
         // 直連失敗：Auto 模式下允許改走 WebVPN 一次。
         let switched = matches!(
@@ -1326,7 +1547,7 @@ impl Worker {
                 // 自動重登後站點仍回報登入態失效：停止自動重試，避免
                 //「重登→重試→再失效」的無上限迴圈，交由使用者手動重試。
                 if let Some(job) = self.retry.take() {
-                    self.emit_failed(&job, AppError::ReloginExhausted);
+                    self.emit_failed(&job, Some(site), AppError::ReloginExhausted);
                 }
                 return;
             }
@@ -1340,13 +1561,13 @@ impl Worker {
                 //（`begin_login` 已進到會顯示進度的階段），介面會在收到本失敗
                 // 事件時把它收斂成可重試的失敗畫面。
                 if let Some(job) = self.retry.take() {
-                    self.emit_failed(&job, login_err);
+                    self.emit_failed(&job, Some(site), login_err);
                 }
             }
             return;
         }
 
-        self.emit_failed(&job, err);
+        self.emit_failed(&job, Some(site), err);
     }
 
     fn load_schedule(&mut self) -> AppResult<ScheduleData> {
@@ -1411,8 +1632,8 @@ impl Worker {
         let mut runner = match self.begin_homework(force) {
             Ok(Some(runner)) => runner,
             Ok(None) => return,
-            Err(err) => {
-                self.report_data_failure(job, generation, err);
+            Err(failure) => {
+                self.report_data_failure(failure.site, job, generation, failure.err);
                 return;
             }
         };
@@ -1435,14 +1656,15 @@ impl Worker {
                 return;
             }
             if let Err(err) = self.homework_step(&mut runner) {
-                self.report_data_failure(job, generation, err);
+                // 步進階段只會向思源學堂查詢。
+                self.report_data_failure(SiteKind::Lms, job, generation, err);
                 return;
             }
         }
     }
 
     /// 準備作業載入：判定學期、過濾課程並回報首批進度。
-    fn begin_homework(&mut self, force: bool) -> AppResult<Option<HomeworkRunner>> {
+    fn begin_homework(&mut self, force: bool) -> Result<Option<HomeworkRunner>, SiteFailure> {
         let started = Instant::now();
         let requests_baseline = self.request_count();
         let (courses, skipped_data) = self.lms_courses(force)?;
@@ -1470,7 +1692,12 @@ impl Worker {
             return Ok(None);
         }
 
-        let attendance_term = self.attendance_term()?;
+        // 考勤系統的失敗必須標成考勤站點：否則會用 `Job::LoadHomework` 推得
+        // 思源學堂，重登之後還是會失敗，錯誤訊息也指向錯的站點。
+        let attendance_term = match self.attendance_term() {
+            Ok(term) => term,
+            Err(err) => return Err(SiteFailure::attendance(err)),
+        };
         let remembered = self
             .config
             .homework_term
@@ -1902,7 +2129,7 @@ fn failed_target_of(job: &Job) -> FailedTarget {
         | Job::RefreshCaptcha
         | Job::SendMfaCode
         | Job::VerifyMfaCode(_)
-        | Job::RetryLogin
+        | Job::RetryLogin { .. }
         | Job::RetryWithAccount { .. }
         | Job::CancelLogin => FailedTarget::Login,
         Job::CreateVault { .. }

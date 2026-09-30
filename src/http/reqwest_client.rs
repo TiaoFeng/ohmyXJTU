@@ -4,8 +4,10 @@ use std::time::Duration;
 
 use reqwest::blocking::Client;
 use reqwest::redirect::Policy;
+use url::Url;
 
 use super::{Body, HttpClient, HttpRequest, HttpResponse, Method};
+use crate::auth::webvpn;
 use crate::error::{AppError, AppResult, NetworkKind};
 
 /// 單次請求的預設逾時。
@@ -17,25 +19,50 @@ const MAX_REDIRECTS: usize = 10;
 /// 錯誤鏈摘要的最大長度（字元數）。
 const MAX_DETAIL_CHARS: usize = 320;
 
+/// 跨來源重定向時仍可保留的標頭。
+///
+/// 採白名單而非黑名單：日後新增任何自訂標頭（例如新的業務憑證）都會預設在
+/// 跨來源時被丟棄，不會因為忘記更新清單而外洩。Cookie 由 cookie jar 依網域
+/// 自行處理，不需要（也不應該）由呼叫端轉送。
+const CROSS_ORIGIN_SAFE_HEADERS: [&str; 3] = ["user-agent", "accept", "accept-language"];
+
 /// 內建 cookie jar 的阻塞式 HTTP 客戶端。
 ///
 /// 同一個實例共享連線池與 cookie，對應一個「會話後端」。
-/// 需要觀察 302 等狀態碼時，可透過 [`HttpRequest::no_redirect`] 改用不跟隨重定向的內部客戶端。
+///
+/// 重定向一律由本層**逐跳**處理（客戶端本身設為不跟隨）：`reqwest` 的自動跟隨
+/// 只限制跳數，跨主機時不會移除自訂標頭（例如考勤的 `X-Business-Token`）、
+/// 不阻止 HTTPS→HTTP 降級，也會讓 307/308 把 POST 主體重送到別的來源。
+/// 需要觀察 302 等狀態碼時，仍可用 [`HttpRequest::no_redirect`] 取得原始回應。
 #[derive(Debug, Clone)]
 pub struct ReqwestClient {
-    redirecting: Client,
-    fixed: Client,
+    client: Client,
     user_agent: String,
+    /// 重定向目的主機的信任判斷（測試可放寬為本機假伺服器）。
+    trusted_host: fn(&str) -> bool,
 }
 
 impl ReqwestClient {
     /// 建立客戶端。
     pub fn new(user_agent: impl Into<String>) -> AppResult<Self> {
+        Self::with_trusted_host(user_agent, is_trusted_redirect_host)
+    }
+
+    /// 建立客戶端並指定重定向目的主機的信任判斷（測試用：本機 TCP 假伺服器）。
+    #[cfg(test)]
+    pub fn new_insecure_for_tests(user_agent: impl Into<String>) -> AppResult<Self> {
+        Self::with_trusted_host(user_agent, |_| true)
+    }
+
+    fn with_trusted_host(
+        user_agent: impl Into<String>,
+        trusted_host: fn(&str) -> bool,
+    ) -> AppResult<Self> {
         let user_agent = user_agent.into();
         Ok(Self {
-            redirecting: build_client(&user_agent, Policy::limited(MAX_REDIRECTS))?,
-            fixed: build_client(&user_agent, Policy::none())?,
+            client: build_client(&user_agent)?,
             user_agent,
+            trusted_host,
         })
     }
 
@@ -43,19 +70,12 @@ impl ReqwestClient {
     pub fn user_agent(&self) -> &str {
         &self.user_agent
     }
-}
 
-impl HttpClient for ReqwestClient {
-    fn send(&self, request: HttpRequest) -> AppResult<HttpResponse> {
-        let client = if request.follow_redirects {
-            &self.redirecting
-        } else {
-            &self.fixed
-        };
-
+    /// 送出請求，並依需求逐跳跟隨重定向。
+    fn send_once(&self, request: &HttpRequest) -> AppResult<HttpResponse> {
         let mut builder = match request.method {
-            Method::Get => client.get(&request.url),
-            Method::Post => client.post(&request.url),
+            Method::Get => self.client.get(&request.url),
+            Method::Post => self.client.post(&request.url),
         };
 
         for (name, value) in &request.headers {
@@ -64,10 +84,10 @@ impl HttpClient for ReqwestClient {
         if let Some(timeout) = request.timeout {
             builder = builder.timeout(timeout);
         }
-        builder = match request.body {
-            Some(Body::Form(fields)) => builder.form(&fields),
-            Some(Body::Json(value)) => builder.json(&value),
-            Some(Body::Bytes(bytes)) => builder.body(bytes),
+        builder = match &request.body {
+            Some(Body::Form(fields)) => builder.form(fields),
+            Some(Body::Json(value)) => builder.json(value),
+            Some(Body::Bytes(bytes)) => builder.body(bytes.clone()),
             None => builder,
         };
 
@@ -96,13 +116,215 @@ impl HttpClient for ReqwestClient {
             body,
         })
     }
+
+    /// 逐跳送出請求，直到取得最終回應。
+    ///
+    /// 每一跳都重新檢查目的地（協定、主機）、是否同源，以及下一個請求要帶
+    /// 哪些標頭與主體；跨來源時只保留 [`CROSS_ORIGIN_SAFE_HEADERS`]，並拒絕
+    /// 讓帶主體的 307/308 重送到其他來源（等同洩漏帳密、簡訊碼或業務憑證）。
+    fn send_following(&self, request: HttpRequest) -> AppResult<HttpResponse> {
+        let mut method = request.method;
+        let mut body = request.body.clone();
+        let mut headers = request.headers.clone();
+        let mut url = request.url.clone();
+        let mut hops = 0_usize;
+
+        loop {
+            let response = self.send_once(&HttpRequest {
+                method,
+                url: url.clone(),
+                headers: headers.clone(),
+                body: body.clone(),
+                timeout: request.timeout,
+                follow_redirects: false,
+            })?;
+
+            let Some(location) = redirect_location(&response) else {
+                return Ok(response);
+            };
+            hops += 1;
+            let previous = Url::parse(&response.final_url)
+                .map_err(|_| redirect_error("重定向来源无法解析"))?;
+            let plan = plan_redirect(
+                &previous,
+                &location,
+                response.status,
+                method,
+                body.is_some(),
+                hops,
+                self.trusted_host,
+            )?;
+
+            if !plan.keep_headers {
+                headers.retain(|(name, _)| is_cross_origin_safe(name));
+            }
+            if !plan.keep_body {
+                body = None;
+            }
+            method = plan.method;
+            url = plan.url;
+        }
+    }
 }
 
-fn build_client(user_agent: &str, policy: Policy) -> AppResult<Client> {
+impl HttpClient for ReqwestClient {
+    fn send(&self, request: HttpRequest) -> AppResult<HttpResponse> {
+        if request.follow_redirects {
+            self.send_following(request)
+        } else {
+            self.send_once(&request)
+        }
+    }
+}
+
+/// 重定向目的主機是否可接受。
+fn is_trusted_redirect_host(host: &str) -> bool {
+    webvpn::is_school_host(host) || host.eq_ignore_ascii_case(webvpn::WEBVPN_HOST)
+}
+
+/// 跨來源重定向時可保留的標頭。
+fn is_cross_origin_safe(name: &str) -> bool {
+    CROSS_ORIGIN_SAFE_HEADERS
+        .iter()
+        .any(|safe| name.eq_ignore_ascii_case(safe))
+}
+
+/// 回應是否要求重定向，以及目標位置。
+///
+/// 沒有 `Location` 的 3xx 不跟隨：原樣回傳，由呼叫端判定（例如登入態失效）。
+fn redirect_location(response: &HttpResponse) -> Option<String> {
+    if !matches!(response.status, 301 | 302 | 303 | 307 | 308) {
+        return None;
+    }
+    let location = response.header("location")?.trim();
+    (!location.is_empty()).then(|| location.to_owned())
+}
+
+/// 一次重定向的處置。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RedirectPlan {
+    /// 下一跳的網址。
+    url: String,
+    /// 下一跳使用的方法。
+    method: Method,
+    /// 是否保留原本的請求主體。
+    keep_body: bool,
+    /// 是否保留自訂標頭（僅同源時保留）。
+    keep_headers: bool,
+}
+
+/// 決定下一跳要怎麼送（純函式，便於測試）。
+///
+/// `trusted` 為目的主機的信任判斷；`hops` 為本次已跟隨的跳數（含這一跳）。
+fn plan_redirect(
+    previous: &Url,
+    location: &str,
+    status: u16,
+    method: Method,
+    has_body: bool,
+    hops: usize,
+    trusted: fn(&str) -> bool,
+) -> AppResult<RedirectPlan> {
+    if hops > MAX_REDIRECTS {
+        return Err(redirect_error("重定向次数过多"));
+    }
+    let next = previous
+        .join(location)
+        .map_err(|_| redirect_error("重定向地址无法解析"))?;
+    match next.scheme() {
+        "https" => {}
+        "http" => {
+            // 學校端點全部是 HTTPS；從 HTTPS 降到 HTTP 一律拒絕。
+            if previous.scheme() == "https" {
+                return Err(redirect_error("重定向试图降级为不加密连接"));
+            }
+        }
+        _ => return Err(redirect_error("重定向到不支持的协议")),
+    }
+    let host = next
+        .host_str()
+        .ok_or_else(|| redirect_error("重定向地址缺少主机名"))?;
+    if !trusted(host) {
+        return Err(redirect_error("重定向到学校网域之外的主机（已中止）"));
+    }
+
+    let same_origin = same_origin(previous, &next);
+    // 307/308 會保留方法與主體：跨來源重送等同把帳密、簡訊碼或業務憑證
+    // 送到別的主機，直接拒絕。
+    let keeps_method = matches!(status, 307 | 308);
+    let resend_body = keeps_method && has_body;
+    if resend_body && !same_origin {
+        return Err(redirect_error("拒绝把请求主体重送到其他来源"));
+    }
+
+    Ok(RedirectPlan {
+        url: next.to_string(),
+        method: if keeps_method { method } else { Method::Get },
+        keep_body: resend_body,
+        keep_headers: same_origin,
+    })
+}
+
+/// 網址的可比較來源（協定 ＋ 主機 ＋ 有效埠）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Origin {
+    scheme: String,
+    host: String,
+    port: Option<u16>,
+}
+
+/// 兩個網址是否同源。
+///
+/// WebVPN 代理網址以**代理目標**判定（外層主機都是 `webvpn.xjtu.edu.cn`，
+/// 不代表內層目的站點相同）；無法判定時一律視為跨來源。
+fn same_origin(previous: &Url, next: &Url) -> bool {
+    match (origin_of(previous), origin_of(next)) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
+    }
+}
+
+/// 取網址的來源；WebVPN 代理網址以代理目標為準，無法判定時回 `None`。
+fn origin_of(url: &Url) -> Option<Origin> {
+    let host = url.host_str()?;
+    if host.eq_ignore_ascii_case(webvpn::WEBVPN_HOST)
+        && let Some(target) = webvpn::proxied_target(url.path())
+    {
+        let inner = target.host?;
+        let port = target.port.or_else(|| known_port(&target.scheme));
+        return Some(Origin {
+            scheme: target.scheme,
+            host: inner.to_ascii_lowercase(),
+            port,
+        });
+    }
+    Some(Origin {
+        scheme: url.scheme().to_owned(),
+        host: host.to_ascii_lowercase(),
+        port: url.port_or_known_default(),
+    })
+}
+
+/// 協定的預設埠。
+fn known_port(scheme: &str) -> Option<u16> {
+    match scheme {
+        "https" => Some(443),
+        "http" => Some(80),
+        _ => None,
+    }
+}
+
+/// 建立重定向相關的網路錯誤（訊息不含完整網址與查詢參數）。
+fn redirect_error(detail: &str) -> AppError {
+    AppError::network_kind(NetworkKind::Redirect, detail.to_owned())
+}
+
+fn build_client(user_agent: &str) -> AppResult<Client> {
     Client::builder()
         .user_agent(user_agent)
         .cookie_store(true)
-        .redirect(policy)
+        // 重定向一律由本層逐跳處理（見 `ReqwestClient::send_following`）。
+        .redirect(Policy::none())
         .timeout(DEFAULT_TIMEOUT)
         // 考勤入口（bk-kq.xjtu.edu.cn）的第一個回應以舊式多行標頭承載
         // Content-Security-Policy（續行使用裸 LF）。Hyper 預設拒收這類標頭，

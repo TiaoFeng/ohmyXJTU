@@ -4,7 +4,7 @@
 //! 驗證重新輸入的憑證只在登入成功後才寫入保險庫，且登入失敗不會遺失待重試的任務。
 
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -145,6 +145,10 @@ impl Harness {
                 flow: None,
                 retry: None,
                 pending_vault: None,
+                login_site: None,
+                login_submitted_credentials: false,
+                login_failures: HashMap::new(),
+                login_failure_key: None,
                 captcha_path: None,
                 pending_data: VecDeque::new(),
                 generation: 0,
@@ -189,6 +193,7 @@ impl Harness {
     fn dispatch(&mut self, job: Job) -> AppResult<()> {
         let what = job.label();
         let target = failed_target_of(&job);
+        let site = self.worker.login_site_of(&job);
         match self.worker.dispatch(job) {
             Ok(()) => Ok(()),
             Err(err) => {
@@ -196,6 +201,7 @@ impl Harness {
                     what,
                     message: err.to_string(),
                     target,
+                    site,
                 });
                 Err(err)
             }
@@ -367,7 +373,7 @@ fn keeps_old_credentials_when_the_new_ones_are_rejected() {
         .expect("登录被拒属于预期结果，不应是任务错误");
 
     assert!(
-        harness.saw(|event| matches!(event, Event::LoginFailed(_))),
+        harness.saw(|event| matches!(event, Event::LoginFailed { .. })),
         "应当回报登录失败"
     );
     let stored = harness.vault.load("secret123").expect("读取凭据");
@@ -429,7 +435,7 @@ fn change_account_keeps_old_credentials_when_login_is_rejected() {
         .expect("登录被拒属于预期结果，不应是任务错误");
 
     assert!(
-        harness.saw(|event| matches!(event, Event::LoginFailed(_))),
+        harness.saw(|event| matches!(event, Event::LoginFailed { .. })),
         "应当回报登录失败"
     );
     let stored = harness.vault.load("secret123").expect("读取凭据");
@@ -459,7 +465,9 @@ fn change_account_rejects_wrong_passphrase_without_touching_the_vault() {
 fn public_key_failure_is_recoverable_by_retrying() {
     let mut harness = harness(fake_flow(1));
 
-    let first = harness.dispatch(Job::RetryLogin);
+    let first = harness.dispatch(Job::RetryLogin {
+        site: SiteKind::Attendance,
+    });
     assert!(
         matches!(first, Err(AppError::Protocol(_))),
         "公钥不是 PEM 时应报告协议错误，实际：{first:?}"
@@ -469,7 +477,11 @@ fn public_key_failure_is_recoverable_by_retrying() {
         "应当回报失败事件"
     );
 
-    harness.dispatch(Job::RetryLogin).expect("重试应当成功");
+    harness
+        .dispatch(Job::RetryLogin {
+            site: SiteKind::Attendance,
+        })
+        .expect("重试应当成功");
     assert!(
         harness.saw(|event| matches!(event, Event::LoginSucceeded { .. })),
         "第二次重试应当登录成功"
@@ -482,7 +494,9 @@ fn pending_data_job_survives_failed_relogin_and_resumes_afterwards() {
     // 模擬「載入作業時登入態失效」：任務已排入待重試。
     harness.worker.retry = Some(Job::LoadHomework { force: true });
 
-    let failed = harness.dispatch(Job::RetryLogin);
+    let failed = harness.dispatch(Job::RetryLogin {
+        site: SiteKind::Attendance,
+    });
     assert!(failed.is_err(), "公钥失败时重新登录应当失败");
     assert!(
         matches!(harness.worker.retry, Some(Job::LoadHomework { .. })),
@@ -490,7 +504,11 @@ fn pending_data_job_survives_failed_relogin_and_resumes_afterwards() {
     );
 
     // 第二次重試：考勤登入成功後應自動續跑作業載入（思源學堂課程為空）。
-    harness.dispatch(Job::RetryLogin).expect("重试应当成功");
+    harness
+        .dispatch(Job::RetryLogin {
+            site: SiteKind::Attendance,
+        })
+        .expect("重试应当成功");
     assert!(
         harness.saw(|event| matches!(event, Event::Homework(update) if update.items.is_empty())),
         "待重试的作业任务应在登录成功后自动续跑"
@@ -2364,4 +2382,329 @@ fn mode(path: &std::path::Path) -> u32 {
         .permissions()
         .mode()
         & 0o777
+}
+
+// ── 帳號切換與憑證安全（換帳號必須重新驗證，失敗不得寫回）──
+
+/// 離線的連線層錯誤。
+fn offline() -> AppError {
+    AppError::network_kind(NetworkKind::Dns, "域名解析失败".to_owned())
+}
+
+/// 換帳號離線失敗：丟棄待存憑證並還原記憶體中的舊憑證。
+#[test]
+fn offline_account_switch_discards_pending_credentials() {
+    let mut harness = harness(|_request: &HttpRequest| Err(offline()));
+
+    let result = harness.dispatch(Job::ChangeAccount {
+        passphrase: "secret123".into(),
+        credentials: Credentials::new("3120000002", "new-password"),
+    });
+
+    assert!(result.is_err(), "离线的换账号操作应当失败");
+    assert!(
+        harness.worker.pending_vault.is_none(),
+        "失敗後不得留下待存憑證，否則之後任何一次登入成功都會把它寫回"
+    );
+    assert_eq!(
+        harness
+            .worker
+            .credentials
+            .as_ref()
+            .map(|credentials| credentials.username.clone()),
+        Some("3120000001".to_owned()),
+        "記憶體中的憑證應還原為舊帳號"
+    );
+    let stored = harness.vault.load("secret123").expect("读取凭据");
+    assert_eq!(
+        stored.username, "3120000001",
+        "保险库不得被未验证的凭据覆盖"
+    );
+    assert_eq!(stored.password, "old-password");
+}
+
+/// 換帳號失敗後改口令：稍後登入成功不得把口令改回舊的（迴歸）。
+#[test]
+fn failed_account_switch_does_not_revert_a_later_passphrase_change() {
+    let flow = fake_flow(0);
+    let offline_flag = Arc::new(AtomicBool::new(true));
+    let flag = Arc::clone(&offline_flag);
+    let mut harness = harness(move |request: &HttpRequest| {
+        if flag.load(Ordering::SeqCst) {
+            return Err(offline());
+        }
+        flow(request)
+    });
+
+    // 1) 換帳號斷網 → 失敗。
+    assert!(
+        harness
+            .dispatch(Job::ChangeAccount {
+                passphrase: "secret123".into(),
+                credentials: Credentials::new("3120000002", "new-password"),
+            })
+            .is_err()
+    );
+
+    // 2) 使用者修改加密口令。
+    harness
+        .dispatch(Job::ChangePassphrase {
+            old: "secret123".into(),
+            new: "new-secret456".into(),
+        })
+        .expect("修改口令应当成功");
+
+    // 3) 網路恢復後登入成功。
+    offline_flag.store(false, Ordering::SeqCst);
+    harness
+        .dispatch(Job::RetryLogin {
+            site: SiteKind::Attendance,
+        })
+        .expect("登录应当成功");
+
+    assert!(
+        harness.vault.load("new-secret456").is_ok(),
+        "新口令必须仍然有效"
+    );
+    assert!(
+        harness.vault.load("secret123").is_err(),
+        "旧口令不得复活（待存凭据不得用旧口令覆写保险库）"
+    );
+}
+
+/// 「重新輸入帳密」即使站點仍在登入狀態，也必須實際向伺服器提交帳密。
+#[test]
+fn retry_with_account_always_verifies_over_the_network() {
+    let password_posts = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&password_posts);
+    let flow = fake_flow(0);
+    let mut harness = harness(move |request: &HttpRequest| {
+        if request.form_field("password").is_some() {
+            counter.fetch_add(1, Ordering::SeqCst);
+        }
+        flow(request)
+    });
+    // 站點都還「已登入」：修復前這條路徑會直接進入成功分支並寫回未驗證的憑證。
+    harness.login_both_sites();
+
+    harness
+        .dispatch(Job::RetryWithAccount {
+            credentials: Credentials::new("3120000002", "new-password"),
+            passphrase: "secret123".into(),
+        })
+        .expect("重新输入的帐密应可登录");
+
+    assert_eq!(
+        password_posts.load(Ordering::SeqCst),
+        1,
+        "即使站点仍在登录状态，也必须实际提交帐密做验证"
+    );
+    let stored = harness.vault.load("secret123").expect("读取凭据");
+    assert_eq!(stored.username, "3120000002", "验证成功后应写回新凭据");
+}
+
+/// 伺服器端仍有登入態時，換帳號不得被判定為成功（未提交帳密即完成）。
+#[test]
+fn account_switch_is_refused_when_login_skips_credentials() {
+    let mut harness = harness(|request: &HttpRequest| match request.url.as_str() {
+        // 登入入口直接回目標頁：等同伺服器端仍保有舊帳號的登入態。
+        attendance::LOGIN_URL => Ok(HttpResponse::new(200, ATTENDANCE_TARGET, TARGET_BODY)),
+        ATTENDANCE_EXCHANGE => Ok(json(
+            serde_json::json!({ "code": 0, "data": { "tokenValue": "token-1" } }),
+        )),
+        other => panic!("未预期的请求：{other}"),
+    });
+
+    let err = harness
+        .dispatch(Job::ChangeAccount {
+            passphrase: "secret123".into(),
+            credentials: Credentials::new("3120000002", "new-password"),
+        })
+        .expect_err("未提交帳密的「登入」不得視為驗證成功");
+
+    assert!(
+        err.to_string().contains("无法验证新账号"),
+        "訊息應說明無法驗證新帳號：{err}"
+    );
+    assert!(harness.worker.pending_vault.is_none(), "應丟棄待存憑證");
+    assert_eq!(
+        harness
+            .worker
+            .credentials
+            .as_ref()
+            .map(|credentials| credentials.username.clone()),
+        Some("3120000001".to_owned()),
+        "記憶體中的憑證應還原"
+    );
+    let stored = harness.vault.load("secret123").expect("读取凭据");
+    assert_eq!(stored.username, "3120000001", "未驗證的憑證不得寫回");
+    assert_eq!(stored.password, "old-password");
+}
+
+// ── 失敗站點歸屬與失敗計數 ───────────────────────────
+
+/// 作業載入時「查考勤學期」失敗必須歸給考勤系統，而非思源學堂。
+#[test]
+fn homework_load_attributes_attendance_term_failure_to_attendance() {
+    let mut harness = harness(|request: &HttpRequest| {
+        let url = request.url.as_str();
+        if url.ends_with("/api/my-courses") {
+            return Ok(json(serde_json::json!({ "courses": [
+                { "id": "1", "name": "编译原理", "semester": { "code": "2026-1" } },
+            ]})));
+        }
+        if url.contains("/timetable/semesters") {
+            // 考勤登入態已失效：站點層據此回報 SessionExpired。
+            return Ok(HttpResponse::new(
+                200,
+                "https://login.xjtu.edu.cn/cas/login?service=attendance",
+                login_page().as_bytes(),
+            ));
+        }
+        if url.starts_with(attendance::LOGIN_URL) {
+            // 重新登入也失敗，讓流程收斂（本測試只關心歸因）。
+            return Err(AppError::network_kind(
+                NetworkKind::Connect,
+                "连接失败".to_owned(),
+            ));
+        }
+        panic!("未预期的请求：{url}");
+    });
+    harness.login_both_sites();
+
+    harness
+        .dispatch(Job::LoadHomework { force: false })
+        .expect("資料任務失敗不應冒泡為任務錯誤");
+
+    assert!(
+        harness.saw(|event| matches!(
+            event,
+            Event::SessionExpired {
+                site: SiteKind::Attendance
+            }
+        )),
+        "考勤學期查詢失敗必須歸給考勤系統，重登才會打到對的站點"
+    );
+}
+
+/// 思源學堂登入失敗必須回報思源學堂（重試才不會打到考勤系統）。
+#[test]
+fn login_failure_reports_the_site_that_failed() {
+    let mut harness = harness(|request: &HttpRequest| match request.url.as_str() {
+        rsa::PUBLIC_KEY_URL => Ok(HttpResponse::new(
+            200,
+            rsa::PUBLIC_KEY_URL,
+            public_key_pem(),
+        )),
+        lms::LOGIN_URL => Ok(HttpResponse::new(200, LMS_POST, login_page())),
+        // 帳密被拒。
+        LMS_POST => Ok(HttpResponse::new(401, LMS_POST, "<html></html>")),
+        other => panic!("未预期的请求：{other}"),
+    });
+
+    harness
+        .dispatch(Job::LoadCourses { force: false })
+        .expect("資料任務失敗不應冒泡為任務錯誤");
+
+    let events = harness.drain_events();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::LoginFailed {
+                site: SiteKind::Lms,
+                ..
+            }
+        )),
+        "登入失敗事件必須指出思源學堂：{events:?}"
+    );
+    assert_eq!(
+        harness.worker.login_site,
+        Some(SiteKind::Lms),
+        "重試站點應記為思源學堂"
+    );
+}
+
+/// 登入失敗的計數必須跨驅動器重建保存，否則伺服器要求的圖片驗證碼永遠不會出現。
+///
+/// 驗證碼圖片端點刻意讓伺服器回錯：本測試不需要真的寫入使用者的資料目錄。
+#[test]
+fn login_failure_count_survives_driver_rebuilds() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let recorder = Arc::clone(&seen);
+    let mut harness = harness(move |request: &HttpRequest| {
+        let url = request.url.as_str();
+        if url == rsa::PUBLIC_KEY_URL {
+            return Ok(HttpResponse::new(
+                200,
+                rsa::PUBLIC_KEY_URL,
+                public_key_pem(),
+            ));
+        }
+        if url == attendance::LOGIN_URL {
+            return Ok(HttpResponse::new(200, ATTENDANCE_POST, login_page()));
+        }
+        if let Some(fail_n) = request.form_field("failN") {
+            recorder.lock().expect("lock").push(fail_n.to_owned());
+            // 帳密被拒。
+            return Ok(HttpResponse::new(401, ATTENDANCE_POST, "<html></html>"));
+        }
+        Err(AppError::network_kind(
+            NetworkKind::Connect,
+            "连接失败".to_owned(),
+        ))
+    });
+
+    for _ in 0..3 {
+        harness
+            .dispatch(Job::RetryLogin {
+                site: SiteKind::Attendance,
+            })
+            .expect("帳密被拒屬於預期結果");
+    }
+
+    assert_eq!(
+        seen.lock().expect("lock").as_slice(),
+        ["0", "1", "2"],
+        "每次提交的 failN 應累積（修復前恆為 0）"
+    );
+    assert_eq!(
+        harness
+            .worker
+            .login_failures
+            .values()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![3],
+        "失敗次數必須跨驅動器保存"
+    );
+
+    // 第四次：已達門檻，不再提交帳密，改為要求圖片驗證碼（圖片端點在此失敗）。
+    assert!(
+        harness
+            .dispatch(Job::RetryLogin {
+                site: SiteKind::Attendance,
+            })
+            .is_err(),
+        "達到門檻後不應再提交帳密"
+    );
+    assert_eq!(
+        seen.lock().expect("lock").len(),
+        3,
+        "第四次嘗試不得再送出帳密"
+    );
+
+    // 取消登入彈窗不得清除計數：伺服器端的門檻是跨嘗試累計的。
+    harness
+        .dispatch(Job::CancelLogin)
+        .expect("取消登入不應失敗");
+    assert_eq!(
+        harness
+            .worker
+            .login_failures
+            .values()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![3],
+        "取消弹窗不得清除失败计数"
+    );
 }

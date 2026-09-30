@@ -211,6 +211,78 @@ fn requires_captcha_after_repeated_failures_then_succeeds() {
 }
 
 #[test]
+fn injected_failure_count_continues_across_drivers() {
+    let client = Arc::new(FakeClient::with_responder(|request| {
+        if request.url == LOGIN_URL {
+            return Ok(page(POST_URL, &login_page(false, "e9s1")));
+        }
+        if request.url == rsa::PUBLIC_KEY_URL {
+            return Ok(public_key_response());
+        }
+        Ok(HttpResponse::new(401, POST_URL, FAILED_PAGE.as_bytes()))
+    }));
+
+    // 模擬前兩次失敗後重建驅動器：計數由呼叫端保存並注入。
+    let mut first = driver(&client);
+    first.set_fail_count(2);
+    assert_eq!(first.fail_count(), 2);
+    assert!(matches!(
+        first
+            .start(&credentials(), AccountType::Undergraduate)
+            .unwrap(),
+        LoginReply::Fail { .. }
+    ));
+    assert_eq!(first.fail_count(), 3, "失敗後應遞增");
+    assert_eq!(
+        login_posts(&client)[0].form_field("failN"),
+        Some("2"),
+        "重建後應沿用保存的失敗次數"
+    );
+
+    // 已達門檻：新驅動器注入後不再提交，直接要求驗證碼。
+    let mut next = driver(&client);
+    next.set_fail_count(first.fail_count());
+    let posts_before = login_posts(&client).len();
+    assert_eq!(
+        next.start(&credentials(), AccountType::Undergraduate)
+            .unwrap(),
+        LoginReply::NeedCaptcha
+    );
+    assert_eq!(
+        login_posts(&client).len(),
+        posts_before,
+        "已達門檻的驅動器不得再提交帳密"
+    );
+    assert!(
+        !next.used_existing_session(),
+        "有提交帳密的流程不應被視為沿用既有登入態"
+    );
+}
+
+/// 沿用既有登入態的「登入」必須可辨識：換帳號時不得據此寫回憑證。
+#[test]
+fn reports_login_that_reused_an_existing_session() {
+    let client = Arc::new(FakeClient::with_responder(|_| {
+        Ok(page(TARGET_URL, TARGET_PAGE))
+    }));
+
+    let mut driver = driver(&client);
+    assert!(driver.is_already_authenticated());
+    assert!(!driver.used_existing_session(), "執行前不應判定");
+
+    let reply = driver
+        .start(&credentials(), AccountType::Undergraduate)
+        .expect("执行登录");
+
+    assert_eq!(reply, LoginReply::Success);
+    assert!(
+        driver.used_existing_session(),
+        "未提交帳密即成功必須被標記，否則換帳號會寫回未驗證的憑證"
+    );
+    assert!(login_posts(&client).is_empty());
+}
+
+#[test]
 fn clears_captcha_after_failure() {
     let attempts = AtomicUsize::new(0);
     let client = Arc::new(FakeClient::with_responder(move |request| {

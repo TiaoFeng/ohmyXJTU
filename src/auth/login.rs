@@ -78,6 +78,8 @@ pub struct LoginDriver {
     encrypted_password: Option<String>,
     captcha_code: String,
     final_response: Option<HttpResponse>,
+    /// 本次登入是否直接沿用伺服器上既有的登入態（未提交帳密即完成）。
+    used_existing_session: bool,
 }
 
 impl LoginDriver {
@@ -123,6 +125,7 @@ impl LoginDriver {
             encrypted_password: None,
             captcha_code: String::new(),
             final_response: None,
+            used_existing_session: false,
         })
     }
 
@@ -139,6 +142,26 @@ impl LoginDriver {
     /// 登入網址是否已具備登入態（不需要提交帳密）。
     pub fn is_already_authenticated(&self) -> bool {
         self.already_authenticated.is_some()
+    }
+
+    /// 本次登入是否直接沿用既有登入態（未向伺服器提交帳密）。
+    ///
+    /// 換帳號時若為真，代表新憑證從未被伺服器驗證過，不得寫回保險庫。
+    pub fn used_existing_session(&self) -> bool {
+        self.used_existing_session
+    }
+
+    /// 本次登入已連續失敗的次數（伺服器以此決定是否要求圖片驗證碼）。
+    pub fn fail_count(&self) -> u32 {
+        self.fail_count
+    }
+
+    /// 設定本次登入的起始失敗次數。
+    ///
+    /// 驗證碼門檻是以「同一帳號連續失敗」計算，但驅動器每次重試都會重建；
+    /// 由呼叫端保存次數並在重建後注入，門檻才達得到（否則每次重試都从 0 開始）。
+    pub fn set_fail_count(&mut self, count: u32) {
+        self.fail_count = count;
     }
 
     /// 首次登入：帶入帳號密碼。
@@ -247,6 +270,7 @@ impl LoginDriver {
     fn advance(&mut self) -> AppResult<LoginReply> {
         if let Some(response) = self.already_authenticated.take() {
             self.has_login = true;
+            self.used_existing_session = true;
             self.final_response = Some(response);
             return Ok(LoginReply::Success);
         }

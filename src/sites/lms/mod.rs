@@ -14,7 +14,7 @@ use serde_json::Value;
 use crate::error::{AppError, AppResult};
 use crate::http::HttpRequest;
 use crate::session::{PostLogin, SessionManager, SiteAdapter, SiteKind, SiteLogin, SitePolicy};
-use crate::sites::{parse_json, parse_lenient};
+use crate::sites::{ensure_authenticated, parse_json, parse_lenient};
 
 /// 思源學堂網址。
 pub const BASE_URL: &str = "https://lms.xjtu.edu.cn";
@@ -70,6 +70,9 @@ impl SiteAdapter for LmsSite {
 
     fn post_login(&self, context: &PostLogin<'_>) -> AppResult<SiteLogin> {
         let response = context.get(&format!("{BASE_URL}/user/index"))?;
+        // 維護頁、被導回登入頁或 5xx 都不算登入成功：否則站點會被標記為已登入，
+        // 後續查詢全部變成「待核实」，使用者卻只看到「登入成功」。
+        ensure_authenticated(&response)?;
         Ok(SiteLogin {
             headers: Vec::new(),
             user_id: user_id_from_page(&response.text()),

@@ -238,6 +238,7 @@ fn data_failure_settles_page_and_stuck_login_progress() {
             what: "课表".to_owned(),
             message: "网络连接失败（域名解析失败）".to_owned(),
             target: FailedTarget::Schedule,
+            site: None,
         },
     );
 
@@ -266,6 +267,7 @@ fn data_failure_settles_page_and_stuck_login_progress() {
             what: "课表".to_owned(),
             message: "网络连接失败".to_owned(),
             target: FailedTarget::Schedule,
+            site: None,
         },
     );
     assert!(
@@ -289,6 +291,7 @@ fn login_failure_shows_failed_overlay() {
             what: "登录".to_owned(),
             message: "网络连接失败".to_owned(),
             target: FailedTarget::Login,
+            site: Some(crate::session::SiteKind::Attendance),
         },
     );
 
@@ -313,6 +316,7 @@ fn late_login_failure_does_not_reopen_dismissed_overlay() {
             what: "登录".to_owned(),
             message: "网络连接失败".to_owned(),
             target: FailedTarget::Login,
+            site: Some(crate::session::SiteKind::Attendance),
         },
     );
 
@@ -337,6 +341,7 @@ fn settings_failure_keeps_popup_and_draft() {
             what: "访问模式".to_owned(),
             message: "配置错误".to_owned(),
             target: FailedTarget::Settings,
+            site: None,
         },
     );
 
@@ -370,6 +375,7 @@ fn credential_failure_restores_unlock_form_with_error() {
             what: "解锁凭证".to_owned(),
             message: "加密口令错误".to_owned(),
             target: FailedTarget::Credentials,
+            site: None,
         },
     );
 
@@ -399,6 +405,7 @@ fn credential_failure_keeps_setup_account_but_clears_secrets() {
             what: "创建凭证".to_owned(),
             message: "凭证文件写入失败".to_owned(),
             target: FailedTarget::Credentials,
+            site: None,
         },
     );
 
@@ -487,6 +494,7 @@ fn credentials_app(typed: &str) -> App {
     let mut app = app();
     app.set_screen(Screen::Main);
     app.login = Some(Box::new(LoginScreen::Credentials {
+        site: crate::session::SiteKind::Attendance,
         form: FormState::login_retry(),
         message: "登录失败：用户名或密码错误".to_owned(),
     }));
@@ -503,7 +511,10 @@ fn login_failed_stays_on_credentials_form() {
 
     apply_event(
         &mut app,
-        Event::LoginFailed("登录失败：用户名或密码错误".to_owned()),
+        Event::LoginFailed {
+            site: crate::session::SiteKind::Attendance,
+            message: "登录失败：用户名或密码错误".to_owned(),
+        },
     );
 
     match app.login.as_deref() {
@@ -534,6 +545,7 @@ fn task_failure_stays_on_credentials_form() {
             what: "重新输入账户".to_owned(),
             message: "口令错误或凭证文件已损坏".to_owned(),
             target: FailedTarget::Login,
+            site: Some(crate::session::SiteKind::Attendance),
         },
     );
 
@@ -749,6 +761,7 @@ fn agreement_failure_keeps_gate_with_inline_error() {
             what: "用户协议".to_owned(),
             message: "写入配置文件失败".to_owned(),
             target: FailedTarget::Agreement,
+            site: None,
         },
     );
     let state = app.agreement.as_deref().expect("失败后閱讀門应保留");

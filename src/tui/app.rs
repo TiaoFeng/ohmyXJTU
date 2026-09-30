@@ -585,11 +585,15 @@ pub enum LoginScreen {
     },
     /// 登入失敗。
     Failed {
+        /// 失敗的站點（重試時沿用）。
+        site: SiteKind,
         /// 錯誤訊息。
         message: String,
     },
     /// 重新輸入帳號密碼（登入失敗後的可恢復入口）。
     Credentials {
+        /// 失敗的站點（重試時沿用）。
+        site: SiteKind,
         /// 表單（帳號、密碼、加密口令）。
         form: FormState,
         /// 上一次的失敗訊息。

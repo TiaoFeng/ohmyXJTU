@@ -208,7 +208,7 @@ pub fn draw_form(frame: &mut Frame, form: &FormState, title: &str, hint: &str, n
 
 /// 繪製登入互動彈窗。
 pub fn draw_login(frame: &mut Frame, screen: &LoginScreen) {
-    if let LoginScreen::Credentials { form, message } = screen {
+    if let LoginScreen::Credentials { form, message, .. } = screen {
         let note = format!("上次登录失败：{message}");
         draw_form(
             frame,
@@ -227,7 +227,7 @@ pub fn draw_login(frame: &mut Frame, screen: &LoginScreen) {
             String::new(),
             None,
         ),
-        LoginScreen::Failed { message } => (
+        LoginScreen::Failed { message, .. } => (
             "登录失败",
             vec![Line::from(Span::styled(
                 message.clone(),

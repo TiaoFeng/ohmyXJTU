@@ -5,6 +5,7 @@ use std::sync::mpsc::Sender;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::credentials::{Credentials, Secret};
+use crate::session::SiteKind;
 use crate::sites::lms::ActivityKind;
 use crate::task::Job;
 use crate::tui::app::{
@@ -22,9 +23,9 @@ const MIN_PASSPHRASE_LEN: usize = 8;
 /// 登入畫面的動作。
 enum LoginAction {
     Quit,
-    Retry,
-    EditAccount,
-    BackToFailed,
+    Retry(SiteKind),
+    EditAccount(SiteKind),
+    BackToFailed(SiteKind),
     /// 關閉登入覆蓋層（回到底層畫面，可繼續按 `r` 刷新等操作）。
     Dismiss,
     SubmitCredentials,
@@ -437,20 +438,20 @@ fn handle_login(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
                 KeyCode::Char('q') => action = Some(LoginAction::Quit),
                 _ => {}
             },
-            LoginScreen::Failed { .. } => match key.code {
-                KeyCode::Enter => action = Some(LoginAction::Retry),
-                KeyCode::Char('e') => action = Some(LoginAction::EditAccount),
+            LoginScreen::Failed { site, .. } => match key.code {
+                KeyCode::Enter => action = Some(LoginAction::Retry(*site)),
+                KeyCode::Char('e') => action = Some(LoginAction::EditAccount(*site)),
                 // 關閉覆蓋層：讓使用者回到原本的頁面（可換頁或按 r 重試）。
                 KeyCode::Esc => action = Some(LoginAction::Dismiss),
                 KeyCode::Char('q') => action = Some(LoginAction::Quit),
                 _ => {}
             },
-            LoginScreen::Credentials { form, .. } => {
+            LoginScreen::Credentials { site, form, .. } => {
                 if form.busy {
                     return;
                 }
                 match key.code {
-                    KeyCode::Esc => action = Some(LoginAction::BackToFailed),
+                    KeyCode::Esc => action = Some(LoginAction::BackToFailed(*site)),
                     KeyCode::Enter => action = Some(LoginAction::SubmitCredentials),
                     KeyCode::Tab | KeyCode::Down => form.focus_next(),
                     KeyCode::BackTab | KeyCode::Up => form.focus_previous(),
@@ -492,13 +493,13 @@ fn handle_login(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
 
     match action {
         Some(LoginAction::Quit) => app.quit = true,
-        Some(LoginAction::Retry) => {
+        Some(LoginAction::Retry(site)) => {
             app.login = Some(Box::new(LoginScreen::Progress {
                 note: "正在重试登录…".to_owned(),
             }));
-            let _ = jobs.send(Job::RetryLogin);
+            let _ = jobs.send(Job::RetryLogin { site });
         }
-        Some(LoginAction::EditAccount) => open_credentials_form(app),
+        Some(LoginAction::EditAccount(site)) => open_credentials_form(app, site),
         Some(LoginAction::Dismiss) => {
             app.login = None;
             // 底層若是送出中的表單（例如修改帳號失敗），一併解除處理中狀態，
@@ -511,9 +512,9 @@ fn handle_login(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
             let _ = jobs.send(Job::CancelLogin);
             app.set_message("已关闭登录提示：网络恢复后可按 r 重试");
         }
-        Some(LoginAction::BackToFailed) => {
+        Some(LoginAction::BackToFailed(site)) => {
             let message = login_message(app);
-            app.login = Some(Box::new(LoginScreen::Failed { message }));
+            app.login = Some(Box::new(LoginScreen::Failed { site, message }));
         }
         Some(LoginAction::SubmitCredentials) => submit_login_credentials(app, jobs),
         Some(LoginAction::SubmitCaptcha(code)) => {
@@ -535,7 +536,7 @@ fn handle_login(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
 /// 目前登入畫面的失敗訊息（供回復上一層或帶入表單）。
 fn login_message(app: &App) -> String {
     match app.login.as_deref() {
-        Some(LoginScreen::Failed { message } | LoginScreen::Credentials { message, .. }) => {
+        Some(LoginScreen::Failed { message, .. } | LoginScreen::Credentials { message, .. }) => {
             message.clone()
         }
         _ => String::new(),
@@ -543,9 +544,10 @@ fn login_message(app: &App) -> String {
 }
 
 /// 開啟「重新輸入账号密码」表單，並帶上原本的失敗訊息。
-fn open_credentials_form(app: &mut App) {
+fn open_credentials_form(app: &mut App, site: SiteKind) {
     let message = login_message(app);
     app.login = Some(Box::new(LoginScreen::Credentials {
+        site,
         form: FormState::login_retry(),
         message,
     }));

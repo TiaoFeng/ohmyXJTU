@@ -207,13 +207,13 @@ fn is_login_endpoint(url: &str) -> bool {
         }
         // 代理路徑（`/https[-port]/<cipher>/<目標路徑>`）以代理目標判定：
         // 代理的對象是登入入口時，一樣代表登入態已失效。
-        let Some((target_host, target_path)) = proxied_target(path) else {
+        let Some(target) = webvpn::proxied_target(path) else {
             return false;
         };
-        if target_host.as_deref().is_some_and(is_login_host) {
+        if target.host.as_deref().is_some_and(is_login_host) {
             return true;
         }
-        return is_login_path(&target_path, query);
+        return is_login_path(&target.path, query);
     }
 
     is_login_host(host) || is_login_path(path, query)
@@ -230,23 +230,6 @@ fn is_login_path(path: &str, query: Option<&str>) -> bool {
         || path == "/login"
         || path.starts_with("/login/")
         || query.is_some_and(|query| query.contains("cas_login"))
-}
-
-/// 取出 WebVPN 代理路徑的目標主機（盡力解密，失敗為 `None`）與目標路徑。
-///
-/// 形如 `/https/<前綴+密文>/<目標路徑>`；不是代理路徑時回 `None`。
-fn proxied_target(path: &str) -> Option<(Option<String>, String)> {
-    let rest = path.trim_start_matches('/');
-    let (scheme, rest) = rest.split_once('/')?;
-    let (scheme, _port) = scheme.split_once('-').unwrap_or((scheme, ""));
-    if !matches!(scheme, "https" | "http") {
-        return None;
-    }
-    let (cipher, rest) = rest.split_once('/')?;
-    let host = cipher
-        .strip_prefix(webvpn::PREFIX)
-        .and_then(|hex| webvpn::decrypt_host(hex).ok());
-    Some((host, format!("/{rest}")))
 }
 
 /// 缺少站點設定時的回報。

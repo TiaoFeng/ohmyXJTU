@@ -81,16 +81,12 @@ pub fn command_for(target_os: &str, url: &str) -> AppResult<(&'static str, Vec<S
 
     let (program, args) = match target_os {
         "macos" => ("open", vec![url.to_owned()]),
-        // `start` 是 cmd 的內建指令：第一個參數是視窗標題（空字串），
-        // 網址必須是另一個獨立參數。
+        // `rundll32 url.dll,FileProtocolHandler` 直接交系統處理（ShellExecute），
+        // **不經命令殼層**：`cmd /C start` 會解析 `%`（URL 的百分號編碼幾乎必然
+        // 出現，會被當成環境變數展開）與 `&` 等符號，等於把網址當命令列處理。
         "windows" => (
-            "cmd",
-            vec![
-                "/C".to_owned(),
-                "start".to_owned(),
-                String::new(),
-                url.to_owned(),
-            ],
+            "rundll32.exe",
+            vec!["url.dll,FileProtocolHandler".to_owned(), url.to_owned()],
         ),
         // Linux 與其他 Unix 使用 xdg-open。
         _ => ("xdg-open", vec![url.to_owned()]),

@@ -30,3 +30,19 @@ pub fn remove(path: &Path) -> AppResult<()> {
         Err(err) => Err(err.into()),
     }
 }
+
+/// 程式結束時清除驗證碼暫存檔（不建立資料目錄；失敗忽略）。
+pub fn cleanup_on_exit() {
+    cleanup_at(crate::io::paths::captcha_path_no_create().as_deref());
+}
+
+/// 刪除指定路徑的驗證碼圖片（`None` 或檔案不存在時視為成功）。
+fn cleanup_at(path: Option<&Path>) {
+    if let Some(path) = path {
+        let _ = remove(path);
+    }
+}
+
+#[cfg(test)]
+#[path = "tests/captcha_test.rs"]
+mod captcha_test;

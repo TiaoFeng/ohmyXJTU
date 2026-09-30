@@ -39,6 +39,11 @@ pub fn captcha_path() -> AppResult<PathBuf> {
     Ok(data_dir()?.join(CAPTCHA_FILE_NAME))
 }
 
+/// 驗證碼圖片路徑（不建立資料目錄；供程式結束時清理使用）。
+pub fn captcha_path_no_create() -> Option<PathBuf> {
+    dirs::data_dir().map(|base| base.join(APP_DIR_NAME).join(CAPTCHA_FILE_NAME))
+}
+
 fn create_private_dir(dir: &Path) -> AppResult<()> {
     if dir.is_dir() {
         return Ok(());

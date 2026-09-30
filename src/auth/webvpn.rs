@@ -39,6 +39,12 @@ pub fn decrypt_host(cipher_hex: &str) -> AppResult<String> {
         .map_err(|err| AppError::protocol(format!("WebVPN 主机名解码失败：{err}")))
 }
 
+/// 主機名是否屬於學校網域（`xjtu.edu.cn` 或其子網域）。
+pub fn is_school_host(host: &str) -> bool {
+    let host = host.to_ascii_lowercase();
+    host == "xjtu.edu.cn" || host.ends_with(".xjtu.edu.cn")
+}
+
 /// 判斷網址是否需要改寫為 WebVPN 網址。
 ///
 /// 只改寫 `xjtu.edu.cn` 及其子網域，且 WebVPN 本身不再改寫，避免無限遞迴。
@@ -55,7 +61,7 @@ pub fn should_rewrite(url: &str) -> bool {
     if host == WEBVPN_HOST {
         return false;
     }
-    host == "xjtu.edu.cn" || host.ends_with(".xjtu.edu.cn")
+    is_school_host(host)
 }
 
 /// 將一般網址轉換為 WebVPN 網址。

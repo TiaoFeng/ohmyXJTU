@@ -93,3 +93,14 @@ fn decides_which_urls_need_rewriting() {
     assert!(!should_rewrite("not a url"));
     assert!(!should_rewrite("mailto:someone@xjtu.edu.cn"));
 }
+
+#[test]
+fn recognizes_school_hosts_without_suffix_confusion() {
+    assert!(is_school_host("xjtu.edu.cn"));
+    assert!(is_school_host("login.xjtu.edu.cn"));
+    assert!(is_school_host("Login.XJTU.edu.cn"), "大小写不敏感");
+    assert!(!is_school_host("lms.xjtu.edu.cn.evil.com"));
+    assert!(!is_school_host("evilxjtu.edu.cn"));
+    assert!(!is_school_host("xjtu.edu.cn.attacker.net"));
+    assert!(!is_school_host("example.com"));
+}

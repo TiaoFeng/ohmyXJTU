@@ -7,7 +7,7 @@ repository = "https://github.com/TiaoFeng/ohmyXJTU"
 description = "A TUI tool for XJTU students"
 readme = "README.md"
 keywords = ["XJTU", "TUI", "tool"]
-license = "BSD 3-Clause"
+license = "BSD-3-Clause"
 
 [lib]
 name = "ohmy_xjtu"

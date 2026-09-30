@@ -79,6 +79,13 @@ pub enum AppError {
     #[error("服务返回错误（{code}）：{message}")]
     Server { code: i64, message: String },
 
+    /// 登入流程重定向到學校網域之外的主機，已中止提交。
+    #[error("登录重定向到学校网域之外的主机（已中止）：{host}")]
+    UntrustedHost {
+        /// 目標主機名（不含路徑與查詢參數）。
+        host: String,
+    },
+
     /// 登入態已失效，需要重新登入。
     #[error("登录状态已失效，请重新登录")]
     SessionExpired,

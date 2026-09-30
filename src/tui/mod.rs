@@ -53,6 +53,30 @@ pub fn run() -> AppResult<()> {
     loop_result.and(restore_result)
 }
 
+/// 安裝 panic hook：還原終端、輸出單行錯誤訊息後結束行程。
+///
+/// 訊息不含 panic 內容（避免任何潛在敏感資料外洩），只保留發生位置；
+/// 任何執行緒 panic 都會終止行程，避免背景執行緒死亡後介面卡死。
+pub fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        // 盡力還原終端：panic 可能發生在進入原始模式或替代畫面之後。
+        let _ = ratatui::try_restore();
+        let location = info
+            .location()
+            .map(|location| (location.file(), location.line()));
+        eprintln!("{}", panic_hook_message(location));
+        std::process::exit(101);
+    }));
+}
+
+/// panic 時的單行錯誤訊息（不含 panic payload）。
+fn panic_hook_message(location: Option<(&str, u32)>) -> String {
+    match location {
+        Some((file, line)) => format!("错误：程序发生内部错误（{file}:{line}），已退出。"),
+        None => "错误：程序发生内部错误，已退出。".to_owned(),
+    }
+}
+
 fn main_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     app: &mut App,
@@ -364,3 +388,7 @@ fn set_login_error(app: &mut App, message: String) {
 #[cfg(test)]
 #[path = "tests/event_test.rs"]
 mod event_test;
+
+#[cfg(test)]
+#[path = "tests/panic_hook_test.rs"]
+mod panic_hook_test;

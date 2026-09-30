@@ -385,6 +385,8 @@ struct Worker {
     flow: Option<LoginFlow>,
     retry: Option<Job>,
     pending_vault: Option<PendingVault>,
+    /// 最近一次取得的驗證碼圖片路徑（登入結束或重新開始時刪除）。
+    captcha_path: Option<PathBuf>,
     /// 待執行的資料任務（依序、已去重）。
     pending_data: VecDeque<Job>,
     /// 資料任務代際：帳號或訪問模式變更時遞增，進行中的任務自動中止。
@@ -593,6 +595,7 @@ pub fn spawn(config: Config, vault: Vault) -> AppResult<(Sender<Job>, Receiver<E
         flow: None,
         retry: None,
         pending_vault: None,
+        captcha_path: None,
         pending_data: VecDeque::new(),
         generation: 0,
         cache: LmsCache::default(),
@@ -654,6 +657,10 @@ impl Worker {
         let what = job.label();
         let target = failed_target_of(&job);
         if let Err(err) = self.dispatch_control(job) {
+            // 登入類任務出錯即視為本次登入結束：清掉暫存的驗證碼圖片。
+            if target == FailedTarget::Login {
+                self.clear_captcha();
+            }
             self.emit(Event::Failed {
                 what: if what.is_empty() {
                     "操作".to_owned()
@@ -822,8 +829,9 @@ impl Worker {
             .clone()
             .ok_or_else(|| AppError::config("尚未解锁凭证"))?;
         self.emit(Event::LoginProgress(format!("正在登录{site}…")));
-        // 重新開始登入時丟棄上一個（多半已失敗的）流程。
+        // 重新開始登入時丟棄上一個（多半已失敗的）流程與其驗證碼圖片。
         self.flow = None;
+        self.clear_captcha();
 
         let stage = self.session_mut()?.next_login_step(site)?;
         self.drive(stage, site, credentials, retry)
@@ -857,11 +865,13 @@ impl Worker {
                 self.flow = None;
                 // 憑證被拒：丟棄待存憑證，不覆蓋保險庫中的舊憑證。
                 self.pending_vault = None;
+                self.clear_captcha();
                 self.emit(Event::LoginFailed(message));
                 Ok(())
             }
             LoginReply::NeedCaptcha => {
                 let path = self.driver()?.fetch_captcha()?;
+                self.captcha_path = Some(path.clone());
                 self.emit(Event::LoginNeedsCaptcha(path));
                 Ok(())
             }
@@ -893,6 +903,8 @@ impl Worker {
     }
 
     fn finish_login(&mut self, site: SiteKind, retry: Option<Job>) -> AppResult<()> {
+        // 登入成功：驗證碼圖片不再需要，立即清除。
+        self.clear_captcha();
         // 登入成功後才更新保險庫，失敗的憑證不會覆蓋舊憑證。
         self.commit_pending_vault();
         let mode = self
@@ -930,8 +942,16 @@ impl Worker {
 
     fn refresh_captcha(&mut self) -> AppResult<()> {
         let path = self.driver()?.fetch_captcha()?;
+        self.captcha_path = Some(path.clone());
         self.emit(Event::LoginNeedsCaptcha(path));
         Ok(())
+    }
+
+    /// 清除暫存的驗證碼圖片（登入結束或重新開始時；失敗忽略）。
+    fn clear_captcha(&mut self) {
+        if let Some(path) = self.captcha_path.take() {
+            let _ = crate::auth::captcha::remove(&path);
+        }
     }
 
     fn send_mfa_code(&mut self) -> AppResult<()> {

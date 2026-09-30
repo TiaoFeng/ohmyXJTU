@@ -144,6 +144,7 @@ impl Harness {
                 flow: None,
                 retry: None,
                 pending_vault: None,
+                captcha_path: None,
                 pending_data: VecDeque::new(),
                 generation: 0,
                 cache: LmsCache::default(),
@@ -1576,5 +1577,65 @@ fn courses_event_carries_current_term_hint() {
         second.current_term,
         TermCode::parse("2026-2027-1"),
         "应复用使用者记忆的学期"
+    );
+}
+
+#[test]
+fn clears_captcha_file_after_successful_login() {
+    let mut harness = harness(fake_flow(0));
+    let path = harness._dir.path().join("captcha.png");
+    std::fs::write(&path, b"png").expect("写入验证码文件");
+    harness.worker.captcha_path = Some(path.clone());
+
+    harness
+        .worker
+        .finish_login(SiteKind::Attendance, None)
+        .expect("完成登录");
+
+    assert!(!path.exists(), "登入成功後應刪除驗證碼檔案");
+    assert!(harness.worker.captcha_path.is_none(), "應清除路徑記錄");
+}
+
+#[test]
+fn clears_captcha_file_when_credentials_are_rejected() {
+    let mut harness = harness(fake_flow(0));
+    let path = harness._dir.path().join("captcha.png");
+    std::fs::write(&path, b"png").expect("写入验证码文件");
+    harness.worker.captcha_path = Some(path.clone());
+
+    harness
+        .worker
+        .handle_reply(LoginReply::Fail {
+            message: "登录失败：用户名或密码错误".to_owned(),
+        })
+        .expect("处理失败回复");
+
+    assert!(!path.exists(), "憑證被拒後應刪除驗證碼檔案");
+    assert!(harness.worker.captcha_path.is_none(), "應清除路徑記錄");
+}
+
+#[test]
+fn clears_captcha_file_when_login_job_fails() {
+    let mut harness = harness(fake_flow(0));
+    let path = harness._dir.path().join("captcha.png");
+    std::fs::write(&path, b"png").expect("写入验证码文件");
+    harness.worker.captcha_path = Some(path.clone());
+
+    // 沒有進行中的登入流程：提交驗證碼會立即失敗（屬登入類任務）。
+    harness
+        .worker
+        .handle_control(Job::SubmitCaptcha("1234".to_owned()));
+
+    assert!(!path.exists(), "登入任務失敗後應刪除驗證碼檔案");
+    let events = harness.drain_events();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Failed {
+                target: FailedTarget::Login,
+                ..
+            }
+        )),
+        "应回报登入失败事件：{events:?}"
     );
 }

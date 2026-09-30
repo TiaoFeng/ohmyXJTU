@@ -89,6 +89,9 @@ impl LoginDriver {
                 status: response.status,
             });
         }
+        // 登入表單只允許提交給學校網域的主機：重定向若離開學校網域，
+        // 直接中止，避免把帳密（密文）送到非學校主機。
+        ensure_trusted_submit_target(&response.final_url)?;
 
         let text = response.text();
         let execution = html::execution_value(&text);
@@ -424,8 +427,11 @@ impl LoginDriver {
         let event_id = html::input_value(&text, "_eventId").unwrap_or_else(|| "submit".to_owned());
         let submit = html::input_value(&text, "submit").unwrap_or_else(|| "Login1".to_owned());
 
+        // 二次認證表單同樣只提交給學校網域的主機。
+        let submit_url = state.response.final_url.clone();
+        ensure_trusted_submit_target(&submit_url)?;
         let response = self.post_form(
-            &state.response.final_url.clone(),
+            &submit_url,
             vec![
                 ("secState", sec_state),
                 ("execution", execution),
@@ -538,6 +544,18 @@ fn check_envelope(response: &HttpResponse) -> AppResult<serde_json::Value> {
 /// 判斷網址是否屬於統一認證，供會話層辨識「登入態失效」。
 pub fn is_login_host(url: &str) -> bool {
     url.starts_with(LOGIN_HOST)
+}
+
+/// 確認登入表單的提交目標位於學校網域；否則回報錯誤（訊息只含主機名）。
+fn ensure_trusted_submit_target(url: &str) -> AppResult<()> {
+    let host = Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_owned));
+    match host {
+        Some(host) if webvpn::is_school_host(&host) => Ok(()),
+        Some(host) => Err(AppError::UntrustedHost { host }),
+        None => Err(AppError::protocol("登录重定向地址缺少主机名")),
+    }
 }
 
 /// 供外部（會話層）判斷是否需要改寫為 WebVPN 網址。

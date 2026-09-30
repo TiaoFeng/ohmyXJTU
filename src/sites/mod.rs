@@ -47,12 +47,40 @@ pub fn parse_json<T: DeserializeOwned>(response: &HttpResponse, context: &str) -
 }
 
 /// 將 JSON 值解析為指定型別。
+///
+/// 錯誤訊息只描述失敗類別（不含原始欄位值），避免回應內容出現在介面提示中。
 pub fn deserialize_value<T: DeserializeOwned>(
     value: serde_json::Value,
     context: &str,
 ) -> AppResult<T> {
-    serde_json::from_value(value)
-        .map_err(|err| AppError::protocol(format!("{context} 响应格式不符：{err}")))
+    serde_json::from_value(value).map_err(|err| {
+        AppError::protocol(format!(
+            "{context} 响应格式不符（{}）",
+            describe_parse_failure(err.classify())
+        ))
+    })
+}
+
+/// 解析失敗的類別描述（不含原始欄位值）。
+fn describe_parse_failure(category: serde_json::error::Category) -> &'static str {
+    match category {
+        serde_json::error::Category::Io => "读取失败",
+        serde_json::error::Category::Syntax => "语法错误",
+        serde_json::error::Category::Data => "数据类型不符",
+        serde_json::error::Category::Eof => "内容不完整",
+    }
+}
+
+/// JSON 值的型別名稱（不含內容）。
+fn value_type_name(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "空值",
+        serde_json::Value::Bool(_) => "布尔值",
+        serde_json::Value::Number(_) => "数字",
+        serde_json::Value::String(_) => "字符串",
+        serde_json::Value::Array(_) => "数组",
+        serde_json::Value::Object(_) => "对象",
+    }
 }
 
 /// 逐項解析列表，回傳（成功項目, 被跳過的項目數）。
@@ -88,7 +116,8 @@ where
         serde_json::Value::String(text) => Ok(text),
         serde_json::Value::Number(number) => Ok(number.to_string()),
         other => Err(serde::de::Error::custom(format!(
-            "期望字符串或数字，实际为 {other}"
+            "期望字符串或数字，实际为{}",
+            value_type_name(&other)
         ))),
     }
 }
@@ -103,13 +132,14 @@ where
         serde_json::Value::Number(number) => number
             .as_u64()
             .and_then(|number| u32::try_from(number).ok())
-            .ok_or_else(|| serde::de::Error::custom(format!("数值超出范围：{number}"))),
+            .ok_or_else(|| serde::de::Error::custom("数值超出范围")),
         serde_json::Value::String(text) => text
             .trim()
             .parse::<u32>()
-            .map_err(|_| serde::de::Error::custom(format!("无法解析为数字：{text}"))),
+            .map_err(|_| serde::de::Error::custom("无法解析为数字")),
         other => Err(serde::de::Error::custom(format!(
-            "期望数字或字符串，实际为 {other}"
+            "期望数字或字符串，实际为{}",
+            value_type_name(other)
         ))),
     }
 }
@@ -125,7 +155,12 @@ where
         Some(serde_json::Value::String(text)) => Ok(Some(text)),
         Some(serde_json::Value::Number(number)) => Ok(Some(number.to_string())),
         Some(other) => Err(serde::de::Error::custom(format!(
-            "期望字符串或数字，实际为 {other}"
+            "期望字符串或数字，实际为{}",
+            value_type_name(&other)
         ))),
     }
 }
+
+#[cfg(test)]
+#[path = "tests/mod_test.rs"]
+mod mod_test;

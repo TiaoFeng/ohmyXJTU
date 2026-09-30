@@ -487,3 +487,94 @@ fn refetches_public_key_instead_of_caching_a_bad_body() {
     assert_eq!(reply, LoginReply::Success);
     assert_eq!(fetches.load(Ordering::SeqCst), 2, "错误正文不得被缓存");
 }
+
+#[test]
+fn rejects_login_redirect_outside_school_domain() {
+    let client = Arc::new(FakeClient::with_responder(|request| {
+        match request.url.as_str() {
+            LOGIN_URL => Ok(page(
+                "https://evil.example.com/cas/login",
+                &login_page(false, "e9s1"),
+            )),
+            rsa::PUBLIC_KEY_URL => Ok(public_key_response()),
+            _ => Ok(page(TARGET_URL, TARGET_PAGE)),
+        }
+    }));
+
+    let http: Arc<dyn HttpClient> = client;
+    let err = LoginDriver::new(http, LOGIN_URL, VISITOR_ID)
+        .err()
+        .expect("不得接受校外的提交目标");
+    match err {
+        AppError::UntrustedHost { host } => assert_eq!(host, "evil.example.com"),
+        other => panic!("应为不受信任主机错误，实际：{other}"),
+    }
+}
+
+#[test]
+fn rejects_domain_suffix_confusion_in_redirect() {
+    let client = Arc::new(FakeClient::with_responder(|request| {
+        match request.url.as_str() {
+            LOGIN_URL => Ok(page(
+                "https://lms.xjtu.edu.cn.evil.com/cas/login",
+                &login_page(false, "e9s1"),
+            )),
+            _ => Ok(page(TARGET_URL, TARGET_PAGE)),
+        }
+    }));
+
+    let http: Arc<dyn HttpClient> = client;
+    let err = LoginDriver::new(http, LOGIN_URL, VISITOR_ID)
+        .err()
+        .expect("后缀混淆不得通过");
+    assert!(
+        matches!(err, AppError::UntrustedHost { .. }),
+        "实际错误：{err}"
+    );
+}
+
+#[test]
+fn rejects_safety_verify_submission_outside_school_domain() {
+    let safety_page = std::fs::read_to_string(format!(
+        "{}/tests/fixtures/safety_verify_page.html",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .expect("读取二次认证 fixture");
+    let evil_safety_url = "https://evil.example.com/cas/sec/verify";
+
+    let client = Arc::new(FakeClient::with_responder(move |request| {
+        match request.url.as_str() {
+            LOGIN_URL => Ok(page(POST_URL, &login_page(false, "e7s1"))),
+            rsa::PUBLIC_KEY_URL => Ok(public_key_response()),
+            _ if request.url.contains("/cas/sec/initByType/securephone") => Ok(ok_json(
+                MFA_VALID_URL,
+                serde_json::json!({
+                    "code": 0,
+                    "data": { "gid": "gid-2", "securePhone": "139****9999" }
+                }),
+            )),
+            MFA_VALID_URL => Ok(ok_json(
+                MFA_VALID_URL,
+                serde_json::json!({ "code": 0, "data": { "status": 2 } }),
+            )),
+            MFA_SEND_URL => Ok(ok_json(MFA_SEND_URL, serde_json::json!({ "code": 0 }))),
+            // 二次認證頁面落在學校網域之外：提交前必須被拒絕。
+            _ => Ok(page(evil_safety_url, &safety_page)),
+        }
+    }));
+
+    let mut driver = driver(&client);
+    assert_eq!(
+        driver
+            .start(&credentials(), AccountType::Undergraduate)
+            .unwrap(),
+        LoginReply::NeedMfa
+    );
+    assert_eq!(driver.send_mfa_code().unwrap(), "139****9999");
+    driver.verify_mfa_code("654321").expect("核验验证码");
+    let err = driver.resume().expect_err("校外二次认证提交应被中止");
+    match err {
+        AppError::UntrustedHost { host } => assert_eq!(host, "evil.example.com"),
+        other => panic!("应为不受信任主机错误，实际：{other}"),
+    }
+}

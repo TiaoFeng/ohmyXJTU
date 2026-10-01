@@ -18,7 +18,7 @@ use super::app::{
     App, FormKind, FormState, HomeworkData, LmsLevel, LoginScreen, Page, Screen, SettingsState,
     TermPickerState,
 };
-use super::handler;
+use super::controller;
 use super::text::InputLine;
 
 /// 套用背景事件。
@@ -105,10 +105,10 @@ fn apply_vault_ready(app: &mut App, jobs: &Sender<Job>) {
     if app.is_main() {
         // 修改帳號後回到主畫面：舊資料屬於舊帳號，強制刷新目前頁面。
         let nav = app.nav;
-        handler::request(app, jobs, nav, true);
+        controller::request(app, jobs, nav, true);
     } else {
         app.ensure_main();
-        handler::ensure_page(app, jobs);
+        controller::ensure_page(app, jobs);
     }
     app.set_message("凭证已就绪");
 }
@@ -170,7 +170,7 @@ fn apply_login_succeeded(
         app.set_screen(Screen::Main);
     }
     // 若目前頁面尚未載入（例如從失敗畫面重試成功），補一次載入。
-    handler::ensure_page(app, jobs);
+    controller::ensure_page(app, jobs);
     app.set_message("登录成功");
 }
 

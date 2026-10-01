@@ -14,8 +14,9 @@ use crate::tui::app::{
     AgreementState, App, FormKind, FormState, HomeworkData, LmsLevel, LoginScreen, NavItem, Page,
     Screen, SettingsState,
 };
+use crate::tui::controller::FormValues;
 
-use super::{FormValues, handle_key, handle_paste};
+use super::{handle_key, handle_paste};
 
 fn press(app: &mut App, jobs: &Sender<Job>, code: KeyCode) {
     handle_key(app, KeyEvent::new(code, KeyModifiers::NONE), jobs);

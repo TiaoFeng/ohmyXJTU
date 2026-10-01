@@ -962,6 +962,19 @@ impl App {
         self.site_modes.clear();
     }
 
+    /// 目前可編輯的表單（登入覆蓋層的憑證表單優先於底層表單）。
+    pub fn form_mut(&mut self) -> Option<&mut FormState> {
+        if let Some(screen) = self.login.as_mut()
+            && let LoginScreen::Credentials { form, .. } = screen.as_mut()
+        {
+            return Some(form);
+        }
+        match &mut self.screen {
+            Screen::Setup(form) | Screen::Unlock(form) | Screen::SettingsForm(form) => Some(form),
+            _ => None,
+        }
+    }
+
     /// 會話重置後的頁面失效處理。
     ///
     /// - 更換帳號（`account_changed=true`）：所有頁面資料都屬於舊帳號，

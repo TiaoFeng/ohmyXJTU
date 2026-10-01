@@ -4,6 +4,7 @@
 //! 終端進出、panic hook 與主迴圈（繪製、按鍵與事件排空）。
 
 pub mod app;
+mod controller;
 mod event;
 pub mod handler;
 pub mod text;

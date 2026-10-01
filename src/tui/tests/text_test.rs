@@ -161,3 +161,56 @@ fn fits_start_aligned_columns_by_display_width() {
     assert_eq!(display_width(&fit_display_start("中文中文", 5)), 5);
     assert_eq!(fit_display_start("abc", 0), "");
 }
+
+#[test]
+fn scrolls_by_display_width_for_wide_characters() {
+    // 8 欄的輸入區：游標在尾端時可見內容不得超過 8 欄。按字素計數的舊寫法
+    // 會保留 8 個全形字＝16 欄，把游標一起推出輸入框。
+    let mut line = InputLine::with_value("中文中文中文");
+    let (visible, column) = input_window(&line, 8);
+    assert!(
+        display_width(&visible) <= 8,
+        "可見內容不得超出輸入區：{visible}（{} 欄）",
+        display_width(&visible)
+    );
+    assert_eq!(visible, "文中文");
+    assert_eq!(
+        usize::from(column),
+        display_width(&visible),
+        "游標應緊接在可見內容之後"
+    );
+
+    // 游標在開頭時可放滿四欄全形字。
+    line.move_home();
+    let (visible, column) = input_window(&line, 8);
+    assert_eq!(visible, "中文中文");
+    assert_eq!(column, 0);
+}
+
+#[test]
+fn keeps_the_cursor_inside_a_narrow_field() {
+    // 極窄輸入區（1 欄）連一個全形字都放不下：至少顯示最接近游標的字素，
+    // 而不是讓使用者面對一片空白。
+    let mut line = InputLine::with_value("中");
+    line.move_home();
+    let (visible, column) = input_window(&line, 1);
+    assert_eq!(visible, "中");
+    assert_eq!(column, 0, "游標在字素起點");
+
+    // 游標在尾端時改顯示游標前的那一個字素。
+    line.move_end();
+    let (visible, _column) = input_window(&line, 1);
+    assert_eq!(visible, "中");
+
+    // 游標在中間時，游標前的欄位數仍以顯示寬度計算。
+    let mut line = InputLine::with_value("中a文b");
+    line.move_home();
+    line.move_right();
+    let (visible, column) = input_window(&line, 5);
+    assert_eq!(column, 2, "游標前的全形字佔兩欄");
+    assert!(
+        display_width(&visible) <= 5,
+        "可見內容不得超出輸入區：{visible}"
+    );
+    assert_eq!(visible, "中a文");
+}

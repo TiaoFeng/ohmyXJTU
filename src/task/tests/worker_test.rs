@@ -230,6 +230,7 @@ impl Harness {
                 relogin_attempts: 0,
                 cache: LmsCache::default(),
                 known_term: None,
+                chosen_term: None,
                 shutdown: false,
             },
             events: event_rx,
@@ -3492,5 +3493,267 @@ fn login_failure_count_survives_driver_rebuilds() {
             .collect::<Vec<_>>(),
         vec![3],
         "取消弹窗不得清除失败计数"
+    );
+}
+
+/// 登入流程已經結束、但等待重登的任務還留著時，關閉登入提示仍必須收斂該頁。
+///
+/// 帳密被拒的路徑會把 `flow` 與 `pending_vault` 都清掉（`discard_pending_vault`
+/// 對 `pending_vault == None` 直接返回），但 `self.retry` 仍握著原任務。
+/// 舊寫法在這種情況下直接早退，頁面就永遠停在「載入中」。
+#[test]
+fn cancel_login_settles_a_page_when_the_flow_already_ended() {
+    let mut harness = harness(|_request: &HttpRequest| panic!("取消登录不应触发网络请求"));
+    assert!(harness.worker.flow.is_none());
+    assert!(harness.worker.pending_vault.is_none());
+    harness.worker.retry = Some(Job::LoadSchedule);
+
+    harness
+        .dispatch(Job::CancelLogin)
+        .expect("取消登录应当成功");
+
+    assert!(harness.worker.retry.is_none(), "應丟棄待重試任務");
+    let events = harness.drain_events();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::LoadingCancelled {
+                target: FailedTarget::Schedule
+            }
+        )),
+        "必須收斂等待重試的頁面，否則它會永遠停在「載入中」"
+    );
+    assert!(
+        !events.iter().any(|event| matches!(event, Event::Notice(_))),
+        "沒有進行中的登入時不應覆蓋介面既有的提示"
+    );
+}
+
+/// 使用者按 `s` 選定的學期優先於考勤的當前學期（否則選了也看不到）。
+#[test]
+fn chosen_term_overrides_the_attendance_term_within_the_session() {
+    let site = Arc::new(FakeHomeworkSite {
+        seen: Arc::new(Mutex::new(Vec::new())),
+        courses: serde_json::json!({ "courses": [
+            { "id": "1", "name": "编译原理", "semester": { "code": "2026-1" } },
+            { "id": "9", "name": "历史课程", "semester": { "code": "2025-2" } },
+        ]}),
+        activities: vec![
+            ("1", serde_json::json!({ "activities": [] })),
+            ("9", serde_json::json!({ "activities": [] })),
+        ],
+        details: Vec::new(),
+        expire_first_submission: false,
+        submissions: AtomicUsize::new(0),
+        attendance_term: Some(("2026-2027", "第一学期")),
+    });
+
+    let system = Arc::clone(&site);
+    let mut harness = harness(move |request| system.handle(request));
+    harness.login_both_sites();
+
+    // 考勤說本學期是 2026-2027-1；使用者明確選擇上一個學期。
+    harness
+        .dispatch(Job::SetHomeworkTerm {
+            term: "2025-2026-2".to_owned(),
+        })
+        .expect("记住学期");
+    assert_eq!(
+        harness.worker.chosen_term,
+        TermCode::parse("2025-2026-2"),
+        "本次選擇應記入工作階段"
+    );
+    let queued = harness
+        .worker
+        .pending_data
+        .pop_front()
+        .expect("应排入重载任务");
+    harness.dispatch(queued).expect("重载应当成功");
+
+    let updates = homework_updates(&mut harness);
+    let last = updates.last().expect("最终更新");
+    assert_eq!(last.term_label.as_deref(), Some("2025-2026 学年 第 2 学期"));
+    assert_eq!(
+        last.term_source,
+        Some(TermSource::Chosen),
+        "來源應為本次选择，而不是考勤"
+    );
+    assert!(
+        !site
+            .urls()
+            .iter()
+            .any(|url| url.contains("/courses/1/activities")),
+        "未選中的學期課程不應被查詢"
+    );
+    assert!(
+        site.urls()
+            .iter()
+            .any(|url| url.contains("/courses/9/activities")),
+        "應查詢所選學期的課程"
+    );
+}
+
+/// 考勤暫時不可達（逾時）時，仍以可用學期完成作業查詢並提示故障。
+#[test]
+fn homework_continues_with_the_remembered_term_when_attendance_times_out() {
+    let mut harness = harness(|request: &HttpRequest| {
+        let url = request.url.as_str();
+        if url.ends_with("/api/my-courses") {
+            return Ok(json(serde_json::json!({ "courses": [
+                { "id": "9", "name": "历史课程", "semester": { "code": "2025-2" } },
+            ]})));
+        }
+        if url.contains("/timetable/semesters") {
+            // 考勤逾時：不得因此拖垮本來可以查詢的思源學堂。
+            return Err(AppError::network_kind(
+                NetworkKind::Timeout,
+                "请求超时".to_owned(),
+            ));
+        }
+        if url.ends_with("/courses/9/activities") {
+            return Ok(json(serde_json::json!({ "activities": [
+                { "id": "91", "type": "homework", "title": "旧作业",
+                  "end_time": "2026-10-01 23:59:59" },
+            ]})));
+        }
+        if url.ends_with("/api/activities/91") {
+            return Ok(json(serde_json::json!({
+                "id": "91", "type": "homework", "title": "旧作业",
+                "end_time": "2026-10-01 23:59:59",
+                "submit_by_group": false, "user_submit_count": 0,
+            })));
+        }
+        panic!("未预期的请求：{url}");
+    });
+    harness.login_both_sites();
+    harness.worker.config.homework_term = Some("2025-2026-2".to_owned());
+
+    harness
+        .dispatch(Job::LoadHomework { force: false })
+        .expect("考勤逾时不应让作业加载失败");
+
+    // `saw` 會取出事件，因此一次收齊後再斷言。
+    let events = harness.drain_events();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Notice(text) if text.contains("考勤系统暂时不可用")
+        )),
+        "應提示考勤故障與學期來源"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::Failed { .. })),
+        "不得回報為失敗"
+    );
+    let updates: Vec<HomeworkUpdate> = events
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::Homework(update) => Some(update),
+            _ => None,
+        })
+        .collect();
+    let last = updates.last().expect("最终更新");
+    assert_eq!(last.term_label.as_deref(), Some("2025-2026 学年 第 2 学期"));
+    assert_eq!(last.courses_included, 1, "所選學期的課程仍應納入");
+    assert_eq!(last.items.len(), 1, "作業仍應載入");
+}
+
+/// 考勤逾時且完全沒有可用學期時，退回學期選擇器而不是整批失敗。
+#[test]
+fn homework_asks_for_a_term_when_attendance_times_out_without_a_fallback() {
+    let mut harness = harness(|request: &HttpRequest| {
+        let url = request.url.as_str();
+        if url.ends_with("/api/my-courses") {
+            return Ok(json(serde_json::json!({ "courses": [
+                { "id": "1", "name": "编译原理", "semester": { "code": "2026-1" } },
+            ]})));
+        }
+        if url.contains("/timetable/semesters") {
+            return Err(AppError::network_kind(
+                NetworkKind::Timeout,
+                "请求超时".to_owned(),
+            ));
+        }
+        panic!("未预期的请求：{url}");
+    });
+    harness.login_both_sites();
+
+    harness
+        .dispatch(Job::LoadHomework { force: false })
+        .expect("应要求选择学期，而不是整批失败");
+
+    let events = harness.drain_events();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::HomeworkNeedsTerm { .. })),
+        "沒有可用學期時應顯示選擇器"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::Failed { .. })),
+        "不得回報為失敗"
+    );
+}
+
+/// 已明確選定學期時，作業查詢不再受考勤的登入狀態影響。
+///
+/// 舊寫法會在讀取 `chosen_term` 之前就查考勤：考勤工作階段過期（401）、
+/// 後續的登入入口又逾時時，即使 LMS 正常且使用者已選定學期，作業仍會失敗。
+#[test]
+fn chosen_term_loads_homework_without_consulting_attendance() {
+    let mut harness = harness(|request: &HttpRequest| {
+        let url = request.url.as_str();
+        if url.ends_with("/api/my-courses") {
+            return Ok(json(serde_json::json!({ "courses": [
+                { "id": "9", "name": "历史课程", "semester": { "code": "2025-2" } },
+            ]})));
+        }
+        if url.ends_with("/courses/9/activities") {
+            return Ok(json(serde_json::json!({ "activities": [] })));
+        }
+        // 明確選擇學期後連考勤的學期端點都不應碰。
+        panic!("未预期的请求：{url}");
+    });
+    harness.login_both_sites();
+    harness.worker.chosen_term = TermCode::parse("2025-2026-2");
+
+    harness
+        .dispatch(Job::LoadHomework { force: false })
+        .expect("明確選擇的學期不應受考勤影響");
+
+    let updates = homework_updates(&mut harness);
+    let last = updates.last().expect("最终更新");
+    assert_eq!(
+        last.term_source,
+        Some(TermSource::Chosen),
+        "來源應為本次选择"
+    );
+    assert_eq!(last.term_label.as_deref(), Some("2025-2026 学年 第 2 学期"));
+    assert_eq!(last.courses_included, 1);
+}
+
+/// 選定學期後必須通知介面更新課程分區所用的學期提示。
+#[test]
+fn set_homework_term_notifies_the_course_partition_hint() {
+    let mut harness = harness(|_request: &HttpRequest| panic!("选学期不应触发网络请求"));
+
+    harness
+        .dispatch(Job::SetHomeworkTerm {
+            term: "2025-2026-2".to_owned(),
+        })
+        .expect("记住学期");
+
+    let expected = TermCode::parse("2025-2026-2").expect("学期");
+    let events = harness.drain_events();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::CoursesTerm(Some(term)) if *term == expected
+        )),
+        "應通知介面更新課程分區的學期提示"
     );
 }

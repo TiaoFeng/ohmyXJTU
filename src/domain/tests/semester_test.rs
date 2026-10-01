@@ -70,25 +70,40 @@ fn maps_lms_semester_codes() {
 }
 
 #[test]
-fn attendance_wins_over_remembered() {
+fn chosen_term_wins_over_attendance_and_remembered() {
+    let chosen = TermCode::parse("2025-2026-2").expect("解析");
     let attendance = TermCode::parse("2026-2027-1").expect("解析");
-    let remembered = TermCode::parse("2025-2026-2").expect("解析");
+    let remembered = TermCode::parse("2024-2025-1").expect("解析");
     assert_eq!(
-        resolve_term(Some(attendance), Some(remembered), date("2026-09-28")),
+        resolve_term(
+            Some(chosen),
+            Some(attendance),
+            Some(remembered),
+            date("2026-09-28")
+        ),
+        TermResolution::Resolved {
+            term: chosen,
+            source: TermSource::Chosen,
+        },
+        "本次明确选择应优先于考勤当前学期"
+    );
+    assert_eq!(
+        resolve_term(None, Some(attendance), Some(remembered), date("2026-09-28")),
         TermResolution::Resolved {
             term: attendance,
             source: TermSource::Attendance,
-        }
+        },
+        "没有明确选择时以考勤为权威"
     );
     assert_eq!(
-        resolve_term(None, Some(remembered), date("2026-09-28")),
+        resolve_term(None, None, Some(remembered), date("2026-09-28")),
         TermResolution::Resolved {
             term: remembered,
             source: TermSource::Remembered,
         }
     );
     assert_eq!(
-        resolve_term(None, None, date("2026-09-28")),
+        resolve_term(None, None, None, date("2026-09-28")),
         TermResolution::NeedsChoice {
             suggestion: TermCode::parse("2026-2027-1"),
         },

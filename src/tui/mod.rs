@@ -23,7 +23,7 @@ use crate::session::SiteKind;
 use crate::task::{self, Event, FailedTarget, Job};
 
 use app::{
-    AgreementState, App, FormKind, FormState, HomeworkData, LoginScreen, Page, Screen,
+    AgreementState, App, FormKind, FormState, HomeworkData, LmsLevel, LoginScreen, Page, Screen,
     SettingsState, TermPickerState,
 };
 use text::InputLine;
@@ -340,17 +340,53 @@ fn apply_event(app: &mut App, event: Event, jobs: &Sender<Job>) {
             app.flow_state.select(Some(0));
             app.ensure_main();
         }
+        Event::CoursesTerm(term) => {
+            // 只更新分區提示：課程清單本身不變，重新繪製即會依新學期重新分區。
+            app.lms.courses_term = term;
+        }
         Event::Courses(data) => {
             let count = data.courses.len();
             app.lms.courses_term = data.current_term;
             app.lms.courses = Page::Ready(data.courses);
             app.updated_at.lms = Some(now_clock());
-            app.course_state.select(Some(0));
-            app.lms.level = app::LmsLevel::Courses;
+            // 列表順序可能改變：以穩定的課程識別碼重新定位目前課程，否則活動層
+            // 的標題與 `o` 會指向另一門課。仍在課程層時維持既有行為（選第一項）。
+            let anchored = match (app.lms.level, app.lms.activities_course.as_deref()) {
+                (LmsLevel::Courses, _) | (_, None) => None,
+                (_, Some(id)) => app
+                    .lms
+                    .courses
+                    .ready()
+                    .and_then(|courses| courses.iter().position(|course| course.id == id)),
+            };
+            match anchored {
+                Some(index) => {
+                    app.lms.course_index = index;
+                    app.course_state.select(Some(index));
+                }
+                None => {
+                    // 目前課程已不在新的清單中（或本來就在課程層）：回到課程列表，
+                    // 不讓活動層停留在一個已不存在的課程上。
+                    if app.lms.level != LmsLevel::Courses {
+                        app.lms.level = LmsLevel::Courses;
+                    }
+                    app.lms.course_index = 0;
+                    app.course_state.select(Some(0));
+                }
+            }
+            // 刻意不改動 `lms.level`（僅在目前課程消失時才回到清單）：使用者
+            // 可能在刷新完成前已進入活動或詳情層，資料更新不應把他的導航拉回。
             app.set_message(format!("共 {count} 门课程"));
             app.ensure_main();
         }
-        Event::Activities(activities) => {
+        Event::Activities {
+            course_id,
+            activities,
+        } => {
+            // 遲到的回應：使用者已經切到別的課程，這批活動不屬於目前畫面。
+            if app.lms.activities_course.as_deref() != Some(course_id.as_str()) {
+                return;
+            }
             app.lms.activities = Page::Ready(activities);
             app.updated_at.lms = Some(now_clock());
             // 目前分組為空時，改顯示第一個有內容的分組（依顯示順序）。
@@ -367,6 +403,10 @@ fn apply_event(app: &mut App, event: Event, jobs: &Sender<Job>) {
             app.ensure_main();
         }
         Event::ActivityDetail(detail) => {
+            // 遲到的回應：使用者已經改看別的活動。
+            if app.lms.detail_activity.as_deref() != Some(detail.id.as_str()) {
+                return;
+            }
             app.lms.detail = Page::Ready(*detail);
             app.updated_at.lms = Some(now_clock());
             app.ensure_main();

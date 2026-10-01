@@ -302,11 +302,22 @@ pub enum Event {
     },
     /// 考勤流水資料。
     Flow(Box<FlowData>),
+    /// 課程分區所用的當前學期提示已變更（例如使用者明確選定了學期）。
+    ///
+    /// 課程清單本身不變，介面重新繪製即會依新的學期重新分區。
+    CoursesTerm(Option<TermCode>),
     /// 課程列表（含當前學期提示）。
     Courses(CoursesData),
     /// 課程活動列表。
-    Activities(Vec<LmsActivity>),
-    /// 活動詳情。
+    ///
+    /// 附上所屬課程識別碼：介面用它隔離不同課程的活動（並丟棄遲到的回應）。
+    Activities {
+        /// 這批活動所屬的課程識別碼。
+        course_id: String,
+        /// 活動列表。
+        activities: Vec<LmsActivity>,
+    },
+    /// 活動詳情（`ActivityDetailView::id` 即其活動識別碼）。
     ActivityDetail(Box<ActivityDetailView>),
     /// 已解析的活動網址（依訪問模式改寫完成，等待介面以瀏覽器開啟）。
     OpenUrl(String),
@@ -505,6 +516,12 @@ struct Worker {
     cache: LmsCache,
     /// 本會話曾查得的考勤學期（供課程分區使用，不重複請求）。
     known_term: Option<TermCode>,
+    /// 使用者在本工作階段按 `s` 明確選擇的學期。
+    ///
+    /// 明確的選擇優先於考勤的當前學期，否則「選擇要查看的學期」不會生效；
+    /// 它不持久化，重新開啟程式後仍以考勤為權威，而設定檔中的
+    /// `homework_term` 則作為考勤不可用時的後備。
+    chosen_term: Option<TermCode>,
     /// 已收到結束指令；[`Worker::run`] 於迴圈開頭立即返回。
     shutdown: bool,
 }
@@ -725,6 +742,7 @@ pub fn spawn(config: Config, vault: Vault) -> AppResult<(Sender<Job>, Receiver<E
         relogin_attempts: 0,
         cache: LmsCache::default(),
         known_term: None,
+        chosen_term: None,
         shutdown: false,
     };
 
@@ -1015,6 +1033,11 @@ impl Worker {
             .ok_or_else(|| AppError::protocol(format!("学期格式无法识别：{term}")))?;
         self.config.homework_term = Some(term.to_string());
         self.config.save()?;
+        // 本次明確選擇：接下來的載入以它為準，不再被考勤的當前學期蓋過。
+        self.chosen_term = Some(term);
+        // 課程清單的分區以「當前學期」為準：學期改了要同步給介面，否則作業
+        // 已切到所選學期，回到思源學堂仍按舊學期分區（要手動刷新才會更新）。
+        self.emit(Event::CoursesTerm(Some(term)));
         self.emit(Event::Notice(format!("已记住学期 {}", term.label())));
         // 學期已變更：任何早於此開始的載入都基於舊學期，必須確保佇列中恰有
         // 一筆強制重載（忽略執行中任務），切換才會立即生效。
@@ -1078,18 +1101,21 @@ impl Worker {
     ///
     /// 丟棄登入驅動器、待存憑證、待重試任務與暫存的驗證碼圖片：登入互動期間
     /// 資料任務一律延後，若不取消，關閉覆蓋層後使用者按 `r` 送出的任務會永遠
-    /// 排不到。沒有進行中的流程時不做任何事（也不覆蓋介面已顯示的提示）。
+    /// 排不到。登入流程即使已經結束（憑證被拒），等待重登的頁面仍會被收斂；
+    /// 這種情況下不覆蓋介面已顯示的提示。
     fn cancel_login(&mut self) -> AppResult<()> {
-        if self.flow.is_none() && self.pending_vault.is_none() {
-            return Ok(());
-        }
+        // 即使登入流程本身已經結束，等待重登的資料任務仍可能留著：例如憑證
+        // 被拒時流程與待存憑證都已丟棄（`flow`、`pending_vault` 皆為 `None`），
+        // 但 `retry` 還握著原任務。不收拾它的話，該頁會永遠停在「載入中」
+        //（登入互動期間資料任務一律延後，取消後沒有事件會再觸發）。
+        let had_login = self.flow.is_some() || self.pending_vault.is_some();
         self.flow = None;
         self.discard_pending_vault();
-        // 等待重登的任務不會再被重試：明確收斂它的頁面，否則該頁會永遠停在
-        //「載入中」（登入互動期間資料任務一律延後，取消後沒有事件會再觸發）。
         self.settle_pending_retry();
-        self.clear_captcha();
-        self.emit(Event::Notice("已取消登录流程，可重新刷新页面".to_owned()));
+        if had_login {
+            self.clear_captcha();
+            self.emit(Event::Notice("已取消登录流程，可重新刷新页面".to_owned()));
+        }
         Ok(())
     }
 
@@ -1527,9 +1553,10 @@ impl Worker {
             Job::LoadSchedule => Event::Schedule(Box::new(self.load_schedule()?)),
             Job::LoadFlow { page } => Event::Flow(Box::new(self.load_flow(*page)?)),
             Job::LoadCourses { force } => Event::Courses(self.load_courses(*force)?),
-            Job::LoadActivities { course_id, force } => {
-                Event::Activities(self.load_activities(course_id, *force)?)
-            }
+            Job::LoadActivities { course_id, force } => Event::Activities {
+                course_id: course_id.clone(),
+                activities: self.load_activities(course_id, *force)?,
+            },
             Job::LoadActivityDetail { activity_id } => {
                 Event::ActivityDetail(Box::new(self.load_activity_detail(activity_id)?))
             }
@@ -1776,12 +1803,7 @@ impl Worker {
             return Ok(None);
         }
 
-        // 考勤系統的失敗必須標成考勤站點：否則會用 `Job::LoadHomework` 推得
-        // 思源學堂，重登之後還是會失敗，錯誤訊息也指向錯的站點。
-        let attendance_term = match self.attendance_term() {
-            Ok(term) => term,
-            Err(err) => return Err(SiteFailure::attendance(err)),
-        };
+        let chosen = self.chosen_term;
         let remembered = self
             .config
             .homework_term
@@ -1789,17 +1811,45 @@ impl Worker {
             .and_then(TermCode::parse);
         let today = Local::now().date_naive();
 
-        let (term, term_source) = match semester::resolve_term(attendance_term, remembered, today) {
-            TermResolution::Resolved { term, source } => (term, source),
-            TermResolution::NeedsChoice { suggestion } => {
-                self.emit(Event::HomeworkNeedsTerm {
-                    options: semester::course_terms(&courses),
-                    suggestion,
-                    reason: "无法自动判定当前学期：考勤系统不可用，且没有记住的学期。".to_owned(),
-                });
-                return Ok(None);
+        // 使用者已明確選定學期時，不必（也不應）再查考勤：他指定的學期就是
+        // 答案，考勤的登入狀態（過期、逾時）不該讓作業查詢跟著失敗。
+        //
+        // 其餘情況才向考勤取權威學期。考勤的失敗必須標成考勤站點：否則會用
+        // `Job::LoadHomework` 推得思源學堂，重登之後還是會失敗，錯誤訊息也
+        // 指向錯的站點；但只有「登入態已失效」值得中斷整批作業查詢——重登
+        // 之後就能取回權威的學期，單純的連線層錯誤則降級為「考勤不可用」，
+        // 免得考勤的暫時故障連帶拖垮本來可用的思源學堂。
+        let (attendance_term, attendance_error) = if chosen.is_some() {
+            (None, None)
+        } else {
+            match self.attendance_term() {
+                Ok(term) => (term, None),
+                Err(err) if err.needs_relogin() => return Err(SiteFailure::attendance(err)),
+                Err(err) => (None, Some(err)),
             }
         };
+
+        let (term, term_source) =
+            match semester::resolve_term(chosen, attendance_term, remembered, today) {
+                TermResolution::Resolved { term, source } => (term, source),
+                TermResolution::NeedsChoice { suggestion } => {
+                    self.emit(Event::HomeworkNeedsTerm {
+                        options: semester::course_terms(&courses),
+                        suggestion,
+                        reason: "无法自动判定当前学期：考勤系统不可用，且没有选择或记住的学期。"
+                            .to_owned(),
+                    });
+                    return Ok(None);
+                }
+            };
+        // 考勤故障但仍在其他來源下繼續：明確告知使用者學期是從何而來的，
+        // 否則他會以為看到的就是考勤認定的本學期。
+        if let Some(err) = attendance_error {
+            self.emit(Event::Notice(format!(
+                "考勤系统暂时不可用（{err}），本学期改用{}判定",
+                term_source.label()
+            )));
+        }
 
         // 可選學期：課程中出現過的學期；若目前學期不在其中（例如沿用上次選擇），
         // 也一併加入供切換。
@@ -2006,9 +2056,9 @@ impl Worker {
     }
 
     /// 目前已能確定的本學期（不觸發任何網路請求）：
-    /// 本會話曾查得的考勤學期 → 使用者記住的學期 → 無法判定。
+    /// 使用者本次的明確選擇 → 本會話曾查得的考勤學期 → 設定檔記住的學期。
     fn current_term_hint(&self) -> Option<TermCode> {
-        self.known_term.or_else(|| {
+        self.chosen_term.or(self.known_term).or_else(|| {
             self.config
                 .homework_term
                 .as_deref()

@@ -846,7 +846,14 @@ fn activate(app: &mut App, jobs: &Sender<Job>) {
                     return;
                 };
                 app.lms.course_index = selected;
-                app.lms.activities.start_loading("正在加载课程活动…");
+                // 換到不同課程時不得沿用前一門課的活動：舊資料屬於別的課程，
+                // 在新回應抵達前顯示它，會讓使用者以為看到的是本課程的內容。
+                if app.lms.activities_course.as_deref() == Some(course_id.as_str()) {
+                    app.lms.activities.start_loading("正在加载课程活动…");
+                } else {
+                    app.lms.activities.reset_loading("正在加载课程活动…");
+                }
+                app.lms.activities_course = Some(course_id.clone());
                 app.lms.level = LmsLevel::Activities;
                 app.activity_state.select(Some(0));
                 let _ = jobs.send(Job::LoadActivities {
@@ -864,13 +871,18 @@ fn activate(app: &mut App, jobs: &Sender<Job>) {
                     (activity.id.clone(), activity.kind())
                 };
                 app.lms.activity_index = selected;
-                app.lms
-                    .detail
-                    .start_loading(if kind == ActivityKind::Homework {
-                        "正在加载活动详情与提交记录…"
-                    } else {
-                        "正在加载活动详情…"
-                    });
+                // 同理：換活動時不得沿用上一個活動的詳情。
+                let note = if kind == ActivityKind::Homework {
+                    "正在加载活动详情与提交记录…"
+                } else {
+                    "正在加载活动详情…"
+                };
+                if app.lms.detail_activity.as_deref() == Some(activity_id.as_str()) {
+                    app.lms.detail.start_loading(note);
+                } else {
+                    app.lms.detail.reset_loading(note);
+                }
+                app.lms.detail_activity = Some(activity_id.clone());
                 app.lms.level = LmsLevel::Detail;
                 let _ = jobs.send(Job::LoadActivityDetail { activity_id });
             }

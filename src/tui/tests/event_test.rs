@@ -11,8 +11,8 @@ use crate::session::{AccessMode, SiteKind};
 use crate::sites::lms::LmsCourse;
 use crate::task::{CoursesData, Event, FailedTarget, HomeworkUpdate};
 use crate::tui::app::{
-    AgreementState, App, FlowData, FormState, HomeworkData, LmsLevel, LoginScreen, NavItem, Page,
-    ScheduleData, Screen, SettingsState,
+    ActivityDetailView, AgreementState, App, FlowData, FormState, HomeworkData, LmsLevel,
+    LoginScreen, NavItem, Page, ScheduleData, Screen, SettingsState,
 };
 use crate::tui::text::InputLine;
 
@@ -889,4 +889,153 @@ fn agreement_failure_keeps_gate_with_inline_error() {
     let state = app.agreement.as_deref().expect("失败后閱讀門应保留");
     assert!(!state.saving, "失败后应解除保存中");
     assert_eq!(state.error.as_deref(), Some("写入配置文件失败"));
+}
+
+#[test]
+fn courses_event_does_not_pull_the_user_back_to_the_course_list() {
+    // 使用者按 r 刷新課程後、回應抵達前已按 enter 進入活動層：資料更新不得
+    // 把他拉回課程列表。
+    let mut app = app();
+    app.nav = NavItem::Lms;
+    app.lms.level = LmsLevel::Activities;
+    app.lms.activities_course = Some("1".to_owned());
+
+    apply_event(
+        &mut app,
+        Event::Courses(CoursesData {
+            courses: vec![course("1")],
+            current_term: None,
+        }),
+    );
+
+    assert_eq!(
+        app.lms.level,
+        LmsLevel::Activities,
+        "資料更新不應改變目前的瀏覽層級"
+    );
+    assert!(app.lms.courses.ready().is_some(), "課程資料仍應更新");
+}
+
+/// 課程列表的順序可能改變：目前課程必須以識別碼而非索引來維持。
+#[test]
+fn courses_event_reanchors_the_current_course_by_id() {
+    let mut app = app();
+    app.nav = NavItem::Lms;
+    app.lms.level = LmsLevel::Activities;
+    app.lms.activities_course = Some("A".to_owned());
+    app.lms.course_index = 0;
+
+    // 重新查詢後順序由 [A, B] 變成 [B, A]。
+    apply_event(
+        &mut app,
+        Event::Courses(CoursesData {
+            courses: vec![course("B"), course("A")],
+            current_term: None,
+        }),
+    );
+
+    assert_eq!(app.lms.level, LmsLevel::Activities);
+    assert_eq!(app.lms.course_index, 1, "應以課程識別碼重新定位目前課程");
+    assert_eq!(
+        app.course_state.selected(),
+        Some(1),
+        "課程層的選取也應跟著移動"
+    );
+}
+
+/// 目前課程已不在新的清單中：不得讓活動層停留在一個不存在的課程上。
+#[test]
+fn courses_event_returns_to_the_list_when_the_current_course_is_gone() {
+    let mut app = app();
+    app.nav = NavItem::Lms;
+    app.lms.level = LmsLevel::Activities;
+    app.lms.activities_course = Some("A".to_owned());
+
+    apply_event(
+        &mut app,
+        Event::Courses(CoursesData {
+            courses: vec![course("B")],
+            current_term: None,
+        }),
+    );
+
+    assert_eq!(app.lms.level, LmsLevel::Courses, "應回到課程列表");
+    assert_eq!(app.lms.course_index, 0);
+}
+
+/// 選定學期後介面會收到分區提示的更新。
+#[test]
+fn courses_term_event_updates_the_partition_hint() {
+    let mut app = app();
+    let term = TermCode::parse("2025-2026-2").expect("学期");
+    app.lms.courses_term = TermCode::parse("2026-2027-1");
+
+    apply_event(&mut app, Event::CoursesTerm(Some(term)));
+    assert_eq!(app.lms.courses_term, Some(term));
+
+    apply_event(&mut app, Event::CoursesTerm(None));
+    assert_eq!(app.lms.courses_term, None);
+}
+
+/// 測試用課程。
+fn course(id: &str) -> LmsCourse {
+    LmsCourse {
+        id: id.to_owned(),
+        name: format!("课程{id}"),
+        course_code: None,
+        instructors: Vec::new(),
+        semester: None,
+        academic_year: None,
+    }
+}
+
+#[test]
+fn late_activities_response_is_dropped() {
+    let mut app = app();
+    app.nav = NavItem::Lms;
+    app.lms.level = LmsLevel::Activities;
+    // 使用者已改看課程 2；課程 1 的回應遲到了。
+    app.lms.activities_course = Some("2".to_owned());
+
+    apply_event(
+        &mut app,
+        Event::Activities {
+            course_id: "1".to_owned(),
+            activities: Vec::new(),
+        },
+    );
+    assert!(
+        app.lms.activities.ready().is_none(),
+        "遲到且不屬於目前課程的回應應丟棄"
+    );
+
+    apply_event(
+        &mut app,
+        Event::Activities {
+            course_id: "2".to_owned(),
+            activities: Vec::new(),
+        },
+    );
+    assert!(app.lms.activities.ready().is_some(), "目前課程的回應應套用");
+}
+
+#[test]
+fn late_activity_detail_response_is_dropped() {
+    let mut app = app();
+    app.nav = NavItem::Lms;
+    app.lms.level = LmsLevel::Detail;
+    app.lms.detail_activity = Some("2".to_owned());
+
+    let detail = |id: &str| {
+        Box::new(ActivityDetailView {
+            id: id.to_owned(),
+            ..ActivityDetailView::default()
+        })
+    };
+
+    apply_event(&mut app, Event::ActivityDetail(detail("1")));
+    assert!(app.lms.detail.ready().is_none(), "上一個活動的詳情應丟棄");
+
+    apply_event(&mut app, Event::ActivityDetail(detail("2")));
+    assert!(app.lms.detail.ready().is_some(), "目前活動的詳情應套用");
 }

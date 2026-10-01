@@ -160,6 +160,17 @@ impl<T> Page<T> {
         };
     }
 
+    /// 進入載入中狀態，且**不**保留既有資料。
+    ///
+    /// 用於切換到不同資源（例如改看另一門課程的活動）時：舊資料屬於前一個
+    /// 資源，保留它只會讓使用者在回應抵達前看到不屬於目前選取項的內容。
+    pub fn reset_loading(&mut self, note: impl Into<String>) {
+        *self = Self::Loading {
+            note: note.into(),
+            stale: None,
+        };
+    }
+
     /// 進入失敗狀態（保留既有資料供繼續顯示）。
     pub fn fail(&mut self, message: impl Into<String>) {
         let stale = match std::mem::take(self) {
@@ -261,6 +272,14 @@ pub struct LmsState {
     pub activities: Page<Vec<LmsActivity>>,
     /// 目前活動的詳情。
     pub detail: Page<ActivityDetailView>,
+    /// `activities` 所屬的課程識別碼（`None` 表示尚未載入任何課程的活動）。
+    ///
+    /// 切換課程時用來判斷既有資料是否仍適用，並過濾遲到的回應。
+    pub activities_course: Option<String>,
+    /// `detail` 所屬的活動識別碼（`None` 表示尚未載入任何活動詳情）。
+    ///
+    /// 用途同 [`Self::activities_course`]。
+    pub detail_activity: Option<String>,
     /// 選取的課程索引。
     pub course_index: usize,
     /// 選取的活動索引（相對於目前分組過濾後的清單）。

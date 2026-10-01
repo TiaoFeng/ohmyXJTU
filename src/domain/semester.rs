@@ -127,13 +127,24 @@ pub enum TermResolution {
 
 /// 依優先序判定要載入的學期。
 ///
-/// 考勤系統的當前學期為權威來源；其次沿用使用者上次的選擇；兩者皆無時
-/// 回報 [`TermResolution::NeedsChoice`]，由介面顯示選擇器。
+/// 優先序：本次工作階段的明確選擇 → 考勤系統的當前學期（權威）→ 使用者
+/// 上次的選擇；皆無時回報 [`TermResolution::NeedsChoice`]，由介面顯示選擇器。
+///
+/// `chosen` 僅代表「使用者在本工作階段按 `s` 選過的學期」——他明確指定
+/// 要看的學期，因此優先於考勤的當前學期；它不持久化，重新開啟程式後仍以
+/// 考勤為權威。
 pub fn resolve_term(
+    chosen: Option<TermCode>,
     attendance: Option<TermCode>,
     remembered: Option<TermCode>,
     today: NaiveDate,
 ) -> TermResolution {
+    if let Some(term) = chosen {
+        return TermResolution::Resolved {
+            term,
+            source: TermSource::Chosen,
+        };
+    }
     if let Some(term) = attendance {
         return TermResolution::Resolved {
             term,

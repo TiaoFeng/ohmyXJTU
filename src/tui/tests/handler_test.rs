@@ -925,6 +925,82 @@ fn enter_on_lms_courses_uses_real_index_after_partition_headers() {
     assert_eq!(app.lms.level, LmsLevel::Activities);
 }
 
+/// 切換到另一門課程時，不得沿用前一門課的活動清單。
+#[test]
+fn switching_courses_drops_the_previous_courses_activities() {
+    let (jobs, rx) = channel();
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Lms;
+    app.lms.level = LmsLevel::Courses;
+    app.lms.courses = Page::Ready(vec![
+        course_with_term("1", Some("2026-1")),
+        course_with_term("2", Some("2026-1")),
+    ]);
+
+    // 課程 1 的活動已載入。
+    app.course_state.select(Some(0));
+    press(&mut app, &jobs, KeyCode::Enter);
+    let _ = rx.try_recv();
+    app.lms.activities = Page::Ready(vec![lms_activity("11", "homework")]);
+    app.lms.activities_course = Some("1".to_owned());
+
+    // 改看課程 2：活動必須清空，不能還顯示課程 1 的清單。
+    press(&mut app, &jobs, KeyCode::Esc);
+    app.course_state.select(Some(1));
+    press(&mut app, &jobs, KeyCode::Enter);
+    assert!(matches!(rx.try_recv(), Ok(Job::LoadActivities { course_id, .. }) if course_id == "2"));
+    assert_eq!(app.lms.activities_course.as_deref(), Some("2"));
+    assert!(app.lms.activities.is_loading());
+    assert!(
+        app.lms.activities.ready().is_none(),
+        "不得沿用前一門課的活動清單"
+    );
+
+    // 重新進入同一門課則保留舊資料：刷新期間仍可閱讀。
+    app.lms.activities = Page::Ready(vec![lms_activity("21", "homework")]);
+    press(&mut app, &jobs, KeyCode::Esc);
+    press(&mut app, &jobs, KeyCode::Enter);
+    let _ = rx.try_recv();
+    assert_eq!(
+        app.lms.activities.ready().map(Vec::len),
+        Some(1),
+        "同一門課重新載入時應保留舊資料"
+    );
+}
+
+/// 切換活動時同樣不得沿用上一個活動的詳情。
+#[test]
+fn switching_activities_drops_the_previous_detail() {
+    let (jobs, rx) = channel();
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Lms;
+    app.lms.level = LmsLevel::Activities;
+    app.lms.activity_group = ActivityGroup::Homework;
+    app.lms.activities = Page::Ready(vec![
+        lms_activity("1", "homework"),
+        lms_activity("2", "homework"),
+    ]);
+    app.lms.detail_activity = Some("1".to_owned());
+    app.lms.detail = Page::Ready(ActivityDetailView {
+        id: "1".to_owned(),
+        title: "活动 1".to_owned(),
+        ..ActivityDetailView::default()
+    });
+
+    // 改看活動 2：詳情必須清空（不能還顯示活動 1 的內容）。
+    app.activity_state.select(Some(1));
+    press(&mut app, &jobs, KeyCode::Enter);
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(Job::LoadActivityDetail { activity_id }) if activity_id == "2"
+    ));
+    assert_eq!(app.lms.detail_activity.as_deref(), Some("2"));
+    assert!(app.lms.detail.is_loading());
+    assert!(app.lms.detail.ready().is_none(), "不得沿用上一個活動的詳情");
+}
+
 #[test]
 fn s_key_opens_term_picker_and_submits_choice() {
     let (jobs, rx) = channel();

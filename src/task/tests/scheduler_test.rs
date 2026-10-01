@@ -89,6 +89,7 @@ impl ThreadWorker {
             relogin_attempts: 0,
             cache: LmsCache::default(),
             known_term: None,
+            chosen_term: None,
             shutdown: false,
         };
 

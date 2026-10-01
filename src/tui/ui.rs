@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 
 use crate::tui::app::{FormState, LoginScreen};
-use crate::tui::text::InputLine;
+use crate::tui::text::{InputLine, display_width};
 use crate::tui::theme::THEME;
 
 /// 視窗最小寬度。
@@ -46,18 +46,52 @@ pub fn popup_surface(frame: &mut Frame, area: Rect, title: &str) -> Rect {
 }
 
 /// 輸入框的可見內容與游標欄位（水平捲動，含寬字元）。
+///
+/// 捲動的單位是**終端顯示欄**，不是字素個數：全形字佔兩欄，若按字素計數
+/// （例如「8 欄輸入區保留 8 個中文字」），可見內容就會塞滿 16 欄、把後面的
+/// 欄位與游標一起推出輸入區。
 pub fn input_window(line: &InputLine, width: usize) -> (String, u16) {
     if width == 0 {
         return (String::new(), 0);
     }
     let graphemes = line.display_graphemes();
     let cursor = line.cursor().min(graphemes.len());
-    let start = if cursor >= width {
-        cursor + 1 - width
-    } else {
-        0
-    };
-    let end = (start + width).min(graphemes.len());
+
+    // 游標前：由游標往前累計，上限 `width - 1`——游標本身要佔一欄，否則
+    // 它會落在輸入區之外（全形字更會直接壓到框線上）。
+    let before_budget = width - 1;
+    let mut start = cursor;
+    let mut before = 0_usize;
+    while start > 0 {
+        let grapheme_width = display_width(&graphemes[start - 1]);
+        if before + grapheme_width > before_budget {
+            break;
+        }
+        before += grapheme_width;
+        start -= 1;
+    }
+
+    // 游標後：把剩下的欄位填滿。
+    let mut end = cursor;
+    let mut filled = before;
+    while end < graphemes.len() {
+        let grapheme_width = display_width(&graphemes[end]);
+        if filled + grapheme_width > width {
+            break;
+        }
+        filled += grapheme_width;
+        end += 1;
+    }
+
+    // 極窄視窗（例如只剩一欄）連一個全形字都放不下：至少顯示最接近游標的
+    // 那個字素，讓使用者還看得到自己正在打什麼，而不是一片空白。
+    if end == start && !graphemes.is_empty() {
+        if cursor < graphemes.len() {
+            end = cursor + 1;
+        } else {
+            start = cursor - 1;
+        }
+    }
 
     let prefix: String = graphemes[start..cursor].concat();
     let visible: String = graphemes[start..end].concat();

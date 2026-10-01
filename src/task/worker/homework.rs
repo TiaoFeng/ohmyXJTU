@@ -445,7 +445,9 @@ impl Worker {
             activity_id: activity.id.clone(),
             title: activity.display_title(),
             end_time: activity.end_time.clone(),
-            submit_by_group: activity.submit_by_group.unwrap_or(false),
+            // 簡要列表常缺少此欄位：先原樣保留，登入成功後由提交摘要覆寫；
+            // 摘要失敗時維持 `None`（無法確認），不得預設為個人作業。
+            submit_by_group: activity.submit_by_group,
             submission_count: None,
             note: None,
         };

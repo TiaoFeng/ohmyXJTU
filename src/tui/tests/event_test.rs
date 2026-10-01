@@ -138,6 +138,7 @@ fn data_events_fill_pages() {
             week: 3,
             lessons: Vec::new(),
             skipped: 0,
+            notice: None,
         })),
     );
     assert!(app.schedule.ready().is_some());
@@ -187,7 +188,7 @@ fn homework_event_updates_groups_and_counts() {
             activity_id: "9".to_owned(),
             title: "第三次作业".to_owned(),
             end_time: None,
-            submit_by_group: false,
+            submit_by_group: Some(false),
             submission_count: Some(0),
             note: None,
         }],

@@ -790,7 +790,7 @@ fn o_key_sends_open_activity_for_selected_item() {
         title: "作业".to_owned(),
         kind: ActivityKind::Homework,
         end_time: None,
-        submit_by_group: false,
+        submit_by_group: Some(false),
         submissions: None,
         note: None,
     });
@@ -814,7 +814,7 @@ fn homework_page(course_id: &str, activity_id: &str, submitted: usize) -> Homewo
         activity_id: activity_id.to_owned(),
         title: "第一次作业".to_owned(),
         end_time: Some("2026-10-01 23:59:59".to_owned()),
-        submit_by_group: false,
+        submit_by_group: Some(false),
         submission_count: Some(submitted),
         note: None,
     };

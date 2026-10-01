@@ -40,6 +40,8 @@ pub struct ScheduleData {
     pub lessons: Vec<LessonEntry>,
     /// 因格式問題被跳過的課程筆數。
     pub skipped: usize,
+    /// 頁面提示（例如學期外的空狀態原因、考勤記錄被分頁上限截斷）。
+    pub notice: Option<String>,
 }
 
 /// 考勤流水頁資料。
@@ -66,8 +68,8 @@ pub struct ActivityDetailView {
     pub kind: ActivityKind,
     /// 截止時間。
     pub end_time: Option<String>,
-    /// 是否小組作業。
-    pub submit_by_group: bool,
+    /// 是否小組作業；`None` 代表無法確認（詳情缺少該欄位）。
+    pub submit_by_group: Option<bool>,
     /// 提交記錄；`None` 代表無法確認（僅作業有提交狀態）。
     pub submissions: Option<Vec<LmsSubmission>>,
     /// 補充說明（例如無法確認提交狀態的原因）。

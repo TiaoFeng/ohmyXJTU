@@ -6,7 +6,9 @@
 
 pub mod models;
 
-pub use models::{AttendanceStatus, FlowPage, FlowRecord, Semester, TimetableCourse, WaterRecord};
+pub use models::{
+    AttendanceStatus, FlowPage, FlowRecord, RecordBatch, Semester, TimetableCourse, WaterRecord,
+};
 
 use std::collections::HashMap;
 
@@ -154,14 +156,13 @@ impl<'a> AttendanceApi<'a> {
     }
 
     /// 查詢指定期間的課程考勤記錄（自動翻頁）。
-    pub fn records_between(
-        &mut self,
-        start: NaiveDate,
-        end: NaiveDate,
-    ) -> AppResult<Vec<WaterRecord>> {
+    ///
+    /// 到達分頁上限時明確標記 `truncated`：缺失的記錄會讓課程顯示
+    /// 「待核实」，使用者必須知道資料不完整，不得静默截断。
+    pub fn records_between(&mut self, start: NaiveDate, end: NaiveDate) -> AppResult<RecordBatch> {
         let mut records = Vec::new();
         let mut page = 1;
-        loop {
+        let truncated = loop {
             let request = HttpRequest::post_json(
                 format!("https://{DOMAIN}/sa/student/pc/attendance-records/page"),
                 json!({
@@ -180,12 +181,15 @@ impl<'a> AttendanceApi<'a> {
             let total = required_total(&data, "查询课程考勤记录")?;
             records.extend(rows);
 
-            if records.len() as u64 >= total || page >= MAX_PAGES {
-                break;
+            if records.len() as u64 >= total {
+                break false;
+            }
+            if page >= MAX_PAGES {
+                break true;
             }
             page += 1;
-        }
-        Ok(records)
+        };
+        Ok(RecordBatch { records, truncated })
     }
 
     fn data(&mut self, request: HttpRequest, context: &str) -> AppResult<Value> {

@@ -124,8 +124,8 @@ pub struct HomeworkInput {
     pub title: String,
     /// 截止時間（原始字串）。
     pub end_time: Option<String>,
-    /// 是否以小組為單位提交。
-    pub submit_by_group: bool,
+    /// 是否以小組為單位提交；`None` 代表無法確認（詳情缺少該欄位）。
+    pub submit_by_group: Option<bool>,
     /// 提交記錄數；`None` 代表無法確認。
     pub submission_count: Option<usize>,
     /// 無法確認提交狀態時的原因（顯示於「待核实」項目）。
@@ -145,8 +145,8 @@ pub struct HomeworkItem {
     pub title: String,
     /// 截止時間（原始字串）。
     pub end_time: Option<String>,
-    /// 是否以小組為單位提交。
-    pub submit_by_group: bool,
+    /// 是否以小組為單位提交；`None` 代表無法確認（詳情缺少該欄位）。
+    pub submit_by_group: Option<bool>,
     /// 判定狀態。
     pub state: HomeworkState,
     /// 無法確認提交狀態時的原因（顯示於「待核实」項目）。

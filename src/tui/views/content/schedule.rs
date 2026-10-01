@@ -33,9 +33,9 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
         },
     );
 
-    // 無法解析星期資訊的課程不會出現在清單中：留一列提示，避免使用者誤以為
-    // 課表完整（與作業頁的警示列同型）。
-    let (warning, has_lessons) = {
+    // 學期外提示與無法解析課程的警示都不屬於清單本身：各留一列提示，避免
+    // 使用者誤解頁面內容（與作業頁的警示列同型）。
+    let (header, has_lessons) = {
         let Some(data) = app.schedule.ready() else {
             empty(
                 frame,
@@ -46,19 +46,29 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
             );
             return;
         };
-        let warning = (data.skipped > 0).then(|| {
-            Line::from(Span::styled(
+        let mut header = Vec::new();
+        if let Some(notice) = &data.notice {
+            header.push(Line::from(Span::styled(
+                format!(" {notice}"),
+                THEME.muted_style(),
+            )));
+        }
+        if data.skipped > 0 {
+            header.push(Line::from(Span::styled(
                 format!(" 已跳过 {} 门无法解析的课程", data.skipped),
                 THEME.muted_style(),
-            ))
-        });
-        (warning, !data.lessons.is_empty())
+            )));
+        }
+        (header, !data.lessons.is_empty())
     };
-    let header_height = u16::from(warning.is_some());
+    let header_height = u16::try_from(header.len()).unwrap_or(u16::MAX);
     let [header_area, body_area] =
         Layout::vertical([Constraint::Length(header_height), Constraint::Min(3)]).areas(area);
-    if let Some(line) = warning {
-        frame.render_widget(Paragraph::new(line).style(THEME.base_style()), header_area);
+    if !header.is_empty() {
+        frame.render_widget(
+            Paragraph::new(header).style(THEME.base_style()),
+            header_area,
+        );
     }
 
     if !has_lessons {

@@ -139,9 +139,13 @@ fn deadline_cell(deadline: &str, columns: RowColumns) -> String {
     cell
 }
 
-/// 提交單位欄文字（個人作業留白，維持欄位寬度）。
-fn group_label(submit_by_group: bool) -> &'static str {
-    if submit_by_group { "小组" } else { "" }
+/// 提交單位欄文字（個人作業與未知皆留白，維持欄位寬度）。
+fn group_label(submit_by_group: Option<bool>) -> &'static str {
+    if submit_by_group == Some(true) {
+        "小组"
+    } else {
+        ""
+    }
 }
 
 /// 列表中顯示的截止時間（`compact` 為真時省略年份）。

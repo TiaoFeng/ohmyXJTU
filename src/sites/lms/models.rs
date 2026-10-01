@@ -234,6 +234,16 @@ impl LmsSubmission {
             .or(self.created_at.as_deref())
             .filter(|value| !value.trim().is_empty())
     }
+
+    /// 是否計入有效提交（排除非最新版本）。
+    ///
+    /// 「有效提交」的單一判據：作業清單的「已完成」與詳情頁的計數都必須
+    /// 使用它。`is_latest_version` 缺失時無法證明是舊版本，仍計入（介面
+    /// 另以「未知」標示）。草稿／撤回的精確判據（`status`、`can_retract`
+    /// 等語意）尚待實網脫敏樣本核實，暫不臆測。
+    pub fn is_effective(&self) -> bool {
+        self.is_latest_version != Some(false)
+    }
 }
 
 /// 提交記錄列表。
@@ -252,13 +262,12 @@ impl LmsSubmissionList {
 
     /// 有效提交數。
     ///
-    /// 排除非最新版本的記錄（`is_latest_version == false`）；`None` 代表頁面
-    /// 未提供該欄位，無法證明是舊版本，仍計入。草稿／撤回的精確判據
-    /// （`status`、`can_retract` 等語意）尚待實網脫敏樣本核實，暫不臆測。
+    /// 判據為 [`LmsSubmission::is_effective`]（單一定義）；介面顯示必須
+    /// 與此保持一致。
     pub fn effective_count(&self) -> usize {
         self.list
             .iter()
-            .filter(|submission| submission.is_latest_version != Some(false))
+            .filter(|submission| submission.is_effective())
             .count()
     }
 }

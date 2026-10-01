@@ -233,10 +233,10 @@ fn homework_lines(item: &HomeworkItem) -> Vec<Line<'static>> {
             Span::styled("状态：", THEME.muted_style()),
             Span::styled(item.state.label(), THEME.status_style(item.state.tone())),
             Span::styled(
-                if item.submit_by_group {
-                    "　提交单位：小组"
-                } else {
-                    "　提交单位：个人"
+                match item.submit_by_group {
+                    Some(true) => "　提交单位：小组",
+                    Some(false) => "　提交单位：个人",
+                    None => "　提交单位：未知",
                 },
                 THEME.muted_style(),
             ),

@@ -100,13 +100,22 @@ pub struct ActivityDetail {
 /// 作業提交摘要。
 #[derive(Debug, Clone)]
 pub struct SubmissionSummary {
-    /// 是否以小組為單位提交（以活動詳情為準）。
-    pub submit_by_group: bool,
+    /// 是否以小組為單位提交（以活動詳情為準）；`None` 代表詳情缺少該欄位，
+    /// 無法判定個人或小組。
+    pub submit_by_group: Option<bool>,
     /// 有效提交數；`None` 代表無法確認。
     pub count: Option<usize>,
     /// 無法確認的原因。
     pub note: Option<String>,
 }
+
+/// 活動詳情缺少 `submit_by_group` 時的說明。
+///
+/// 無法判定個人或小組時一律保持「待核实」且不發出提交查詢：猜測為個人作業
+/// 可能把小組作業的提交記錄誤判為「已完成」（參考實作在詳情抽取時視此欄位
+/// 為必填，缺失即整筆失敗，同樣不會靜默假設為個人）。
+pub(crate) const MISSING_SUBMIT_BY_GROUP_NOTE: &str =
+    "活动详情缺少提交单位字段（submit_by_group），无法确认提交状态";
 
 /// 思源學堂 API。
 pub struct LmsApi<'a> {
@@ -182,6 +191,7 @@ impl<'a> LmsApi<'a> {
 
     /// 課程活動列表（附帶被跳過的項目數）。
     pub fn course_activities(&mut self, course_id: &str) -> AppResult<(Vec<LmsActivity>, usize)> {
+        let course_id = checked_id(course_id, "课程识别码不符合预期格式")?;
         self.send_json_list(
             HttpRequest::get(format!("{BASE_URL}/api/courses/{course_id}/activities")),
             "查询课程活动",
@@ -199,16 +209,28 @@ impl<'a> LmsApi<'a> {
     pub fn activity_from(&mut self, activity: LmsActivity) -> AppResult<ActivityDetail> {
         let mut note = None;
         let submissions = if activity.kind() == ActivityKind::Homework {
-            // 詳情中的 submit_by_group 是權威的小組判定（簡要列表常缺少此欄位）。
-            let submit_by_group = activity.submit_by_group.unwrap_or(false);
-            match self.submissions(&activity.id, submit_by_group, activity.group_id.as_deref()) {
-                Ok(list) => Some(list),
-                // 登入態失效必須向上傳播，交由統一重登流程處理。
-                Err(err) if err.needs_relogin() => return Err(err),
-                // 其他錯誤保持「待核实」，不可誤判為未提交。
-                Err(err) => {
-                    note = Some(submission_failure_note(&err));
+            // 詳情中的 submit_by_group 是權威的小組判定（簡要列表常缺少此欄位）；
+            // 詳情也缺少時無法判定個人或小組，保持「待核实」且不發出提交查詢。
+            match activity.submit_by_group {
+                None => {
+                    note = Some(MISSING_SUBMIT_BY_GROUP_NOTE.to_owned());
                     None
+                }
+                Some(submit_by_group) => {
+                    match self.submissions(
+                        &activity.id,
+                        submit_by_group,
+                        activity.group_id.as_deref(),
+                    ) {
+                        Ok(list) => Some(list),
+                        // 登入態失效必須向上傳播，交由統一重登流程處理。
+                        Err(err) if err.needs_relogin() => return Err(err),
+                        // 其他錯誤保持「待核实」，不可誤判為未提交。
+                        Err(err) => {
+                            note = Some(submission_failure_note(&err));
+                            None
+                        }
+                    }
                 }
             }
         } else {
@@ -234,12 +256,21 @@ impl<'a> LmsApi<'a> {
     }
 
     /// 以既有詳情計算提交摘要（個人作業可省一次提交列表請求）。
+    ///
+    /// 詳情缺少 `submit_by_group` 時無法判定個人或小組，一律回報「待核实」
+    /// 且不發出任何提交查詢（含不查 `/user/index`）。
     pub fn submission_summary_for(&mut self, detail: &LmsActivity) -> AppResult<SubmissionSummary> {
-        let submit_by_group = detail.submit_by_group.unwrap_or(false);
+        let Some(submit_by_group) = detail.submit_by_group else {
+            return Ok(SubmissionSummary {
+                submit_by_group: None,
+                count: None,
+                note: Some(MISSING_SUBMIT_BY_GROUP_NOTE.to_owned()),
+            });
+        };
 
         if !submit_by_group && let Some(count) = detail.user_submit_count {
             return Ok(SubmissionSummary {
-                submit_by_group,
+                submit_by_group: Some(submit_by_group),
                 // 伺服器值為 u64：在 32 位元目標上 `as usize` 會截斷並可能誤判為
                 // 「未提交」；超出範圍時視為無法確認（`None`）。
                 count: usize::try_from(count).ok(),
@@ -249,7 +280,7 @@ impl<'a> LmsApi<'a> {
 
         match self.submissions(&detail.id, submit_by_group, detail.group_id.as_deref()) {
             Ok(list) => Ok(SubmissionSummary {
-                submit_by_group,
+                submit_by_group: Some(submit_by_group),
                 count: Some(list.effective_count()),
                 note: None,
             }),
@@ -257,7 +288,7 @@ impl<'a> LmsApi<'a> {
             Err(err) if err.needs_relogin() => Err(err),
             // 其他錯誤保持「待核实」，並保留階段化原因。
             Err(err) => Ok(SubmissionSummary {
-                submit_by_group,
+                submit_by_group: Some(submit_by_group),
                 count: None,
                 note: Some(submission_failure_note(&err)),
             }),

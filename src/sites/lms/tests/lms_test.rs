@@ -241,3 +241,35 @@ fn effective_count_excludes_old_versions() {
         "旧版本（false／0／\"false\"）不计入有效提交"
     );
 }
+
+/// 課程識別碼不合法時必須回報協定錯誤，且不得發出任何請求。
+#[test]
+fn course_activities_rejects_unsafe_identifiers_without_requests() {
+    use std::sync::Arc;
+
+    use crate::config::{AccessPolicy, Config};
+    use crate::http::HttpClient;
+    use crate::http::fake::FakeClient;
+    use crate::session::{AccessMode, SessionManager, SiteKind};
+
+    let client = Arc::new(FakeClient::with_responder(|_request: &HttpRequest| {
+        panic!("识别码不合法时不得发出请求");
+    }));
+    let direct: Arc<dyn HttpClient> = client.clone();
+    let webvpn: Arc<dyn HttpClient> = client;
+    let config = Config {
+        access_policy: AccessPolicy::Direct,
+        ..Config::default()
+    };
+    let mut session = SessionManager::with_clients(&config, direct, webvpn);
+    session.register(Box::new(LmsSite));
+    session.mark_logged_in(SiteKind::Lms, AccessMode::Direct, Vec::new());
+    let mut api = LmsApi::new(&mut session);
+
+    for course_id in ["1/2", "42?x=1", "中文"] {
+        let err = api
+            .course_activities(course_id)
+            .expect_err("非法识别码应被拒绝");
+        assert!(matches!(err, AppError::Protocol(_)), "{err:?}");
+    }
+}

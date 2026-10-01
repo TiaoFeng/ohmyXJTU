@@ -197,10 +197,7 @@ fn activity_item(activity: &LmsActivity, columns: RowColumns) -> ListItem<'stati
     ];
     if columns.group {
         spans.push(Span::styled(
-            fit_display(
-                group_label(activity.submit_by_group.unwrap_or(false)),
-                GROUP_WIDTH,
-            ),
+            fit_display(group_label(activity.submit_by_group), GROUP_WIDTH),
             THEME.muted_style(),
         ));
     }
@@ -269,10 +266,10 @@ fn detail_lines(detail: &ActivityDetailView) -> Vec<Line<'static>> {
     if detail.kind == ActivityKind::Homework {
         meta.push_str(&format!(
             "　提交单位：{}",
-            if detail.submit_by_group {
-                "小组"
-            } else {
-                "个人"
+            match detail.submit_by_group {
+                Some(true) => "小组",
+                Some(false) => "个人",
+                None => "未知",
             }
         ));
     }
@@ -294,10 +291,27 @@ fn detail_lines(detail: &ActivityDetailView) -> Vec<Line<'static>> {
                 )));
             }
             Some(submissions) => {
-                lines.push(Line::from(Span::styled(
-                    format!("提交记录：{} 条", submissions.len()),
-                    THEME.status_style(Tone::Success),
-                )));
+                // 與作業清單的「有效提交」語義保持一致（單一判據
+                // `is_effective`）：計數只算有效記錄，歷史版本另計。
+                let effective = submissions
+                    .iter()
+                    .filter(|item| item.is_effective())
+                    .count();
+                let history = submissions.len() - effective;
+                let (label, tone) = if effective == 0 {
+                    (
+                        format!("提交记录：暂无有效提交（另有 {history} 条历史版本）"),
+                        Tone::Accent,
+                    )
+                } else if history > 0 {
+                    (
+                        format!("提交记录：{effective} 条有效（另有 {history} 条历史版本）"),
+                        Tone::Success,
+                    )
+                } else {
+                    (format!("提交记录：{effective} 条有效"), Tone::Success)
+                };
+                lines.push(Line::from(Span::styled(label, THEME.status_style(tone))));
                 for submission in submissions.iter().take(5) {
                     let score = submission
                         .score
@@ -307,10 +321,10 @@ fn detail_lines(detail: &ActivityDetailView) -> Vec<Line<'static>> {
                         format!(
                             "· {}（最新版本：{}）{score}",
                             submission_time_label(submission.timestamp()),
-                            if submission.is_latest_version.unwrap_or(false) {
-                                "是"
-                            } else {
-                                "否"
+                            match submission.is_latest_version {
+                                Some(true) => "是",
+                                Some(false) => "否",
+                                None => "未知",
                             }
                         ),
                         THEME.muted_style(),

@@ -29,6 +29,7 @@ fn app_with_schedule(len: usize) -> App {
             .map(|index| lesson(&format!("1-{}", index + 1)))
             .collect(),
         skipped: 0,
+        notice: None,
     });
     app
 }

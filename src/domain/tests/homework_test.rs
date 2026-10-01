@@ -15,7 +15,7 @@ fn input(title: &str, end_time: Option<&str>, submission_count: Option<usize>) -
         activity_id: format!("a-{title}"),
         title: title.to_owned(),
         end_time: end_time.map(str::to_owned),
-        submit_by_group: false,
+        submit_by_group: Some(false),
         submission_count,
         note: None,
     }

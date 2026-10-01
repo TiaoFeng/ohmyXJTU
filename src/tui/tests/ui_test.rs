@@ -276,7 +276,7 @@ fn homework_input(title: &str, end_time: &str, submitted: usize) -> HomeworkInpu
         activity_id: format!("a-{title}"),
         title: title.to_owned(),
         end_time: Some(end_time.to_owned()),
-        submit_by_group: false,
+        submit_by_group: Some(false),
         submission_count: Some(submitted),
         note: None,
     }
@@ -390,7 +390,7 @@ fn draws_homework_unknown_warning_with_reason() {
                 activity_id: "a-unknown".to_owned(),
                 title: "待核实作业".to_owned(),
                 end_time: Some("2026-10-02 23:59:59".to_owned()),
-                submit_by_group: false,
+                submit_by_group: Some(false),
                 submission_count: None,
                 note: Some("无法确认提交状态：思源学堂用户信息解析失败".to_owned()),
             },
@@ -573,7 +573,7 @@ fn activity_detail_hides_submission_section_for_non_homework() {
         title: "直播课".to_owned(),
         kind: ActivityKind::LectureLive,
         end_time: Some("2026-10-01 12:00:00".to_owned()),
-        submit_by_group: false,
+        submit_by_group: Some(false),
         submissions: None,
         note: None,
     });
@@ -595,7 +595,7 @@ fn activity_detail_hides_submission_section_for_non_homework() {
         title: "作业A".to_owned(),
         kind: ActivityKind::Homework,
         end_time: None,
-        submit_by_group: false,
+        submit_by_group: Some(false),
         submissions: None,
         note: None,
     });
@@ -629,7 +629,7 @@ fn activity_detail_converts_submission_times_to_school_time() {
         title: "作业A".to_owned(),
         kind: ActivityKind::Homework,
         end_time: Some("2026-09-25T15:59:59.000Z".to_owned()),
-        submit_by_group: false,
+        submit_by_group: Some(false),
         submissions: Some(list.list),
         note: None,
     });
@@ -1243,6 +1243,7 @@ fn schedule_data(lessons: Vec<LessonEntry>) -> ScheduleData {
         week: 4,
         lessons,
         skipped: 0,
+        notice: None,
     }
 }
 
@@ -1324,7 +1325,7 @@ fn homework_rows_trade_group_and_title_detail_when_narrow() {
             activity_id: "a-2".to_owned(),
             title: "社会实践报告与社会调查作业".to_owned(),
             end_time: Some("2026-10-08T15:59:59.000Z".to_owned()),
-            submit_by_group: true,
+            submit_by_group: Some(true),
             submission_count: Some(0),
             note: None,
         }],
@@ -1430,7 +1431,7 @@ fn homework_rows_show_full_names_when_terminal_is_wide() {
                 activity_id: "a-1".to_owned(),
                 title: "第五章作业（含附件）".to_owned(),
                 end_time: Some("2026-10-12T15:59:59.000Z".to_owned()),
-                submit_by_group: false,
+                submit_by_group: Some(false),
                 submission_count: Some(0),
                 note: None,
             },
@@ -1918,4 +1919,136 @@ fn agreement_table_grid_aligns_columns_when_it_fits() {
 
     let rule = row_text(terminal.backend(), header_y + 1);
     assert!(rule.contains("───"), "標頭下方應為表格細線：{rule}");
+}
+
+/// 詳情計數必須與作業彙總的「有效提交」語義一致（單一判據 is_effective）。
+#[test]
+fn activity_detail_counts_effective_submissions_consistently() {
+    let list: LmsSubmissionList = serde_json::from_str(
+        r#"{"list":[
+            {"id":1,"submitted_at":"2026-09-20T02:00:00Z","is_latest_version":true},
+            {"id":2,"submitted_at":"2026-09-21 09:30:00","is_latest_version":false},
+            {"id":3,"submitted_at":"2026-09-22 09:30:00"}
+        ]}"#,
+    )
+    .expect("脱敏样本");
+
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Lms;
+    app.lms.level = LmsLevel::Detail;
+    app.lms.detail = Page::Ready(ActivityDetailView {
+        id: "1".to_owned(),
+        title: "作业A".to_owned(),
+        kind: ActivityKind::Homework,
+        end_time: None,
+        submit_by_group: Some(false),
+        submissions: Some(list.list),
+        note: None,
+    });
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(
+        text.contains("提交记录：2 条有效（另有 1 条历史版本）"),
+        "计数应与汇总语义一致：\n{text}"
+    );
+    assert!(
+        text.contains("最新版本：未知"),
+        "未知的 is_latest_version 应显示「未知」：\n{text}"
+    );
+}
+
+/// 全部都是舊版本時不得宣稱有有效提交（與彙總的「待提交」一致）。
+#[test]
+fn activity_detail_reports_no_effective_submissions() {
+    let list: LmsSubmissionList = serde_json::from_str(
+        r#"{"list":[
+            {"id":1,"is_latest_version":false},
+            {"id":2,"is_latest_version":"false"}
+        ]}"#,
+    )
+    .expect("脱敏样本");
+
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Lms;
+    app.lms.level = LmsLevel::Detail;
+    app.lms.detail = Page::Ready(ActivityDetailView {
+        id: "1".to_owned(),
+        title: "作业A".to_owned(),
+        kind: ActivityKind::Homework,
+        end_time: None,
+        submit_by_group: Some(false),
+        submissions: Some(list.list),
+        note: None,
+    });
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(
+        text.contains("提交记录：暂无有效提交（另有 2 条历史版本）"),
+        "全为旧版本时不得显示为有效提交：\n{text}"
+    );
+}
+
+/// 提交單位未知時不得顯示為「个人」。
+#[test]
+fn homework_detail_shows_unknown_submission_unit() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00+08:00").expect("固定时间");
+    let items = aggregate(
+        &[HomeworkInput {
+            course_id: "1".to_owned(),
+            course_name: "编译原理".to_owned(),
+            activity_id: "a-1".to_owned(),
+            title: "缺单位作业".to_owned(),
+            end_time: None,
+            submit_by_group: None,
+            submission_count: Some(0),
+            note: None,
+        }],
+        now,
+    );
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Homework;
+    app.homework = Page::Ready(homework_data(items, None));
+    app.homework_detail = true;
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(
+        text.contains("提交单位：未知"),
+        "不得把未知提交单位显示为个人：\n{text}"
+    );
+}
+
+/// 學期外的課表提示列（搭配空狀態）必須實際顯示。
+#[test]
+fn schedule_renders_notice_above_empty_state() {
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Schedule;
+    let mut data = schedule_data(Vec::new());
+    data.notice = Some("本学期已结束（2027-01-17）".to_owned());
+    app.schedule = Page::Ready(data);
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(
+        text.contains("本学期已结束（2027-01-17）"),
+        "应显示学期外提示：\n{text}"
+    );
+    assert!(
+        text.contains("本周没有课程安排"),
+        "空状态提示应保留：\n{text}"
+    );
 }

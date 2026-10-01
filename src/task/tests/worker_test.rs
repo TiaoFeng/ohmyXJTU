@@ -14,13 +14,14 @@ use tempfile::TempDir;
 
 use crate::auth::{AccountType, LoginReply, rsa};
 use crate::config::AccessPolicy;
+use crate::domain::attendance_match::LessonAttendance;
 use crate::domain::homework::HomeworkState;
 use crate::domain::semester::{TermCode, TermSource};
 use crate::error::NetworkKind;
 use crate::http::fake::{FakeClient, html, json};
 use crate::http::{HttpClient, HttpRequest, HttpResponse, Method};
 use crate::session::AccessMode;
-use crate::sites::attendance::AttendanceSite;
+use crate::sites::attendance::{AttendanceSite, AttendanceStatus};
 use crate::sites::lms::LmsSite;
 use crate::sites::{attendance, lms};
 use crate::task::protocol::{DataKey, HomeworkUpdate};
@@ -1406,7 +1407,11 @@ fn homework_filters_to_current_term_and_streams_progress() {
     assert_eq!(last.courses_included, 2);
     assert_eq!(last.items.len(), 1);
     assert_eq!(last.items[0].state, HomeworkState::Pending);
-    assert!(last.items[0].submit_by_group, "小组判定应取自活动详情");
+    assert_eq!(
+        last.items[0].submit_by_group,
+        Some(true),
+        "小组判定应取自活动详情"
+    );
 
     let seen = site.urls();
     assert!(
@@ -1856,6 +1861,327 @@ fn group_homework_without_group_id_stays_unknown_with_reason() {
             .iter()
             .any(|url| url.contains("/submission_list")),
         "缺少 group_id 时不得请求提交列表"
+    );
+}
+
+#[test]
+fn homework_without_submit_by_group_stays_unknown_without_queries() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let tracker = Arc::clone(&seen);
+    let mut harness = harness(move |request: &HttpRequest| {
+        let url = request.url.clone();
+        tracker.lock().expect("lock").push(url.clone());
+        if url.ends_with("/api/my-courses") {
+            return Ok(json(serde_json::json!({ "courses": [
+                { "id": "1", "name": "编译原理", "semester": { "code": "2026-1" } },
+            ]})));
+        }
+        if url.ends_with("/courses/1/activities") {
+            return Ok(json(serde_json::json!({ "activities": [
+                { "id": "11", "type": "homework", "title": "缺单位作业" },
+            ]})));
+        }
+        if url.ends_with("/api/activities/11") {
+            // 详情缺少 submit_by_group：无法判定个人或小组，不得猜测。
+            return Ok(json(serde_json::json!({
+                "id": "11", "type": "homework", "title": "缺单位作业"
+            })));
+        }
+        panic!("未预期的请求：{url}");
+    });
+    harness.login_lms_only();
+    harness.worker.config.homework_term = Some("2026-2027-1".to_owned());
+
+    harness
+        .dispatch(Job::LoadHomework { force: false })
+        .expect("作业加载应当成功");
+
+    let updates = homework_updates(&mut harness);
+    let last = updates.last().expect("最终更新");
+    assert_eq!(last.items.len(), 1);
+    assert_eq!(last.items[0].state, HomeworkState::Unknown);
+    assert_eq!(last.items[0].submit_by_group, None);
+    let note = last.items[0].note.as_deref().unwrap_or_default();
+    assert!(
+        note.contains("submit_by_group"),
+        "原因应指出缺少提交单位：{note}"
+    );
+    assert_eq!(last.issues.len(), 1, "共同故障只汇总一次");
+    assert!(last.issues[0].reason.contains("submit_by_group"));
+    let seen = seen.lock().expect("lock");
+    assert!(
+        !seen.iter().any(|url| url.contains("/submission_list")),
+        "缺少提交单位时不得请求提交列表：{seen:?}"
+    );
+    assert!(
+        !seen.iter().any(|url| url.ends_with("/user/index")),
+        "缺少提交单位时不得查询用户信息：{seen:?}"
+    );
+}
+
+#[test]
+fn schedule_after_semester_end_is_empty_with_notice_and_no_queries() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let tracker = Arc::clone(&seen);
+    let today = chrono::Local::now().date_naive();
+    let start = (today - chrono::Duration::days(100)).to_string();
+    let end = (today - chrono::Duration::days(1)).to_string();
+    let mut harness = harness(move |request: &HttpRequest| {
+        let url = request.url.clone();
+        tracker.lock().expect("lock").push(url.clone());
+        if url.ends_with("/timetable/semesters") {
+            return Ok(json(serde_json::json!({ "code": 0, "data": [{
+                "semesterId": "s-1",
+                "academicYear": "2026-2027",
+                "semesterName": "第一学期",
+                "startDate": start.clone(),
+                "endDate": end.clone(),
+            }]})));
+        }
+        panic!("学期结束后不应再查询：{url}");
+    });
+    harness.login_both_sites();
+
+    harness
+        .dispatch(Job::LoadSchedule)
+        .expect("课表加载应当成功");
+
+    let schedule = harness
+        .drain_events()
+        .into_iter()
+        .find_map(|event| match event {
+            Event::Schedule(data) => Some(*data),
+            _ => None,
+        })
+        .expect("应发出课表事件");
+    assert!(schedule.lessons.is_empty(), "学期结束后不得显示旧课程");
+    let notice = schedule.notice.as_deref().unwrap_or_default();
+    assert!(notice.contains("已结束"), "应提示学期已结束：{notice}");
+    assert_eq!(schedule.semester, "2026-2027-1");
+    let seen = seen.lock().expect("lock");
+    assert!(
+        !seen.iter().any(|url| url.contains("/timetable/weekly")),
+        "学期结束后不得查询课表：{seen:?}"
+    );
+    assert!(
+        !seen.iter().any(|url| url.contains("attendance-records")),
+        "学期结束后不得查询考勤记录：{seen:?}"
+    );
+}
+
+#[test]
+fn schedule_before_semester_start_is_empty_with_notice() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let tracker = Arc::clone(&seen);
+    let today = chrono::Local::now().date_naive();
+    let start = (today + chrono::Duration::days(3)).to_string();
+    let end = (today + chrono::Duration::days(100)).to_string();
+    let mut harness = harness(move |request: &HttpRequest| {
+        let url = request.url.clone();
+        tracker.lock().expect("lock").push(url.clone());
+        if url.ends_with("/timetable/semesters") {
+            return Ok(json(serde_json::json!({ "code": 0, "data": [{
+                "semesterId": "s-1",
+                "academicYear": "2026-2027",
+                "semesterName": "第一学期",
+                "startDate": start.clone(),
+                "endDate": end.clone(),
+            }]})));
+        }
+        panic!("学期尚未开始时不应再查询：{url}");
+    });
+    harness.login_both_sites();
+
+    harness
+        .dispatch(Job::LoadSchedule)
+        .expect("课表加载应当成功");
+
+    let schedule = harness
+        .drain_events()
+        .into_iter()
+        .find_map(|event| match event {
+            Event::Schedule(data) => Some(*data),
+            _ => None,
+        })
+        .expect("应发出课表事件");
+    assert!(schedule.lessons.is_empty(), "学期开始前不得显示未来课程");
+    let notice = schedule.notice.as_deref().unwrap_or_default();
+    assert!(notice.contains("尚未开始"), "应提示尚未开始：{notice}");
+    let seen = seen.lock().expect("lock");
+    assert!(
+        !seen.iter().any(|url| url.contains("/timetable/weekly")),
+        "学期开始前不得查询课表：{seen:?}"
+    );
+    assert!(
+        !seen.iter().any(|url| url.contains("attendance-records")),
+        "学期开始前不得查询考勤记录：{seen:?}"
+    );
+}
+
+/// 產生「今天正好有一堂課」的學期測資：學期開始日為週一（貼近真實校曆），
+/// 課程排在今天的星期，`weeks` 為今天的週次。
+///
+/// 以推導取代固定值：固定「開始日＝今天減 14 天＋課程排週一」只在今天恰為
+/// 週一時語意自洽，其餘日子並未真正驗證星期與週次的對齊。
+/// 回傳（學期開始日期字串、課程的 `dayOfWeek`）。
+fn semester_fixture_meeting_today(today: chrono::NaiveDate, weeks: u32) -> (String, u32) {
+    use chrono::Datelike as _;
+
+    let monday = today - chrono::Duration::days(i64::from(today.weekday().num_days_from_monday()));
+    let start = monday - chrono::Duration::days(i64::from(weeks - 1) * 7);
+    (
+        start.to_string(),
+        today.weekday().num_days_from_monday() + 1,
+    )
+}
+
+#[test]
+fn schedule_in_session_matches_attendance_without_notice() {
+    let today = chrono::Local::now().date_naive();
+    let (start, day_of_week) = semester_fixture_meeting_today(today, 3);
+    let end = (today + chrono::Duration::days(90)).to_string();
+    let attendance_date = today.to_string();
+    let mut harness = harness(move |request: &HttpRequest| {
+        let url = request.url.clone();
+        if url.ends_with("/timetable/semesters") {
+            return Ok(json(serde_json::json!({ "code": 0, "data": [{
+                "semesterId": "s-1",
+                "academicYear": "2026-2027",
+                "semesterName": "第一学期",
+                "startDate": start.clone(),
+                "endDate": end.clone(),
+            }]})));
+        }
+        if url.contains("/timetable/weekly") {
+            return Ok(json(serde_json::json!({ "code": 0, "data": { "courses": [{
+                "courseName": "线性代数",
+                "teacherName": "张老师",
+                "classroomName": "主楼A101",
+                "dayOfWeek": day_of_week,
+                "startSection": 1,
+                "endSection": 2,
+                "weekRanges": "1-30",
+            }]}})));
+        }
+        if url.contains("attendance-records") {
+            return Ok(json(serde_json::json!({ "code": 0, "data": {
+                "rows": [{
+                    "resultId": 1,
+                    "startSection": 1,
+                    "endSection": 2,
+                    "courseWeek": 3,
+                    "classroomName": "主楼A101",
+                    "teacherName": "张老师",
+                    "attendanceStatus": "NORMAL",
+                    "attendanceDate": attendance_date.clone(),
+                }],
+                "total": 1,
+            }})));
+        }
+        panic!("未预期的请求：{url}");
+    });
+    harness.login_both_sites();
+
+    harness
+        .dispatch(Job::LoadSchedule)
+        .expect("课表加载应当成功");
+
+    let schedule = harness
+        .drain_events()
+        .into_iter()
+        .find_map(|event| match event {
+            Event::Schedule(data) => Some(*data),
+            _ => None,
+        })
+        .expect("应发出课表事件");
+    assert!(schedule.notice.is_none(), "学期内不应有提示");
+    assert_eq!(schedule.week, 3);
+    assert_eq!(schedule.lessons.len(), 1);
+    assert_eq!(schedule.lessons[0].date, today);
+    assert_eq!(
+        schedule.lessons[0].attendance,
+        LessonAttendance::Recorded(AttendanceStatus::Normal)
+    );
+}
+
+/// 第 23 週（超出假設的 22 個教學週、仍在學期內）不得回退顯示第 22 週
+/// 的舊課程：舊碼會夾取週次，讓已結課課程以錯位日期重新出現。
+#[test]
+fn schedule_does_not_fall_back_to_week_22_after_teaching_weeks() {
+    let today = chrono::Local::now().date_naive();
+    let (start, day_of_week) = semester_fixture_meeting_today(today, 23);
+    let end = (today + chrono::Duration::days(30)).to_string();
+    let mut harness = harness(move |request: &HttpRequest| {
+        let url = request.url.clone();
+        if url.ends_with("/timetable/semesters") {
+            return Ok(json(serde_json::json!({ "code": 0, "data": [{
+                "semesterId": "s-1",
+                "academicYear": "2026-2027",
+                "semesterName": "第一学期",
+                "startDate": start.clone(),
+                "endDate": end.clone(),
+            }]})));
+        }
+        if url.contains("/timetable/weekly") {
+            return Ok(json(serde_json::json!({ "code": 0, "data": { "courses": [
+                {
+                    "courseName": "已结课课程",
+                    "teacherName": "张老师",
+                    "classroomName": "主楼A101",
+                    "dayOfWeek": day_of_week,
+                    "startSection": 1,
+                    "endSection": 2,
+                    "weekRanges": "1-22",
+                },
+                {
+                    "courseName": "贯穿课程",
+                    "teacherName": "李老师",
+                    "classroomName": "主楼B202",
+                    "dayOfWeek": day_of_week,
+                    "startSection": 3,
+                    "endSection": 4,
+                    "weekRanges": "1-30",
+                },
+            ]}})));
+        }
+        if url.contains("attendance-records") {
+            return Ok(json(
+                serde_json::json!({ "code": 0, "data": { "rows": [], "total": 0 } }),
+            ));
+        }
+        panic!("未预期的请求：{url}");
+    });
+    harness.login_both_sites();
+
+    harness
+        .dispatch(Job::LoadSchedule)
+        .expect("课表加载应当成功");
+
+    let schedule = harness
+        .drain_events()
+        .into_iter()
+        .find_map(|event| match event {
+            Event::Schedule(data) => Some(*data),
+            _ => None,
+        })
+        .expect("应发出课表事件");
+    assert_eq!(
+        schedule.week, 23,
+        "第 23 週必须以真实週次呈现（不再夹取为 22）"
+    );
+    assert!(schedule.notice.is_none(), "学期内不应有提示");
+    let names: Vec<&str> = schedule
+        .lessons
+        .iter()
+        .map(|lesson| lesson.course_name.as_str())
+        .collect();
+    assert!(
+        !names.contains(&"已结课课程"),
+        "第 22 週后不得回退显示已结课课程：{names:?}"
+    );
+    assert!(
+        names.contains(&"贯穿课程"),
+        "跨越第 23 週的课程仍应显示：{names:?}"
     );
 }
 

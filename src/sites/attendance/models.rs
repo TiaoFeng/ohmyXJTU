@@ -99,16 +99,31 @@ pub struct Semester {
 }
 
 impl Semester {
-    /// 學期編號，例如 `2026-2027-1`。
-    pub fn term_name(&self) -> String {
+    /// 學期編號，例如 `2026-2027-1`；名稱無法識別時回 `None`。
+    ///
+    /// 不得臆造序號（例如 `0`）：假的 `2026-2027-0` 看似有效，卻永遠配不上
+    /// 任何課程；參考實作對未知名稱同樣是顯性失敗（KeyError）。
+    pub fn term_name(&self) -> Option<String> {
         let ordinal = match self.semester_name.trim() {
             name if name.contains('一') => 1,
             name if name.contains('二') => 2,
             name if name.contains('三') => 3,
             name if name.contains('四') => 4,
-            _ => 0,
+            _ => return None,
         };
-        format!("{}-{ordinal}", self.academic_year.trim())
+        Some(format!("{}-{ordinal}", self.academic_year.trim()))
+    }
+
+    /// 顯示用學期標籤：可識別時為學期編號，否則回退顯示原始名稱。
+    pub fn display_label(&self) -> String {
+        self.term_name().unwrap_or_else(|| {
+            let name = self.semester_name.trim();
+            if name.is_empty() {
+                "未知学期".to_owned()
+            } else {
+                name.to_owned()
+            }
+        })
     }
 }
 
@@ -217,4 +232,13 @@ impl FlowPage {
         // 超出 `u32` 時以上限表示（`as` 會靜默截斷成看似合理卻錯誤的頁數）。
         u32::try_from(self.total.div_ceil(u64::from(self.page_size)).max(1)).unwrap_or(u32::MAX)
     }
+}
+
+/// 指定期間的課程考勤記錄（含是否被分頁上限截斷）。
+#[derive(Debug, Clone)]
+pub struct RecordBatch {
+    /// 取回的記錄。
+    pub records: Vec<WaterRecord>,
+    /// 是否因分頁上限而未取完全部記錄。
+    pub truncated: bool,
 }

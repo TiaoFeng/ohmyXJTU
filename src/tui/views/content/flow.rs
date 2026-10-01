@@ -8,6 +8,7 @@ use ratatui::widgets::ListItem;
 
 use crate::sites::attendance::FlowRecord;
 use crate::text::fit_display;
+use crate::tone::Tone;
 use crate::tui::app::App;
 use crate::tui::theme::THEME;
 use crate::tui::ui::render_list;
@@ -85,7 +86,7 @@ fn flow_item(record: &FlowRecord, columns: FlowColumns) -> ListItem<'static> {
         Span::styled(format!("{place} "), THEME.muted_style()),
         Span::styled(
             flow_status_label(record),
-            THEME.status_style(flow_status_label(record)),
+            THEME.status_style(flow_status_tone(record)),
         ),
     ]))
 }
@@ -107,7 +108,7 @@ fn flow_lines(record: &FlowRecord) -> Vec<Line<'static>> {
             Span::styled("状态：", THEME.muted_style()),
             Span::styled(
                 flow_status_label(record),
-                THEME.status_style(flow_status_label(record)),
+                THEME.status_style(flow_status_tone(record)),
             ),
         ]),
     ]
@@ -118,5 +119,13 @@ fn flow_status_label(record: &FlowRecord) -> &'static str {
         "有效"
     } else {
         "未匹配"
+    }
+}
+
+fn flow_status_tone(record: &FlowRecord) -> Tone {
+    if record.effective {
+        Tone::Success
+    } else {
+        Tone::Warning
     }
 }

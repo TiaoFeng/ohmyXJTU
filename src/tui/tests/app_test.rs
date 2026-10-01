@@ -3,6 +3,7 @@
 use chrono::NaiveDate;
 
 use super::*;
+use crate::domain::attendance_match::LessonAttendance;
 use crate::model::{FlowData, LessonEntry, ScheduleData};
 use crate::sites::attendance::{AttendanceStatus, FlowRecord};
 use crate::sites::lms::LmsCourse;
@@ -15,8 +16,7 @@ fn lesson(sections: &str) -> LessonEntry {
         classroom: "主楼A101".to_owned(),
         teacher: "张老师".to_owned(),
         weeks: "1-16".to_owned(),
-        status: Some(AttendanceStatus::Normal),
-        label: "正常",
+        attendance: LessonAttendance::Recorded(AttendanceStatus::Normal),
     }
 }
 

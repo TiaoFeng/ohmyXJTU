@@ -11,6 +11,7 @@ use crate::domain::course_list::{self, CourseRow};
 use crate::model::ActivityDetailView;
 use crate::sites::lms::{ActivityKind, LmsActivity};
 use crate::text::fit_display;
+use crate::tone::Tone;
 use crate::tui::app::{App, LmsLevel};
 use crate::tui::theme::THEME;
 use crate::tui::ui::render_list;
@@ -289,13 +290,13 @@ fn detail_lines(detail: &ActivityDetailView) -> Vec<Line<'static>> {
             Some(submissions) if submissions.is_empty() => {
                 lines.push(Line::from(Span::styled(
                     "提交记录：暂无（视为未提交）",
-                    THEME.status_style("待提交"),
+                    THEME.status_style(Tone::Accent),
                 )));
             }
             Some(submissions) => {
                 lines.push(Line::from(Span::styled(
                     format!("提交记录：{} 条", submissions.len()),
-                    THEME.status_style("正常"),
+                    THEME.status_style(Tone::Success),
                 )));
                 for submission in submissions.iter().take(5) {
                     let score = submission
@@ -319,7 +320,7 @@ fn detail_lines(detail: &ActivityDetailView) -> Vec<Line<'static>> {
             None => {
                 lines.push(Line::from(Span::styled(
                     "提交记录：无法确认（待核实）",
-                    THEME.status_style("待核实"),
+                    THEME.status_style(Tone::Warning),
                 )));
             }
         }

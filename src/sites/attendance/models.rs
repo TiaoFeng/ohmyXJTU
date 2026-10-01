@@ -2,6 +2,8 @@
 
 use serde::Deserialize;
 
+use crate::tone::Tone;
+
 use super::super::{optional_string_or_number, string_or_number, u32_or_string};
 
 /// 考勤狀態。
@@ -47,6 +49,19 @@ impl AttendanceStatus {
             Self::Leave => "请假",
             Self::NotRequired => "不考勤",
             Self::Unknown => "未知",
+        }
+    }
+
+    /// 狀態語意色。
+    pub fn tone(self) -> Tone {
+        match self {
+            Self::Pending => Tone::Accent,
+            Self::Normal => Tone::Success,
+            Self::Late => Tone::Warning,
+            Self::Absent => Tone::Danger,
+            Self::Leave => Tone::Info,
+            Self::NotRequired => Tone::Muted,
+            Self::Unknown => Tone::Warning,
         }
     }
 

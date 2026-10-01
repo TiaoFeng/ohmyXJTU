@@ -46,6 +46,25 @@ pub fn popup_surface(frame: &mut Frame, area: Rect, title: &str) -> Rect {
     inner
 }
 
+/// 彈窗選單列：`▍` 選取符號；選取列整列高亮、其餘為次要樣式。
+pub fn menu_item(selected: bool, text: impl Into<String>) -> Line<'static> {
+    let cursor = if selected { "▍" } else { " " };
+    let style = if selected {
+        THEME.highlight_style()
+    } else {
+        THEME.muted_style()
+    };
+    Line::from(Span::styled(format!(" {cursor} {}", text.into()), style))
+}
+
+/// 彈窗頁腳提示列（次要色＋暗化）。
+pub fn hint_line(text: impl Into<String>) -> Line<'static> {
+    Line::from(Span::styled(
+        text.into(),
+        THEME.muted_style().add_modifier(Modifier::DIM),
+    ))
+}
+
 /// 共用清單繪製：統一外框、選取高亮與 `▍` 選取符號。
 ///
 /// 欄寬計算（見 `views::content`）以本函式的實際排版為準：外框左右欄線與

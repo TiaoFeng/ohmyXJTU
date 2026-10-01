@@ -60,8 +60,7 @@ impl Worker {
                 classroom: slot.classroom.clone().unwrap_or_default(),
                 teacher: slot.teacher.clone().unwrap_or_default(),
                 weeks,
-                status,
-                label: attendance_match::display_label(status, date, today),
+                attendance: attendance_match::display_state(status, date, today),
             });
         }
         lessons.sort_by(|left, right| {

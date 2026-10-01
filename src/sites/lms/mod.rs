@@ -9,6 +9,7 @@ pub mod models;
 
 pub use models::{ActivityKind, LmsActivity, LmsCourse, LmsSubmission, LmsSubmissionList};
 
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::error::{AppError, AppResult};
@@ -53,6 +54,11 @@ fn safe_identifier(value: &str) -> Option<&str> {
             .chars()
             .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'));
     safe.then_some(value)
+}
+
+/// 檢查識別碼可安全拼接進路徑；失敗時回傳描述階段的協定錯誤（不含原值）。
+fn checked_id<'a>(value: &'a str, what: &str) -> AppResult<&'a str> {
+    safe_identifier(value).ok_or_else(|| AppError::protocol(what))
 }
 
 /// 站點擴充點。
@@ -113,6 +119,27 @@ impl<'a> LmsApi<'a> {
         Self { session }
     }
 
+    /// 送出請求並解析 JSON 回應（目標型別由呼叫端推斷）。
+    fn send_json<T: DeserializeOwned>(&mut self, request: HttpRequest, what: &str) -> AppResult<T> {
+        let response = self.session.send(SiteKind::Lms, request)?;
+        parse_json(&response, what)
+    }
+
+    /// 送出請求並取出回應中的清單欄位（缺欄位視為空清單、逐項寬容解析）。
+    fn send_json_list<T: DeserializeOwned>(
+        &mut self,
+        request: HttpRequest,
+        what: &str,
+        key: &str,
+    ) -> AppResult<(Vec<T>, usize)> {
+        let value: Value = self.send_json(request, what)?;
+        let items = value
+            .get(key)
+            .cloned()
+            .unwrap_or_else(|| Value::Array(Vec::new()));
+        parse_lenient(items, what)
+    }
+
     /// 目前登入者的使用者 ID。
     ///
     /// 使用者資訊解析失敗時會記入站點狀態（負快取），避免逐項作業重複請求
@@ -146,30 +173,20 @@ impl<'a> LmsApi<'a> {
 
     /// 我的課程（附帶被跳過的項目數）。
     pub fn my_courses(&mut self) -> AppResult<(Vec<LmsCourse>, usize)> {
-        let response = self.session.send(
-            SiteKind::Lms,
+        self.send_json_list(
             HttpRequest::post(format!("{BASE_URL}/api/my-courses")),
-        )?;
-        let value: Value = parse_json(&response, "查询我的课程")?;
-        let courses = value
-            .get("courses")
-            .cloned()
-            .unwrap_or_else(|| Value::Array(Vec::new()));
-        parse_lenient(courses, "查询我的课程")
+            "查询我的课程",
+            "courses",
+        )
     }
 
     /// 課程活動列表（附帶被跳過的項目數）。
     pub fn course_activities(&mut self, course_id: &str) -> AppResult<(Vec<LmsActivity>, usize)> {
-        let response = self.session.send(
-            SiteKind::Lms,
+        self.send_json_list(
             HttpRequest::get(format!("{BASE_URL}/api/courses/{course_id}/activities")),
-        )?;
-        let value: Value = parse_json(&response, "查询课程活动")?;
-        let activities = value
-            .get("activities")
-            .cloned()
-            .unwrap_or_else(|| Value::Array(Vec::new()));
-        parse_lenient(activities, "查询课程活动")
+            "查询课程活动",
+            "activities",
+        )
     }
 
     /// 活動詳情；作業會一併抓取提交記錄。
@@ -252,15 +269,13 @@ impl<'a> LmsApi<'a> {
     /// 由伺服器回傳（附帶存取 token），不自行拼接前端路徑；
     /// 來源為參考實作的 `_get_lesson_player_url`。
     pub fn lesson_player_url(&mut self, activity_id: &str) -> AppResult<String> {
-        let activity_id = safe_identifier(activity_id)
-            .ok_or_else(|| AppError::protocol("活动识别码不符合预期格式"))?;
-        let response = self.session.send(
-            SiteKind::Lms,
+        let activity_id = checked_id(activity_id, "活动识别码不符合预期格式")?;
+        let value: Value = self.send_json(
             HttpRequest::get(format!(
                 "{BASE_URL}/api/lessons/{activity_id}/player-url?from_page=course"
             )),
+            "查询播放地址",
         )?;
-        let value: Value = parse_json(&response, "查询播放地址")?;
         value
             .get("url")
             .and_then(Value::as_str)
@@ -271,13 +286,11 @@ impl<'a> LmsApi<'a> {
 
     /// 取得活動詳情（不含提交記錄）；供需要自行快取的呼叫端使用。
     pub fn fetch_activity_detail(&mut self, activity_id: &str) -> AppResult<LmsActivity> {
-        let activity_id = safe_identifier(activity_id)
-            .ok_or_else(|| AppError::protocol("活动识别码不符合预期格式"))?;
-        let response = self.session.send(
-            SiteKind::Lms,
+        let activity_id = checked_id(activity_id, "活动识别码不符合预期格式")?;
+        self.send_json(
             HttpRequest::get(format!("{BASE_URL}/api/activities/{activity_id}")),
-        )?;
-        parse_json(&response, "查询活动详情")
+            "查询活动详情",
+        )
     }
 
     /// 查詢個人或小組的提交記錄。
@@ -287,8 +300,7 @@ impl<'a> LmsApi<'a> {
         submit_by_group: bool,
         group_id: Option<&str>,
     ) -> AppResult<LmsSubmissionList> {
-        let activity_id = safe_identifier(activity_id)
-            .ok_or_else(|| AppError::protocol("活动识别码不符合预期格式"))?;
+        let activity_id = checked_id(activity_id, "活动识别码不符合预期格式")?;
         let url = if submit_by_group {
             let group_id = group_id
                 .and_then(|value| safe_identifier(value))
@@ -296,13 +308,11 @@ impl<'a> LmsApi<'a> {
             format!("{BASE_URL}/api/activities/{activity_id}/groups/{group_id}/submission_list")
         } else {
             let user_id = self.user_id()?;
-            let user_id = safe_identifier(&user_id)
-                .ok_or_else(|| AppError::protocol("思源学堂用户识别码不符合预期格式"))?;
+            let user_id = checked_id(&user_id, "思源学堂用户识别码不符合预期格式")?;
             format!("{BASE_URL}/api/activities/{activity_id}/students/{user_id}/submission_list")
         };
 
-        let response = self.session.send(SiteKind::Lms, HttpRequest::get(url))?;
-        parse_json(&response, "查询作业提交记录")
+        self.send_json(HttpRequest::get(url), "查询作业提交记录")
     }
 }
 

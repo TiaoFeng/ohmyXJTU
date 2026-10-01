@@ -130,8 +130,8 @@ fn lesson_item(lesson: &LessonEntry, columns: ScheduleColumns) -> ListItem<'stat
         ));
     }
     spans.push(Span::styled(
-        lesson.label.to_owned(),
-        THEME.status_style(lesson.label),
+        lesson.attendance.label().to_owned(),
+        THEME.status_style(lesson.attendance.tone()),
     ));
     ListItem::new(Line::from(spans))
 }
@@ -161,7 +161,10 @@ fn lesson_lines(lesson: &LessonEntry) -> Vec<Line<'static>> {
         )),
         Line::from(vec![
             Span::styled("考勤：", THEME.muted_style()),
-            Span::styled(lesson.label, THEME.status_style(lesson.label)),
+            Span::styled(
+                lesson.attendance.label(),
+                THEME.status_style(lesson.attendance.tone()),
+            ),
         ]),
     ]
 }

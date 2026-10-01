@@ -36,6 +36,17 @@ enum HomeworkStage {
     Done,
 }
 
+/// 單次作業載入的計量基準：開始時間與請求計數。
+///
+/// 兩者在載入開始時取得、僅供完成訊息統計使用，合併為一個值避免四處傳遞。
+#[derive(Debug, Clone, Copy)]
+struct LoadMeter {
+    /// 載入開始時間。
+    started: Instant,
+    /// 載入開始前已送出的請求數。
+    requests_baseline: usize,
+}
+
 /// 作業載入的步進狀態。
 struct HomeworkRunner {
     /// 目標學期。
@@ -71,6 +82,40 @@ struct HomeworkRunner {
 }
 
 impl HomeworkRunner {
+    /// 建立載入狀態：計數與索引歸零，初始階段依課程數決定。
+    fn new(
+        term: TermCode,
+        term_source: TermSource,
+        courses: Vec<LmsCourse>,
+        skipped_terms: usize,
+        term_options: Vec<TermCode>,
+        force: bool,
+        meter: LoadMeter,
+    ) -> Self {
+        let stage = if courses.is_empty() {
+            HomeworkStage::Done
+        } else {
+            HomeworkStage::Activities
+        };
+        Self {
+            term,
+            term_source,
+            courses,
+            skipped_terms,
+            term_options,
+            course_index: 0,
+            activities: Vec::new(),
+            activity_index: 0,
+            inputs: Vec::new(),
+            failed_courses: 0,
+            since_emit: 0,
+            stage,
+            force,
+            started: meter.started,
+            requests_baseline: meter.requests_baseline,
+        }
+    }
+
     /// 目前課程。
     fn current_course(&self) -> Option<&LmsCourse> {
         self.courses.get(self.course_index)
@@ -196,35 +241,52 @@ impl Worker {
         }
     }
 
-    /// 準備作業載入：判定學期、過濾課程並回報首批進度。
+    /// 準備作業載入：載入課程、判定學期、過濾課程並回報首批進度。
+    ///
+    /// 回傳 `None` 代表本次載入不需（也無法）進入步進階段：沒有課程、已改為
+    /// 等待使用者選擇學期，或已回報失敗。
     fn begin_homework(&mut self, force: bool) -> Result<Option<HomeworkRunner>, SiteFailure> {
-        let started = Instant::now();
-        let requests_baseline = self.request_count();
+        let meter = LoadMeter {
+            started: Instant::now(),
+            requests_baseline: self.request_count(),
+        };
+
         let (courses, skipped_data) = self.lms_courses(force)?;
         if skipped_data > 0 {
             self.emit(Event::Notice(format!(
                 "已跳过 {skipped_data} 项无法解析的思源学堂数据"
             )));
         }
-
         // 沒有任何課程時無從（也無需）判定學期：直接回報空結果。
         if courses.is_empty() {
-            self.emit(Event::Homework(HomeworkUpdate {
-                term_label: None,
-                term_source: None,
-                courses_included: 0,
-                courses_skipped: 0,
-                term_options: Vec::new(),
-                items: Vec::new(),
-                issues: Vec::new(),
-                courses_failed: 0,
-                progress: None,
-                elapsed: started.elapsed(),
-                requests: self.request_count().saturating_sub(requests_baseline),
-            }));
+            self.emit_empty_homework(meter);
             return Ok(None);
         }
 
+        let Some((term, term_source)) = self.homework_term(&courses)? else {
+            return Ok(None);
+        };
+        let term_options = semester::term_options(&courses, term);
+        let (included, skipped_terms) = semester::courses_for_term(courses, term);
+
+        let runner = HomeworkRunner::new(
+            term,
+            term_source,
+            included,
+            skipped_terms,
+            term_options,
+            force,
+            meter,
+        );
+        self.emit_homework(&runner);
+        Ok(Some(runner))
+    }
+
+    /// 判定要載入的學期；`Ok(None)` 代表已發出學期選擇事件，等待使用者決定。
+    fn homework_term(
+        &mut self,
+        courses: &[LmsCourse],
+    ) -> Result<Option<(TermCode, TermSource)>, SiteFailure> {
         let chosen = self.chosen_term;
         let remembered = self
             .config
@@ -256,7 +318,7 @@ impl Worker {
                 TermResolution::Resolved { term, source } => (term, source),
                 TermResolution::NeedsChoice { suggestion } => {
                     self.emit(Event::HomeworkNeedsTerm {
-                        options: semester::course_terms(&courses),
+                        options: semester::course_terms(courses),
                         suggestion,
                         reason: "无法自动判定当前学期：考勤系统不可用，且没有选择或记住的学期。"
                             .to_owned(),
@@ -272,50 +334,24 @@ impl Worker {
                 term_source.label()
             )));
         }
+        Ok(Some((term, term_source)))
+    }
 
-        // 可選學期：課程中出現過的學期；若目前學期不在其中（例如沿用上次選擇），
-        // 也一併加入供切換。
-        let mut term_options = semester::course_terms(&courses);
-        if !term_options.contains(&term) {
-            term_options.push(term);
-            term_options.sort_unstable_by(|left, right| right.cmp(left));
-        }
-
-        let mut included: Vec<LmsCourse> = Vec::new();
-        let mut skipped_terms = 0_usize;
-        for course in courses {
-            match semester::course_term(&course) {
-                Some(code) if code == term => included.push(course),
-                // 其他學期的課程不參與本輪查詢。
-                Some(_) => {}
-                None => skipped_terms += 1,
-            }
-        }
-
-        let stage = if included.is_empty() {
-            HomeworkStage::Done
-        } else {
-            HomeworkStage::Activities
-        };
-        let runner = HomeworkRunner {
-            term,
-            term_source,
-            courses: included,
-            skipped_terms,
-            term_options,
-            course_index: 0,
-            activities: Vec::new(),
-            activity_index: 0,
-            inputs: Vec::new(),
-            failed_courses: 0,
-            since_emit: 0,
-            stage,
-            force,
-            started,
-            requests_baseline,
-        };
-        self.emit_homework(&runner);
-        Ok(Some(runner))
+    /// 沒有課程可查時的空結果（不進入步進階段）。
+    fn emit_empty_homework(&self, meter: LoadMeter) {
+        self.emit(Event::Homework(HomeworkUpdate {
+            term_label: None,
+            term_source: None,
+            courses_included: 0,
+            courses_skipped: 0,
+            term_options: Vec::new(),
+            items: Vec::new(),
+            issues: Vec::new(),
+            courses_failed: 0,
+            progress: None,
+            elapsed: meter.started.elapsed(),
+            requests: self.request_count().saturating_sub(meter.requests_baseline),
+        }));
     }
 
     /// 推進一格作業載入。

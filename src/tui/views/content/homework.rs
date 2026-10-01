@@ -202,7 +202,7 @@ fn homework_item(item: &HomeworkItem, columns: RowColumns) -> ListItem<'static> 
         ),
         Span::styled(
             format!("{} ", fit_display(item.state.label(), columns.state)),
-            THEME.status_style(item.state.label()),
+            THEME.status_style(item.state.tone()),
         ),
         Span::styled(deadline_cell(&deadline, columns), THEME.muted_style()),
     ];
@@ -231,7 +231,7 @@ fn homework_lines(item: &HomeworkItem) -> Vec<Line<'static>> {
         )),
         Line::from(vec![
             Span::styled("状态：", THEME.muted_style()),
-            Span::styled(item.state.label(), THEME.status_style(item.state.label())),
+            Span::styled(item.state.label(), THEME.status_style(item.state.tone())),
             Span::styled(
                 if item.submit_by_group {
                     "　提交单位：小组"

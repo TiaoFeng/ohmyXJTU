@@ -2,12 +2,12 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout};
-use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use crate::tui::app::{App, SettingsState};
 use crate::tui::theme::THEME;
+use crate::tui::ui::{hint_line, menu_item};
 
 /// 繪製設定選單。
 pub fn draw(frame: &mut Frame, app: &App, state: SettingsState) {
@@ -19,16 +19,7 @@ pub fn draw(frame: &mut Frame, app: &App, state: SettingsState) {
     let mut lines: Vec<Line> = Vec::new();
     for index in 0..SettingsState::COUNT {
         let selected = index == state.index;
-        let cursor = if selected { "▍" } else { " " };
-        let style = if selected {
-            THEME.highlight_style()
-        } else {
-            THEME.muted_style()
-        };
-        let mut line = vec![Span::styled(
-            format!(" {cursor} {}", SettingsState::label(index)),
-            style,
-        )];
+        let mut line = menu_item(selected, SettingsState::label(index));
         if index == 2 {
             let policy = state.policy(app.access_policy);
             let value = if state.saving {
@@ -36,7 +27,7 @@ pub fn draw(frame: &mut Frame, app: &App, state: SettingsState) {
             } else {
                 format!("  < {} >", policy.label())
             };
-            line.push(Span::styled(
+            line.spans.push(Span::styled(
                 value,
                 if selected {
                     THEME.highlight_style()
@@ -45,7 +36,7 @@ pub fn draw(frame: &mut Frame, app: &App, state: SettingsState) {
                 },
             ));
         }
-        lines.push(Line::from(line));
+        lines.push(line);
     }
 
     frame.render_widget(
@@ -53,10 +44,9 @@ pub fn draw(frame: &mut Frame, app: &App, state: SettingsState) {
         chunks[0],
     );
     frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
+        Paragraph::new(hint_line(
             "↑/↓ 选择 · ←/→ 调整访问模式 · enter 确认 · esc 关闭",
-            THEME.muted_style().add_modifier(Modifier::DIM),
-        )))
+        ))
         .style(THEME.surface_style()),
         chunks[1],
     );

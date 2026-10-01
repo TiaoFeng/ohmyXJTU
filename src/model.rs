@@ -6,7 +6,8 @@
 
 use chrono::NaiveDate;
 
-use crate::sites::attendance::{AttendanceStatus, FlowRecord};
+use crate::domain::attendance_match::LessonAttendance;
+use crate::sites::attendance::FlowRecord;
 use crate::sites::lms::{ActivityKind, LmsSubmission};
 
 /// 本週的一堂課。
@@ -24,10 +25,8 @@ pub struct LessonEntry {
     pub teacher: String,
     /// 週次說明。
     pub weeks: String,
-    /// 考勤狀態（`None` 代表沒有記錄）。
-    pub status: Option<AttendanceStatus>,
-    /// 顯示用考勤標籤。
-    pub label: &'static str,
+    /// 考勤顯示狀態（含「待考勤」與「待核实」兩種合成狀態）。
+    pub attendance: LessonAttendance,
 }
 
 /// 課表頁資料。

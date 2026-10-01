@@ -16,6 +16,7 @@ pub mod sites;
 pub mod system;
 pub mod task;
 pub mod text;
+pub mod tone;
 pub mod tui;
 
 pub use error::{AppError, AppResult};

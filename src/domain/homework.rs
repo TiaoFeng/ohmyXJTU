@@ -13,6 +13,8 @@
 
 use chrono::{DateTime, FixedOffset, NaiveDateTime, TimeZone as _};
 
+use crate::tone::Tone;
+
 /// 作業狀態。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HomeworkState {
@@ -34,6 +36,16 @@ impl HomeworkState {
             Self::Overdue => "逾期",
             Self::Completed => "已完成",
             Self::Unknown => "待核实",
+        }
+    }
+
+    /// 狀態語意色。
+    pub fn tone(self) -> Tone {
+        match self {
+            Self::Pending => Tone::Accent,
+            Self::Overdue => Tone::Danger,
+            Self::Completed => Tone::Success,
+            Self::Unknown => Tone::Warning,
         }
     }
 

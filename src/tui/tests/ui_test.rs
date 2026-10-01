@@ -10,11 +10,12 @@ use ratatui::backend::TestBackend;
 use ratatui::style::Color;
 
 use crate::config::AccessPolicy;
+use crate::domain::attendance_match::LessonAttendance;
 use crate::domain::homework::{HomeworkGroup, HomeworkInput, HomeworkItem, aggregate};
 use crate::domain::semester::TermCode;
 use crate::model::{ActivityDetailView, FlowData, LessonEntry, ScheduleData};
 use crate::session::{AccessMode, SiteKind};
-use crate::sites::attendance::FlowRecord;
+use crate::sites::attendance::{AttendanceStatus, FlowRecord};
 use crate::sites::lms::{ActivityKind, LmsActivity, LmsCourse, LmsSubmissionList};
 use crate::task::HomeworkIssue;
 use crate::tui::app::{
@@ -849,7 +850,12 @@ fn no_data_states_are_plain_notes_not_failures() {
 fn schedule_shows_skipped_course_warning() {
     let mut app = main_screen_app();
     app.nav = NavItem::Schedule;
-    let mut data = schedule_data(vec![lesson_entry("高等数学", "主楼A101", "张老师", "正常")]);
+    let mut data = schedule_data(vec![lesson_entry(
+        "高等数学",
+        "主楼A101",
+        "张老师",
+        AttendanceStatus::Normal,
+    )]);
     data.skipped = 2;
     app.schedule = Page::Ready(data);
     let text = main_text(&mut app);
@@ -864,7 +870,7 @@ fn schedule_shows_skipped_course_warning() {
         "高等数学",
         "主楼A101",
         "张老师",
-        "正常",
+        AttendanceStatus::Normal,
     )]));
     let text = main_text(&mut app);
     assert!(!text.contains("已跳过"), "沒有跳過時不應顯示提示：\n{text}");
@@ -1213,7 +1219,12 @@ fn sidebar_left_aligns_labels_and_blinks_dots_before_text() {
 }
 
 /// 課表測試用課程。
-fn lesson_entry(course: &str, classroom: &str, teacher: &str, label: &'static str) -> LessonEntry {
+fn lesson_entry(
+    course: &str,
+    classroom: &str,
+    teacher: &str,
+    attendance: impl Into<LessonAttendance>,
+) -> LessonEntry {
     LessonEntry {
         date: chrono::NaiveDate::from_ymd_opt(2026, 9, 29).expect("日期"),
         sections: "1-2".to_owned(),
@@ -1221,8 +1232,7 @@ fn lesson_entry(course: &str, classroom: &str, teacher: &str, label: &'static st
         classroom: classroom.to_owned(),
         teacher: teacher.to_owned(),
         weeks: "1-16".to_owned(),
-        status: None,
-        label,
+        attendance: attendance.into(),
     }
 }
 
@@ -1242,9 +1252,14 @@ fn schedule_rows_align_attendance_column() {
     app.set_screen(Screen::Main);
     app.nav = NavItem::Schedule;
     app.schedule = Page::Ready(schedule_data(vec![
-        lesson_entry("高等数学", "主楼A101", "张老师", "正常"),
-        lesson_entry("思想道德与法治", "逸夫科学馆", "欧阳老师", "缺勤"),
-        lesson_entry("大学物理", "中2-2201", "李老师", "请假"),
+        lesson_entry("高等数学", "主楼A101", "张老师", AttendanceStatus::Normal),
+        lesson_entry(
+            "思想道德与法治",
+            "逸夫科学馆",
+            "欧阳老师",
+            AttendanceStatus::Absent,
+        ),
+        lesson_entry("大学物理", "中2-2201", "李老师", AttendanceStatus::Leave),
     ]));
     // 選取第三列，避免高亮樣式蓋掉前兩列的狀態色。
     app.schedule_state.select(Some(2));
@@ -1288,7 +1303,7 @@ fn schedule_rows_hide_teacher_column_when_narrow() {
         "高等数学",
         "主楼A101",
         "张老师",
-        "正常",
+        AttendanceStatus::Normal,
     )]));
 
     let terminal = draw(70, HEIGHT, |frame| crate::tui::views::draw(frame, &mut app));
@@ -1377,9 +1392,14 @@ fn schedule_rows_show_full_names_when_terminal_is_wide() {
             "毛泽东思想和中国特色社会主义理论体系概论",
             "主楼B-204",
             "赵金瑞",
-            "待考勤",
+            LessonAttendance::Pending,
         ),
-        lesson_entry("体育-3", "塑胶田径场-田径场", "胡良楠", "待核实"),
+        lesson_entry(
+            "体育-3",
+            "塑胶田径场-田径场",
+            "胡良楠",
+            LessonAttendance::Unknown,
+        ),
     ]));
     // 選取第二列，避免高亮樣式影響第一列的擷取。
     app.schedule_state.select(Some(1));
@@ -1454,7 +1474,7 @@ fn lists_ask_to_enlarge_terminal_when_too_narrow() {
         "高等数学",
         "主楼A101",
         "张老师",
-        "正常",
+        AttendanceStatus::Normal,
     )]));
 
     let terminal = draw(64, HEIGHT, |frame| crate::tui::views::draw(frame, &mut app));

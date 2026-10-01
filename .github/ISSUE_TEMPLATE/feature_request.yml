@@ -1,0 +1,54 @@
+name: 功能建议
+description: 建议添加某个功能
+title: "[Feat]: "
+labels: ["enhancement"]
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## 烦请您阅读并检查下列事项，以便开发者能快速理解您的需求：
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: 请您阅读并确认下列事项。
+      options:
+        - label: "我确定这是一个从未被提出和实现过的功能"
+          required: true
+        - label: "我已检查过 [issue](https://github.com/tiaofeng/ohmyXJTU/issues) 和 [Pull Requests](https://github.com/tiaofeng/ohmyXJTU/pulls)，并未找到类似的功能建议"
+          required: true
+        - label: "我确定此功能不违反《网络安全法》等国家法律法规，以及《西安交通大学学生违纪处分办法》等校纪校规"
+          required: true
+        - label: "我确定此功能不能用于获取不正当的竞争优势或利益，包括但不限于“抢课”“抢场地”等"
+          required: true
+        - label: "我理解并明白，若不按照模板的指示规范填写，该 issue 可能不会得到及时处理"
+          required: true
+
+  - type: textarea
+    id: feature_description
+    attributes:
+      label: 需要什么功能？
+      description: 您希望添加什么样的功能？尽可能详细描述您的需求、背景和用途，也可以提供您想到的实现方案（如有）。
+      placeholder: |
+        请描述你希望添加的功能...
+    validations:
+      required: true
+
+  - type: textarea
+    id: other_description
+    attributes:
+      label: 其他描述（可选）
+      description: 关于新功能的其他描述或截图。
+      placeholder: 可粘贴图片或补充说明...
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: pr
+    attributes:
+      label: 是否愿意贡献 PR 以实现该功能（可选）
+      description: 若您有能力实现该功能，是否愿意贡献 PR？
+      options:
+        - label: 我愿意贡献 PR 以实现该功能
+          required: false

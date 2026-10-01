@@ -1,0 +1,9 @@
+blank_issues_enabled: false
+
+contact_links:
+  - name: 提问与讨论
+    url: https://github.com/tiaofeng/ohmyXJTU/discussions
+    about: 若您不确定是不是 bug，或者想讨论功能，请移步此处。
+  - name: 项目文档
+    url: https://github.com/tiaofeng/ohmyXJTU/blob/main/README.md
+    about: 请先阅读 README 和文档，或许早有答案。

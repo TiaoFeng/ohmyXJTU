@@ -21,6 +21,7 @@ use url::Url;
 use crate::credentials::Credentials;
 use crate::error::{AppError, AppResult};
 use crate::http::{HttpClient, HttpRequest, HttpResponse};
+use crate::json::split_envelope;
 
 use super::html;
 use super::rsa;
@@ -41,6 +42,8 @@ const ACCOUNT_CHOICE_URL: &str = "https://login.xjtu.edu.cn/cas/login";
 
 /// 連續失敗達此次數後，伺服器會要求輸入圖片驗證碼。
 const CAPTCHA_THRESHOLD: u32 = 3;
+/// 核對簡訊驗證碼的成功狀態碼（伺服器可能以整數 `2` 或字串 `"2"` 傳送）。
+const MFA_SUCCESS_CODE: i64 = 2;
 
 /// 簡訊驗證上下文。
 #[derive(Debug, Clone)]
@@ -73,6 +76,12 @@ pub struct LoginDriver {
     account_type: AccountType,
     choose_account_response: Option<HttpResponse>,
     safety_verify: Option<SafetyVerifyState>,
+    /// 二次認證已進入簡訊驗證階段（`safety_verify` 的頁面待提交）。
+    ///
+    /// 用於區分「要求簡訊驗證」與「提交隱藏表單」兩個階段（對齊參考實作的
+    /// `_safety_verify_mfa_requested`）：初始頁即二次認證時，第一次 `advance`
+    /// 只要求驗證，使用者完成後才提交頁面表單。
+    safety_verify_mfa_requested: bool,
     mfa: Option<MfaContext>,
     username: Option<String>,
     encrypted_password: Option<String>,
@@ -99,8 +108,8 @@ impl LoginDriver {
 
         let text = response.text();
         let execution = html::execution_value(&text);
-        let safety_verify = html::is_safety_verify_page(&text);
-        let already_authenticated = if !safety_verify
+        let initial_safety_verify = html::is_safety_verify_page(&text);
+        let already_authenticated = if !initial_safety_verify
             && execution.is_none()
             && !response.final_url.contains("/cas/login")
         {
@@ -108,21 +117,27 @@ impl LoginDriver {
         } else {
             None
         };
+        let mfa_enabled = html::mfa_enabled(&text);
+        let post_url = response.final_url.clone();
+        // 初始頁即二次認證：保存頁面，供後續以 `secState` 走安全驗證流程
+        //（參考實作的 `_safety_verify_response`）。
+        let safety_verify = initial_safety_verify.then_some(SafetyVerifyState { response });
 
         Ok(Self {
             client,
-            post_url: response.final_url.clone(),
+            post_url,
             execution,
             already_authenticated,
             visitor_id: visitor_id.to_owned(),
-            mfa_enabled: html::mfa_enabled(&text),
+            mfa_enabled,
             fail_count: 0,
             rsa_public_key: None,
             has_login: false,
             account_type: AccountType::Undergraduate,
             choose_account_response: None,
-            safety_verify: None,
+            safety_verify,
             mfa: None,
+            safety_verify_mfa_requested: false,
             username: None,
             encrypted_password: None,
             captcha_code: String::new(),
@@ -149,7 +164,9 @@ impl LoginDriver {
 
     /// 本次登入是否直接沿用既有登入態（未向伺服器提交帳密）。
     ///
-    /// 換帳號時若為真，代表新憑證從未被伺服器驗證過，不得寫回保險庫。
+    /// 除了登入網址已具備登入態，初始頁即二次認證（沿用伺服器既有會話、
+    /// 以簡訊驗證完成）也算：換帳號時若為真，代表新憑證從未被伺服器
+    /// 驗證過，不得寫回保險庫。
     pub fn used_existing_session(&self) -> bool {
         self.used_existing_session
     }
@@ -183,8 +200,9 @@ impl LoginDriver {
     ) -> AppResult<LoginReply> {
         self.account_type = account_type;
         self.username = Some(credentials.username.clone());
-        // 已具備登入態時不需要提交帳密，也就不需要抓取公鑰。
-        if self.already_authenticated.is_none() {
+        // 已具備登入態、或初始頁即二次認證（本次登入不會提交帳密）時，
+        // 都不需要抓取公鑰。
+        if self.already_authenticated.is_none() && self.safety_verify.is_none() {
             let public_key = self.public_key()?;
             self.encrypted_password =
                 Some(rsa::encrypt_password(&credentials.password, &public_key)?);
@@ -229,7 +247,7 @@ impl LoginDriver {
         url.query_pairs_mut().append_pair("state", &state);
 
         let response = self.client.send(HttpRequest::get(url.to_string()))?;
-        let data = check_envelope(&response)?;
+        let data = split_envelope(&response, "手机号查询")?;
         let phone = data
             .get("securePhone")
             .and_then(serde_json::Value::as_str)
@@ -254,7 +272,7 @@ impl LoginDriver {
         let response = self
             .client
             .send(HttpRequest::post_json(MFA_SEND_URL, json!({ "gid": gid })))?;
-        check_envelope(&response)?;
+        split_envelope(&response, "发送短信验证码")?;
         Ok(phone)
     }
 
@@ -265,10 +283,18 @@ impl LoginDriver {
             MFA_VALID_URL,
             json!({ "gid": gid, "code": code }),
         ))?;
-        let data = check_envelope(&response)?;
-        if let Some(status) = data.get("status").and_then(serde_json::Value::as_i64)
-            && status != 2
-        {
+        let data = split_envelope(&response, "核验短信验证码")?;
+        let passed = match data.get("status") {
+            // 缺少狀態欄位（或為 null）時視為通過——與參考實作一致。
+            None | Some(serde_json::Value::Null) => true,
+            // 其餘只接受成功碼：整數 2 或可解析為 2 的數值字串。
+            Some(status) => {
+                status.as_i64() == Some(MFA_SUCCESS_CODE)
+                    || status.as_str().and_then(|text| text.parse::<i64>().ok())
+                        == Some(MFA_SUCCESS_CODE)
+            }
+        };
+        if !passed {
             // 驗證碼填錯是可重試的：使用者重輸即可，不應作廢整次登入。
             return Err(AppError::VerificationRetry(
                 "短信验证码不正确，请重试".to_owned(),
@@ -292,6 +318,14 @@ impl LoginDriver {
         }
 
         if self.safety_verify.is_some() {
+            // 兩階段（對齊參考實作）：先要求簡訊驗證，使用者完成後
+            //（`resume`）才提交頁面的隱藏表單。
+            if !self.safety_verify_mfa_requested {
+                // 尚未要求過驗證代表這是「初始頁即二次認證」：本次登入沿用
+                // 伺服器既有會話完成、從未提交帳密，換帳號時不得寫回憑證。
+                self.used_existing_session = true;
+                return self.require_safety_verify();
+            }
             return self.finish_safety_verify();
         }
 
@@ -422,7 +456,8 @@ impl LoginDriver {
         }
 
         if html::is_safety_verify_page(&text) {
-            return self.require_safety_verify_mfa(response);
+            self.safety_verify = Some(SafetyVerifyState { response });
+            return self.require_safety_verify();
         }
 
         self.fail_count = 0;
@@ -436,12 +471,21 @@ impl LoginDriver {
         Ok(LoginReply::Success)
     }
 
-    fn require_safety_verify_mfa(&mut self, response: HttpResponse) -> AppResult<LoginReply> {
-        let sec_state = html::input_value(&response.text(), "secState")
+    /// 進入二次認證的簡訊驗證階段（頁面已在 `safety_verify` 中待提交）。
+    ///
+    /// 無論是提交帳密後才收到二次認證頁，或登入入口直接落在二次認證頁，
+    /// 都在這裡切換到安全驗證流程；使用者完成簡訊驗證後由
+    /// [`Self::finish_safety_verify`] 提交頁面的隱藏表單。
+    fn require_safety_verify(&mut self) -> AppResult<LoginReply> {
+        let state = self
+            .safety_verify
+            .as_ref()
+            .ok_or_else(|| AppError::protocol("当前不需要完成二次认证"))?;
+        let sec_state = html::input_value(&state.response.text(), "secState")
             .ok_or_else(|| AppError::protocol("二次认证页面缺少 secState 字段"))?;
 
         self.fail_count = 0;
-        self.safety_verify = Some(SafetyVerifyState { response });
+        self.safety_verify_mfa_requested = true;
         self.mfa = Some(MfaContext {
             flow: MfaFlow::SafetyVerify,
             state: sec_state,
@@ -457,6 +501,7 @@ impl LoginDriver {
             .safety_verify
             .take()
             .ok_or_else(|| AppError::protocol("当前不需要完成二次认证"))?;
+        self.safety_verify_mfa_requested = false;
         let text = state.response.text();
         let sec_state = html::input_value(&text, "secState")
             .ok_or_else(|| AppError::protocol("二次认证页面缺少 secState 字段"))?;
@@ -554,31 +599,6 @@ impl LoginDriver {
     }
 }
 
-/// 解開伺服器統一的 `{code, message, data}` 外殼，回傳 `data`。
-fn check_envelope(response: &HttpResponse) -> AppResult<serde_json::Value> {
-    response.error_for_status()?;
-    let value: serde_json::Value = response.json()?;
-    let code = value
-        .get("code")
-        .and_then(serde_json::Value::as_i64)
-        .unwrap_or(-1);
-    if code == 0 {
-        Ok(value
-            .get("data")
-            .cloned()
-            .unwrap_or(serde_json::Value::Null))
-    } else {
-        Err(AppError::Server {
-            code,
-            message: value
-                .get("message")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("未知错误")
-                .to_owned(),
-        })
-    }
-}
-
 /// 確認登入表單的提交目標位於學校網域且使用 https；否則回報錯誤
 /// （訊息只含主機名或簡短原因，不含完整 URL）。
 fn ensure_trusted_submit_target(url: &str) -> AppResult<()> {
@@ -595,11 +615,6 @@ fn ensure_trusted_submit_target(url: &str) -> AppResult<()> {
         return Err(AppError::protocol("登录提交目标必须使用 https"));
     }
     Ok(())
-}
-
-/// 供外部（會話層）判斷是否需要改寫為 WebVPN 網址。
-pub fn needs_webvpn_rewrite(url: &str) -> bool {
-    webvpn::should_rewrite(url)
 }
 
 #[cfg(test)]

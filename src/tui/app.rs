@@ -4,7 +4,6 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use chrono::NaiveDate;
 use ratatui::widgets::ListState;
 
 use crate::config::AccessPolicy;
@@ -12,9 +11,9 @@ use crate::domain::activity::{self, ActivityGroup};
 use crate::domain::course_list::{self, CourseRow};
 use crate::domain::homework::{HomeworkGroup, HomeworkItem};
 use crate::domain::semester::TermCode;
+use crate::model::{ActivityDetailView, FlowData, ScheduleData};
 use crate::session::{AccessMode, SiteKind};
-use crate::sites::attendance::{AttendanceStatus, FlowRecord};
-use crate::sites::lms::{ActivityKind, LmsActivity, LmsCourse, LmsSubmission};
+use crate::sites::lms::{LmsActivity, LmsCourse};
 use crate::task::{FailedTarget, HomeworkIssue};
 use crate::tui::text::InputLine;
 
@@ -186,72 +185,6 @@ impl<T> Page<T> {
     }
 }
 
-/// 本週的一堂課。
-#[derive(Debug, Clone)]
-pub struct LessonEntry {
-    /// 上課日期。
-    pub date: NaiveDate,
-    /// 節次，例如 `1-2`。
-    pub sections: String,
-    /// 課程名稱。
-    pub course_name: String,
-    /// 上課地點。
-    pub classroom: String,
-    /// 教師。
-    pub teacher: String,
-    /// 週次說明。
-    pub weeks: String,
-    /// 考勤狀態（`None` 代表沒有記錄）。
-    pub status: Option<AttendanceStatus>,
-    /// 顯示用考勤標籤。
-    pub label: &'static str,
-}
-
-/// 課表頁資料。
-#[derive(Debug, Clone, Default)]
-pub struct ScheduleData {
-    /// 學期說明，例如 `2026-2027-1`。
-    pub semester: String,
-    /// 本週週次。
-    pub week: u32,
-    /// 本週課程。
-    pub lessons: Vec<LessonEntry>,
-    /// 因格式問題被跳過的課程筆數。
-    pub skipped: usize,
-}
-
-/// 考勤流水頁資料。
-#[derive(Debug, Clone, Default)]
-pub struct FlowData {
-    /// 本頁流水。
-    pub records: Vec<FlowRecord>,
-    /// 目前頁碼。
-    pub page: u32,
-    /// 總頁數。
-    pub total_pages: u32,
-    /// 總筆數。
-    pub total: u64,
-}
-
-/// 活動詳情檢視資料。
-#[derive(Debug, Clone, Default)]
-pub struct ActivityDetailView {
-    /// 活動識別碼。
-    pub id: String,
-    /// 標題。
-    pub title: String,
-    /// 活動類型。
-    pub kind: ActivityKind,
-    /// 截止時間。
-    pub end_time: Option<String>,
-    /// 是否小組作業。
-    pub submit_by_group: bool,
-    /// 提交記錄；`None` 代表無法確認（僅作業有提交狀態）。
-    pub submissions: Option<Vec<LmsSubmission>>,
-    /// 補充說明（例如無法確認提交狀態的原因）。
-    pub note: Option<String>,
-}
-
 /// 思源學堂的瀏覽層級。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LmsLevel {
@@ -409,9 +342,81 @@ pub enum FormKind {
     ChangePassphrase,
 }
 
+impl FormKind {
+    /// 表單欄位表（角色＋標籤）；順序即畫面順序，是欄位的單一來源。
+    fn fields(self) -> &'static [(FieldRole, &'static str)] {
+        match self {
+            Self::Setup => &[
+                (FieldRole::Passphrase, "加密口令"),
+                (FieldRole::PassphraseConfirm, "确认口令"),
+                (FieldRole::Username, "账号"),
+                (FieldRole::Password, "密码"),
+                (FieldRole::PasswordConfirm, "确认密码"),
+            ],
+            Self::Unlock => &[(FieldRole::Passphrase, "加密口令")],
+            Self::LoginRetry(_) => &[
+                (FieldRole::Username, "账号"),
+                (FieldRole::Password, "密码"),
+                (FieldRole::Passphrase, "加密口令"),
+            ],
+            Self::ChangeAccount => &[
+                (FieldRole::OldPassphrase, "原加密口令"),
+                (FieldRole::NewUsername, "新账号"),
+                (FieldRole::NewPassword, "新密码"),
+                (FieldRole::NewPasswordConfirm, "确认新密码"),
+            ],
+            Self::ChangePassphrase => &[
+                (FieldRole::OldPassphrase, "原加密口令"),
+                (FieldRole::NewPassphrase, "新加密口令"),
+                (FieldRole::NewPassphraseConfirm, "确认新口令"),
+            ],
+        }
+    }
+}
+
+/// 表單欄位的語意角色。
+///
+/// 角色決定是否遮蔽（[`FieldRole::is_secret`]）、失敗時是否清空，以及
+/// [`crate::tui::controller::FormValues`] 取值的對應位置——調整欄位順序或
+/// 標籤都不會讓值落進錯誤的欄位。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldRole {
+    /// 保險庫加密口令（建立、解鎖、驗證）。
+    Passphrase,
+    /// 加密口令的確認輸入。
+    PassphraseConfirm,
+    /// 帳號。
+    Username,
+    /// 帳號密碼。
+    Password,
+    /// 密碼的確認輸入。
+    PasswordConfirm,
+    /// 修改前的原加密口令。
+    OldPassphrase,
+    /// 新的加密口令。
+    NewPassphrase,
+    /// 新加密口令的確認輸入。
+    NewPassphraseConfirm,
+    /// 新的帳號。
+    NewUsername,
+    /// 新的帳號密碼。
+    NewPassword,
+    /// 新密碼的確認輸入。
+    NewPasswordConfirm,
+}
+
+impl FieldRole {
+    /// 是否為敏感欄位（遮蔽輸入、失敗時清空）。
+    pub fn is_secret(self) -> bool {
+        !matches!(self, Self::Username | Self::NewUsername)
+    }
+}
+
 /// 表單欄位。
 #[derive(Debug, Clone)]
 pub struct FormField {
+    /// 欄位語意角色。
+    pub role: FieldRole,
     /// 欄位標籤。
     pub label: &'static str,
     /// 欄位內容。
@@ -436,105 +441,50 @@ pub struct FormState {
 impl FormState {
     /// 首次設定表單。
     pub fn setup() -> Self {
-        Self::new(
-            FormKind::Setup,
-            [
-                ("加密口令", true),
-                ("确认口令", true),
-                ("账号", false),
-                ("密码", true),
-                ("确认密码", true),
-            ]
-            .into_iter()
-            .map(|(label, masked)| FormField {
-                label,
-                value: InputLine::new().masked(masked),
-            })
-            .collect(),
-        )
+        Self::new(FormKind::Setup)
     }
 
     /// 解鎖表單。
     pub fn unlock() -> Self {
-        Self::new(
-            FormKind::Unlock,
-            vec![FormField {
-                label: "加密口令",
-                value: InputLine::new().masked(true),
-            }],
-        )
+        Self::new(FormKind::Unlock)
     }
 
     /// 登入失敗後重新輸入帳號密碼（密碼與口令皆遮蔽，欄位一律留空）。
     ///
     /// `site` 為原本失敗的站點：重試沿用同一個站點，不被另一個站點的可達性牽制。
     pub fn login_retry(site: SiteKind) -> Self {
-        Self::new(
-            FormKind::LoginRetry(site),
-            [("账号", false), ("密码", true), ("加密口令", true)]
-                .into_iter()
-                .map(|(label, masked)| FormField {
-                    label,
-                    value: InputLine::new().masked(masked),
-                })
-                .collect(),
-        )
+        Self::new(FormKind::LoginRetry(site))
     }
 
     /// 修改帳號表單。
     pub fn change_account() -> Self {
-        Self::new(
-            FormKind::ChangeAccount,
-            [
-                ("原加密口令", true),
-                ("新账号", false),
-                ("新密码", true),
-                ("确认新密码", true),
-            ]
-            .into_iter()
-            .map(|(label, masked)| FormField {
-                label,
-                value: InputLine::new().masked(masked),
-            })
-            .collect(),
-        )
+        Self::new(FormKind::ChangeAccount)
     }
 
     /// 修改加密口令表單。
     pub fn change_passphrase() -> Self {
-        Self::new(
-            FormKind::ChangePassphrase,
-            [
-                ("原加密口令", true),
-                ("新加密口令", true),
-                ("确认新口令", true),
-            ]
-            .into_iter()
-            .map(|(label, masked)| FormField {
-                label,
-                value: InputLine::new().masked(masked),
-            })
-            .collect(),
-        )
+        Self::new(FormKind::ChangePassphrase)
     }
 
     /// 清空敏感欄位（口令與密碼）；保留非敏感輸入（例如帳號）。
     pub fn clear_secrets(&mut self) {
-        let sensitive: &[usize] = match self.kind {
-            FormKind::Setup => &[0, 1, 3, 4],
-            FormKind::Unlock => &[0],
-            FormKind::LoginRetry(_) => &[1, 2],
-            FormKind::ChangeAccount => &[0, 2, 3],
-            FormKind::ChangePassphrase => &[0, 1, 2],
-        };
-        for index in sensitive {
-            if let Some(field) = self.fields.get_mut(*index) {
+        for field in &mut self.fields {
+            if field.role.is_secret() {
                 field.value.clear();
             }
         }
     }
 
-    fn new(kind: FormKind, fields: Vec<FormField>) -> Self {
+    fn new(kind: FormKind) -> Self {
+        let fields = kind
+            .fields()
+            .iter()
+            .map(|&(role, label)| FormField {
+                role,
+                label,
+                value: InputLine::new().masked(role.is_secret()),
+            })
+            .collect();
         Self {
             kind,
             fields,
@@ -645,13 +595,17 @@ pub struct SettingsState {
 impl SettingsState {
     /// 設定項目數量。
     pub const COUNT: usize = 3;
+    /// 修改帳號項目的索引。
+    pub const ACCOUNT_INDEX: usize = 0;
+    /// 修改加密口令項目的索引。
+    pub const PASSPHRASE_INDEX: usize = 1;
     /// 訪問模式項目的索引。
     pub const POLICY_INDEX: usize = 2;
 
     /// 開啟設定彈窗。
     pub fn open(policy: AccessPolicy) -> Self {
         Self {
-            index: 0,
+            index: Self::ACCOUNT_INDEX,
             draft: Some(policy),
             saving: false,
         }
@@ -660,8 +614,8 @@ impl SettingsState {
     /// 項目標籤。
     pub fn label(index: usize) -> &'static str {
         match index % Self::COUNT {
-            0 => "修改账号",
-            1 => "修改加密口令",
+            Self::ACCOUNT_INDEX => "修改账号",
+            Self::PASSPHRASE_INDEX => "修改加密口令",
             _ => "访问模式",
         }
     }
@@ -829,6 +783,11 @@ pub struct App {
     pub screen: Screen,
     /// 登入互動覆蓋層（進度、驗證碼、簡訊、失敗與重新輸入憑證）。
     pub login: Option<Box<LoginScreen>>,
+    /// 使用者已關閉登入覆蓋層並要求取消（等待工作者回報取消完成）。
+    ///
+    /// 期間內遲到的登入事件（進度、驗證碼、簡訊）不得再打開覆蓋層：它們都
+    /// 屬於正在被取消的那次登入，工作者隨後就會丟棄該流程。
+    pub login_cancel_pending: bool,
     /// 用户协议閱讀門（首次啟動或協議改版後；開啟時獨占畫面與按鍵）。
     pub agreement: Option<Box<AgreementState>>,
     /// 目前頁面。
@@ -887,6 +846,7 @@ impl App {
         Self {
             screen: Screen::Unlock(FormState::unlock()),
             login: None,
+            login_cancel_pending: false,
             agreement: None,
             nav: NavItem::Schedule,
             schedule: Page::Idle,
@@ -1027,6 +987,19 @@ impl App {
     /// 清除所有站點的登入狀態（解鎖、換帳號、切換訪問模式時）。
     pub fn clear_site_modes(&mut self) {
         self.site_modes.clear();
+    }
+
+    /// 目前可編輯的表單（登入覆蓋層的憑證表單優先於底層表單）。
+    pub fn form_mut(&mut self) -> Option<&mut FormState> {
+        if let Some(screen) = self.login.as_mut()
+            && let LoginScreen::Credentials { form, .. } = screen.as_mut()
+        {
+            return Some(form);
+        }
+        match &mut self.screen {
+            Screen::Setup(form) | Screen::Unlock(form) | Screen::SettingsForm(form) => Some(form),
+            _ => None,
+        }
     }
 
     /// 會話重置後的頁面失效處理。

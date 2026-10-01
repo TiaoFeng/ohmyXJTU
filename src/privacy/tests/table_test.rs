@@ -1,7 +1,7 @@
 //! 表格排版測試：對齊表格與卡片兩種模式的選擇、欄位對齊、懸掛縮排與內容不遺失。
 
 use crate::privacy::{DocLine, LineKind, Table};
-use crate::tui::text::display_width;
+use crate::text::display_width;
 
 /// 建立測試表格。
 fn table(headers: &[&str], rows: &[&[&str]]) -> Table {

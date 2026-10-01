@@ -101,11 +101,7 @@ impl<'a> PostLogin<'a> {
     }
 
     fn url(&self, url: &str) -> AppResult<String> {
-        if self.access_mode == AccessMode::WebVpn && webvpn::should_rewrite(url) {
-            webvpn::to_webvpn_url(url)
-        } else {
-            Ok(url.to_owned())
-        }
+        rewrite_for_mode(self.access_mode, url)
     }
 }
 
@@ -126,6 +122,18 @@ impl AccessMode {
             Self::Direct => "直连",
             Self::WebVpn => "WebVPN",
         }
+    }
+}
+
+/// 依訪問方式改寫校內網址：WebVPN 模式且適用改寫時改寫，否則原樣回傳。
+///
+/// 全專案唯一的改址規則入口（站點登入請求、一般請求轉送與外部網頁開啟都經
+/// 此函式），避免模式判斷與 `should_rewrite` 條件各自漂移。
+pub fn rewrite_for_mode(mode: AccessMode, url: &str) -> AppResult<String> {
+    if mode == AccessMode::WebVpn && webvpn::should_rewrite(url) {
+        webvpn::to_webvpn_url(url)
+    } else {
+        Ok(url.to_owned())
     }
 }
 

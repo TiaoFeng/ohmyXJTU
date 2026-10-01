@@ -13,6 +13,11 @@
 
 use chrono::{DateTime, FixedOffset, NaiveDateTime, TimeZone as _};
 
+use crate::tone::Tone;
+
+/// 校園時區（中國標準時間，UTC+8）相對 UTC 的偏移秒數。
+const CAMPUS_UTC_OFFSET_SECS: i32 = 8 * 3600;
+
 /// 作業狀態。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HomeworkState {
@@ -34,6 +39,16 @@ impl HomeworkState {
             Self::Overdue => "逾期",
             Self::Completed => "已完成",
             Self::Unknown => "待核实",
+        }
+    }
+
+    /// 狀態語意色。
+    pub fn tone(self) -> Tone {
+        match self {
+            Self::Pending => Tone::Accent,
+            Self::Overdue => Tone::Danger,
+            Self::Completed => Tone::Success,
+            Self::Unknown => Tone::Warning,
         }
     }
 
@@ -112,8 +127,8 @@ pub struct HomeworkInput {
     pub title: String,
     /// 截止時間（原始字串）。
     pub end_time: Option<String>,
-    /// 是否以小組為單位提交。
-    pub submit_by_group: bool,
+    /// 是否以小組為單位提交；`None` 代表無法確認（詳情缺少該欄位）。
+    pub submit_by_group: Option<bool>,
     /// 提交記錄數；`None` 代表無法確認。
     pub submission_count: Option<usize>,
     /// 無法確認提交狀態時的原因（顯示於「待核实」項目）。
@@ -133,8 +148,8 @@ pub struct HomeworkItem {
     pub title: String,
     /// 截止時間（原始字串）。
     pub end_time: Option<String>,
-    /// 是否以小組為單位提交。
-    pub submit_by_group: bool,
+    /// 是否以小組為單位提交；`None` 代表無法確認（詳情缺少該欄位）。
+    pub submit_by_group: Option<bool>,
     /// 判定狀態。
     pub state: HomeworkState,
     /// 無法確認提交狀態時的原因（顯示於「待核实」項目）。
@@ -211,7 +226,7 @@ pub fn parse_time(value: Option<&str>) -> Option<DateTime<FixedOffset>> {
     if value.is_empty() {
         return None;
     }
-    let offset = FixedOffset::east_opt(8 * 3600)?;
+    let offset = FixedOffset::east_opt(CAMPUS_UTC_OFFSET_SECS)?;
     if let Ok(time) = DateTime::parse_from_rfc3339(value) {
         return Some(time.with_timezone(&offset));
     }

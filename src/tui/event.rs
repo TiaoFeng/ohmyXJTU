@@ -1,0 +1,500 @@
+//! 背景事件的套用：事件 → 介面狀態。
+//!
+//! [`apply_event`] 是純分派表，每個事件由一個具名函式處理；登入覆蓋層的
+//! 收斂規則集中在 [`set_login_error`] 與 [`apply_failure`]（任何失敗事件都
+//! 必須讓停在「正在登入」的覆蓋層轉為可重試的失敗畫面）。
+
+use std::path::PathBuf;
+use std::sync::mpsc::Sender;
+
+use crate::config::AccessPolicy;
+use crate::domain::homework::HomeworkGroup;
+use crate::model::{ActivityDetailView, FlowData, ScheduleData};
+use crate::session::{AccessMode, SiteKind};
+use crate::sites::lms::LmsActivity;
+use crate::task::{CoursesData, Event, FailedTarget, HomeworkUpdate, Job};
+
+use super::app::{
+    App, FormKind, FormState, HomeworkData, LmsLevel, LoginScreen, Page, Screen, SettingsState,
+    TermPickerState,
+};
+use super::controller;
+use super::text::InputLine;
+
+/// 套用背景事件。
+pub(crate) fn apply_event(app: &mut App, event: Event, jobs: &Sender<Job>) {
+    match event {
+        Event::VaultReady => apply_vault_ready(app, jobs),
+        Event::LoginProgress(note) => {
+            // 登入互動是覆蓋層：底層畫面保持不變，事件只更新彈窗內容。
+            // 等待取消期間忽略：遲到的進度事件屬於正在被取消的那次登入。
+            if !app.login_cancel_pending {
+                app.login = Some(Box::new(LoginScreen::Progress { note }));
+            }
+        }
+        Event::LoginNeedsCaptcha(path) => apply_needs_captcha(app, path),
+        Event::LoginNeedsMfa { phone, sent } => apply_needs_mfa(app, phone, sent),
+        Event::LoginFailed { site, message } => set_login_error(app, site, message),
+        Event::LoginCancelled => apply_login_cancelled(app),
+        Event::VerificationRetry { site, message } => apply_verification_retry(app, site, message),
+        Event::LoginSucceeded { site, mode } => apply_login_succeeded(app, jobs, site, mode),
+        Event::SessionsCleared { account_changed } => {
+            app.clear_site_modes();
+            app.invalidate_data(account_changed);
+        }
+        Event::AgreementAccepted => {
+            // 協議已同意：關閉閱讀門，揭露底層畫面（首次設定或解鎖）。
+            app.agreement = None;
+        }
+        Event::SessionExpired { site } => app.clear_site_mode(site),
+        Event::SessionDisabled(message) => apply_session_disabled(app, message),
+        Event::LoadingCancelled { target } => {
+            // 進行中的載入被取消：解除載入中狀態，保留已取得的部分資料。
+            app.cancel_loading(target);
+        }
+        Event::Schedule(data) => apply_schedule(app, *data),
+        Event::Homework(update) => apply_homework(app, update),
+        Event::HomeworkNeedsTerm {
+            options,
+            suggestion,
+            reason,
+        } => {
+            app.term_options = options.clone();
+            app.homework.fail("未确定本学期：按 s 选择要查看的学期");
+            app.set_screen(Screen::TermPicker(TermPickerState::new(
+                options, suggestion, reason,
+            )));
+        }
+        Event::Flow(data) => apply_flow(app, *data),
+        Event::CoursesTerm(term) => {
+            // 只更新分區提示：課程清單本身不變，重新繪製即會依新學期重新分區。
+            app.lms.courses_term = term;
+        }
+        Event::Courses(data) => apply_courses(app, data),
+        Event::Activities {
+            course_id,
+            activities,
+        } => apply_activities(app, course_id, activities),
+        Event::ActivityDetail(detail) => apply_activity_detail(app, *detail),
+        Event::OpenUrl(url) => {
+            // 實際啟動瀏覽器交由主迴圈執行（測試不觸發外部程序）。
+            app.pending_open = Some(url);
+            app.set_message("正在打开浏览器…");
+        }
+        Event::AccountUpdated => {
+            // 修改帳號成功：離開表單；資料由隨後的事件重新載入。
+            if matches!(app.screen, Screen::SettingsForm(_)) {
+                app.set_screen(Screen::Main);
+            }
+            app.set_message("账号已更新");
+        }
+        Event::CredentialSaveFailed(message) => apply_credential_save_failed(app, message),
+        Event::PassphraseUpdated => apply_passphrase_updated(app),
+        Event::AccessPolicyUpdated(policy) => apply_access_policy_updated(app, policy),
+        Event::Notice(message) => app.set_message(message),
+        Event::Failed {
+            what,
+            message,
+            target,
+            site,
+            resource,
+        } => apply_failure(app, what, message, target, site, resource),
+    }
+}
+
+/// 憑證已就緒：清掉殘留的登入覆蓋層，直接進入主畫面
+///（不預先登入任何站點），由目前頁面按需觸發惰性登入。
+fn apply_vault_ready(app: &mut App, jobs: &Sender<Job>) {
+    app.login = None;
+    app.login_cancel_pending = false;
+    if app.is_main() {
+        // 修改帳號後回到主畫面：舊資料屬於舊帳號，強制刷新目前頁面。
+        let nav = app.nav;
+        controller::request(app, jobs, nav, true);
+    } else {
+        app.ensure_main();
+        controller::ensure_page(app, jobs);
+    }
+    app.set_message("凭证已就绪");
+}
+
+/// 需要圖片驗證碼：保留上一次的錯誤訊息，輸入框清空。
+fn apply_needs_captcha(app: &mut App, path: PathBuf) {
+    // 等待取消期間忽略：遲到的驗證碼事件屬於正在被取消的那次登入，
+    // 不得把它重新彈出來。
+    if app.login_cancel_pending {
+        return;
+    }
+    app.captcha_path = Some(path.clone());
+    let previous_error = match app.login.as_deref() {
+        Some(LoginScreen::Captcha { error, .. }) => error.clone(),
+        _ => None,
+    };
+    app.login = Some(Box::new(LoginScreen::Captcha {
+        path,
+        input: InputLine::new(),
+        error: previous_error,
+    }));
+}
+
+/// 需要簡訊驗證碼：保留已輸入的驗證碼與錯誤訊息（重送簡訊時不應清空）。
+fn apply_needs_mfa(app: &mut App, phone: Option<String>, sent: bool) {
+    // 等待取消期間忽略：遲到的簡訊驗證事件屬於正在被取消的那次登入，
+    // 不得把它重新彈出來。
+    if app.login_cancel_pending {
+        return;
+    }
+    let (input, error) = match app.login.as_deref() {
+        Some(LoginScreen::Mfa { input, error, .. }) => (input.clone(), error.clone()),
+        _ => (InputLine::new(), None),
+    };
+    app.login = Some(Box::new(LoginScreen::Mfa {
+        phone,
+        sent,
+        input,
+        error,
+    }));
+}
+
+/// 驗證碼填錯（可重試）：保留原本的驗證碼／簡訊輸入畫面，讓使用者就地重輸，
+/// 不必重新輸入帳號密碼（登入流程仍在工作者端保留）。
+fn apply_verification_retry(app: &mut App, site: SiteKind, message: String) {
+    match app.login.as_deref_mut() {
+        Some(LoginScreen::Mfa { input, error, .. })
+        | Some(LoginScreen::Captcha { input, error, .. }) => {
+            input.clear();
+            *error = Some(message);
+        }
+        _ => set_login_error(app, site, message),
+    }
+}
+
+/// 登入取消完成：關閉覆蓋層並清除等待狀態。
+///
+/// 即使先前有遲到的登入事件重開過覆蓋層（例如簡訊驗證），也在這裡一併
+/// 關閉；之後的登入事件（新的登入流程）再正常開啟。
+fn apply_login_cancelled(app: &mut App) {
+    app.login = None;
+    app.login_cancel_pending = false;
+}
+
+/// 登入成功：關閉覆蓋層、記錄站點訪問方式並確保目前頁面已載入。
+fn apply_login_succeeded(
+    app: &mut App,
+    jobs: &Sender<Job>,
+    site: SiteKind,
+    mode: Option<AccessMode>,
+) {
+    app.login = None;
+    app.login_cancel_pending = false;
+    match mode {
+        Some(mode) => app.set_site_mode(site, mode),
+        None => app.clear_site_mode(site),
+    }
+    if !app.is_main() {
+        app.set_screen(Screen::Main);
+    }
+    // 若目前頁面尚未載入（例如從失敗畫面重試成功），補一次載入。
+    controller::ensure_page(app, jobs);
+    app.set_message("登录成功");
+}
+
+/// 會話已停用（無法建立乾淨的新會話）：回到解鎖畫面，讓使用者重新輸入
+/// 加密口令以建立一個全新的會話；此前不會再發出任何請求。
+fn apply_session_disabled(app: &mut App, message: String) {
+    app.login = None;
+    app.login_cancel_pending = false;
+    app.clear_site_modes();
+    app.invalidate_data(true);
+    let mut form = FormState::unlock();
+    form.error = Some(message);
+    app.set_screen(Screen::Unlock(form));
+    app.set_message("会话已停用：请输入加密口令重新解锁");
+}
+
+fn apply_schedule(app: &mut App, data: ScheduleData) {
+    app.schedule = Page::Ready(data);
+    app.updated_at.schedule = Some(now_clock());
+    app.schedule_state.select(Some(0));
+    app.ensure_main();
+}
+
+fn apply_flow(app: &mut App, data: FlowData) {
+    app.attendance = Page::Ready(data);
+    app.updated_at.attendance = Some(now_clock());
+    app.flow_state.select(Some(0));
+    app.ensure_main();
+}
+
+/// 作業更新（部分結果或終態）：部分結果維持載入中並保留已累積資料。
+fn apply_homework(app: &mut App, update: HomeworkUpdate) {
+    let progress = update.progress;
+    let finished = progress.is_none();
+    let elapsed = update.elapsed;
+    let unfinished = update
+        .items
+        .iter()
+        .filter(|item| item.state.group() == HomeworkGroup::Unfinished)
+        .count();
+    let data = HomeworkData {
+        term_label: update.term_label,
+        term_source: update.term_source.map(|source| source.label()),
+        courses_included: update.courses_included,
+        courses_skipped: update.courses_skipped,
+        term_options: update.term_options,
+        items: update.items,
+        issues: update.issues,
+        courses_failed: update.courses_failed,
+        progress,
+    };
+    app.term_options = data.term_options.clone();
+    app.updated_at.homework = Some(now_clock());
+    let len = data.group_count(app.homework_group);
+    app.homework = match progress {
+        // 部分結果：頁面維持載入中（資料持續可顯示），終態才轉為就緒。
+        Some((done, total)) => Page::Loading {
+            note: format!(
+                "正在汇总作业（已完成 {done}/{total} 门课程，累计 {} 项）…",
+                data.items.len()
+            ),
+            stale: Some(data),
+        },
+        None => Page::Ready(data),
+    };
+    // 夾取選取索引，避免分組內容變動後越界。
+    let selected = app
+        .homework_state
+        .selected()
+        .unwrap_or(0)
+        .min(len.saturating_sub(1));
+    app.homework_state.select(Some(selected));
+    if finished {
+        app.set_message(format!(
+            "作业已更新：未完成 {unfinished} 项（用时 {:.1}s）",
+            elapsed.as_secs_f32()
+        ));
+    }
+    app.ensure_main();
+}
+
+/// 課程清單更新：以穩定的課程識別碼重新定位目前課程。
+fn apply_courses(app: &mut App, data: CoursesData) {
+    let count = data.courses.len();
+    app.lms.courses_term = data.current_term;
+    app.lms.courses = Page::Ready(data.courses);
+    app.updated_at.lms = Some(now_clock());
+    // 列表順序可能改變：以穩定的課程識別碼重新定位目前課程，否則活動層
+    // 的標題與 `o` 會指向另一門課。仍在課程層時維持既有行為（選第一項）。
+    let anchored = match (app.lms.level, app.lms.activities_course.as_deref()) {
+        (LmsLevel::Courses, _) | (_, None) => None,
+        (_, Some(id)) => app
+            .lms
+            .courses
+            .ready()
+            .and_then(|courses| courses.iter().position(|course| course.id == id)),
+    };
+    match anchored {
+        Some(index) => {
+            app.lms.course_index = index;
+            app.course_state.select(Some(index));
+        }
+        None => {
+            // 目前課程已不在新的清單中（或本來就在課程層）：回到課程列表，
+            // 不讓活動層停留在一個已不存在的課程上。
+            if app.lms.level != LmsLevel::Courses {
+                app.lms.level = LmsLevel::Courses;
+            }
+            app.lms.course_index = 0;
+            app.course_state.select(Some(0));
+        }
+    }
+    // 刻意不改動 `lms.level`（僅在目前課程消失時才回到清單）：使用者
+    // 可能在刷新完成前已進入活動或詳情層，資料更新不應把他的導航拉回。
+    app.set_message(format!("共 {count} 门课程"));
+    app.ensure_main();
+}
+
+/// 活動清單更新；遲到的舊課程回應直接忽略。
+fn apply_activities(app: &mut App, course_id: String, activities: Vec<LmsActivity>) {
+    // 遲到的回應：使用者已經切到別的課程，這批活動不屬於目前畫面。
+    if app.lms.activities_course.as_deref() != Some(course_id.as_str()) {
+        return;
+    }
+    app.lms.activities = Page::Ready(activities);
+    app.updated_at.lms = Some(now_clock());
+    // 目前分組為空時，改顯示第一個有內容的分組（依顯示順序）。
+    let current = app.lms.activity_group;
+    let counts = app.activity_group_counts();
+    let current_empty = counts
+        .iter()
+        .find(|(group, _)| *group == current)
+        .is_none_or(|(_, count)| *count == 0);
+    if current_empty && let Some((group, _)) = counts.iter().find(|(_, count)| *count > 0) {
+        app.lms.activity_group = *group;
+    }
+    app.activity_state.select(Some(0));
+    app.ensure_main();
+}
+
+/// 活動詳情更新；遲到的舊活動回應直接忽略。
+fn apply_activity_detail(app: &mut App, detail: ActivityDetailView) {
+    // 遲到的回應：使用者已經改看別的活動。
+    if app.lms.detail_activity.as_deref() != Some(detail.id.as_str()) {
+        return;
+    }
+    app.lms.detail = Page::Ready(detail);
+    app.updated_at.lms = Some(now_clock());
+    app.ensure_main();
+}
+
+/// 憑證保存失敗：解除表單的「處理中」狀態並就地顯示錯誤，否則表單會卡住
+/// 而連 Esc 都被忽略。
+fn apply_credential_save_failed(app: &mut App, message: String) {
+    match &mut app.screen {
+        Screen::Setup(form) | Screen::Unlock(form) | Screen::SettingsForm(form) => {
+            form.busy = false;
+            form.error = Some(message.clone());
+        }
+        _ => {}
+    }
+    if let Some(LoginScreen::Credentials { form, .. }) = app.login.as_deref_mut() {
+        form.busy = false;
+        form.error = Some(message.clone());
+    }
+    app.set_message(message);
+}
+
+/// 修改口令成功：離開處理中狀態並回到設定選單。
+fn apply_passphrase_updated(app: &mut App) {
+    if matches!(
+        &app.screen,
+        Screen::SettingsForm(form) if form.kind == FormKind::ChangePassphrase
+    ) {
+        app.set_screen(Screen::Settings(SettingsState::open(app.access_policy)));
+    }
+    app.set_message("加密口令已更新");
+}
+
+/// 訪問模式已保存：設定彈窗若開著，更新草稿並解除「保存中」，彈窗不關閉。
+fn apply_access_policy_updated(app: &mut App, policy: AccessPolicy) {
+    app.access_policy = policy;
+    if let Screen::Settings(state) = &mut app.screen {
+        state.draft = Some(policy);
+        state.saving = false;
+    }
+    app.set_message(format!(
+        "访问模式已切换为 {}；按 r 刷新当前页面",
+        policy.label()
+    ));
+}
+
+/// 失敗事件：標記受影響的頁面並讓相關表單／覆蓋層收斂。
+fn apply_failure(
+    app: &mut App,
+    what: String,
+    message: String,
+    target: FailedTarget,
+    site: Option<SiteKind>,
+    resource: Option<String>,
+) {
+    let login_site = site.unwrap_or(SiteKind::Attendance);
+    // 遲到的舊資源失敗：使用者已切到別的課程／活動，前一個資源的失敗
+    // 不得標記目前畫面（與成功回應的識別碼檢查一致）；但登入流程的
+    // 終態處理仍要執行（見下方），否則自動重登失敗後「正在登入」的
+    // 覆蓋層會永遠留著。
+    if !failed_resource_is_stale(app, target, resource.as_deref()) {
+        // 錯誤只標記受影響的頁面；其他頁面保持原狀。
+        app.fail_target(target, &message);
+        let text = format!("{what}失败：{message}");
+        match target {
+            FailedTarget::Login => set_login_error(app, login_site, text.clone()),
+            FailedTarget::Settings => {
+                // 設定保存失敗：保留彈窗與草稿，僅解除「保存中」；
+                // 設定表單失敗則就地顯示錯誤並恢復輸入。
+                match &mut app.screen {
+                    Screen::Settings(state) => state.saving = false,
+                    Screen::SettingsForm(form) => {
+                        form.busy = false;
+                        form.error = Some(text.clone());
+                    }
+                    _ => {}
+                }
+            }
+            FailedTarget::Credentials => {
+                // 憑證操作失敗：留在可編輯表單就地顯示錯誤；敏感欄位清空、帳號保留。
+                match &mut app.screen {
+                    Screen::Setup(form) | Screen::Unlock(form) | Screen::SettingsForm(form) => {
+                        form.busy = false;
+                        form.error = Some(text.clone());
+                        form.clear_secrets();
+                    }
+                    _ => {}
+                }
+            }
+            FailedTarget::Agreement => {
+                // 協議同意保存失敗：留在閱讀畫面就地顯示錯誤，可重試。
+                if let Some(state) = app.agreement.as_mut() {
+                    state.fail(message.clone());
+                }
+            }
+            _ => {
+                // 資料任務失敗：只標記對應頁面，不影響根畫面。
+            }
+        }
+        app.set_message(text);
+    }
+    // 登入嘗試若以失敗收場（包含自動重登連開始都做不到，例如離線），
+    // 覆蓋層必須離開「正在登入」：進度畫面只接受 q，否則使用者會被
+    // 卡在一個不會再有後續事件的畫面（連 r 都無法刷新）。
+    if matches!(app.login.as_deref(), Some(LoginScreen::Progress { .. })) {
+        app.login = Some(Box::new(LoginScreen::Failed {
+            site: login_site,
+            message: format!("登录未完成：{message}"),
+        }));
+    }
+}
+
+/// 目前時鐘（顯示更新時間用）。
+fn now_clock() -> String {
+    chrono::Local::now().format("%H:%M:%S").to_string()
+}
+
+/// 失敗事件是否屬於已經離開的資源（課程活動或活動詳情）。
+///
+/// 只有帶資源識別碼且與目前選取不符時才算遲到；其他頁面不受影響。
+fn failed_resource_is_stale(app: &App, target: FailedTarget, resource: Option<&str>) -> bool {
+    match target {
+        FailedTarget::Activities => {
+            resource.is_some_and(|id| app.lms.activities_course.as_deref() != Some(id))
+        }
+        FailedTarget::ActivityDetail => {
+            resource.is_some_and(|id| app.lms.detail_activity.as_deref() != Some(id))
+        }
+        _ => false,
+    }
+}
+
+/// 顯示登入錯誤：憑證表單就地顯示，其餘登入畫面回到失敗畫面。
+fn set_login_error(app: &mut App, site: SiteKind, message: String) {
+    match app.login.as_deref_mut() {
+        Some(LoginScreen::Credentials { form, .. }) => {
+            form.busy = false;
+            form.error = Some(message);
+        }
+        // 已有其他登入畫面（進度、驗證碼、簡訊、失敗）：就地切換成失敗畫面。
+        Some(_) => app.login = Some(Box::new(LoginScreen::Failed { site, message })),
+        // 使用者已關閉覆蓋層：不要用遲到的失敗事件把彈窗重新彈出來。
+        None => {}
+    }
+}
+
+/// 套用背景事件（測試用：供跨模組的「工作者 → 介面」串接測試呼叫）。
+#[cfg(test)]
+pub(crate) fn apply_event_for_test(app: &mut App, event: Event) {
+    let (jobs, _rx) = std::sync::mpsc::channel();
+    apply_event(app, event, &jobs);
+}
+
+#[cfg(test)]
+#[path = "tests/event_test.rs"]
+mod event_test;

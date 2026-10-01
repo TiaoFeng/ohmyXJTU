@@ -7,14 +7,16 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::config::AccessPolicy;
 use crate::domain::activity::ActivityGroup;
 use crate::domain::homework::{HomeworkInput, aggregate};
+use crate::model::{ActivityDetailView, ScheduleData};
 use crate::sites::lms::{ActivityKind, LmsActivity, LmsCourse};
 use crate::task::Job;
 use crate::tui::app::{
-    ActivityDetailView, AgreementState, App, FormKind, FormState, HomeworkData, LmsLevel,
-    LoginScreen, NavItem, Page, ScheduleData, Screen, SettingsState,
+    AgreementState, App, FormKind, FormState, HomeworkData, LmsLevel, LoginScreen, NavItem, Page,
+    Screen, SettingsState,
 };
+use crate::tui::controller::FormValues;
 
-use super::{FormValues, handle_key, handle_paste};
+use super::{handle_key, handle_paste};
 
 fn press(app: &mut App, jobs: &Sender<Job>, code: KeyCode) {
     handle_key(app, KeyEvent::new(code, KeyModifiers::NONE), jobs);
@@ -272,7 +274,7 @@ fn refresh_keeps_flow_page() {
     let mut app = App::new(AccessPolicy::Auto);
     app.set_screen(Screen::Main);
     app.nav = NavItem::Attendance;
-    app.attendance = Page::Ready(crate::tui::app::FlowData {
+    app.attendance = Page::Ready(crate::model::FlowData {
         records: Vec::new(),
         page: 3,
         total_pages: 5,
@@ -289,7 +291,7 @@ fn flow_paging_respects_bounds() {
     let mut app = App::new(AccessPolicy::Auto);
     app.set_screen(Screen::Main);
     app.nav = NavItem::Attendance;
-    app.attendance = Page::Ready(crate::tui::app::FlowData {
+    app.attendance = Page::Ready(crate::model::FlowData {
         records: Vec::new(),
         page: 1,
         total_pages: 2,
@@ -520,6 +522,10 @@ fn failed_screen_esc_closes_overlay_so_refresh_works() {
     press(&mut app, &jobs, KeyCode::Esc);
     assert!(app.login.is_none(), "esc 應關閉登入覆蓋層");
     assert!(
+        app.login_cancel_pending,
+        "esc 後應進入等待取消狀態，直到工作者回報取消完成"
+    );
+    assert!(
         matches!(rx.try_recv(), Ok(Job::CancelLogin)),
         "關閉覆蓋層應一併取消工作者端的登入流程"
     );
@@ -604,6 +610,10 @@ fn login_progress_esc_dismisses_and_cancels_login() {
     press(&mut app, &jobs, KeyCode::Esc);
 
     assert!(app.login.is_none(), "esc 应关闭登录覆盖层");
+    assert!(
+        app.login_cancel_pending,
+        "esc 后应进入等待取消状态，直到工作者回报取消完成"
+    );
     assert!(
         matches!(rx.try_recv(), Ok(Job::CancelLogin)),
         "应送出取消登录任务"
@@ -788,7 +798,7 @@ fn o_key_sends_open_activity_for_selected_item() {
         title: "作业".to_owned(),
         kind: ActivityKind::Homework,
         end_time: None,
-        submit_by_group: false,
+        submit_by_group: Some(false),
         submissions: None,
         note: None,
     });
@@ -812,7 +822,7 @@ fn homework_page(course_id: &str, activity_id: &str, submitted: usize) -> Homewo
         activity_id: activity_id.to_owned(),
         title: "第一次作业".to_owned(),
         end_time: Some("2026-10-01 23:59:59".to_owned()),
-        submit_by_group: false,
+        submit_by_group: Some(false),
         submission_count: Some(submitted),
         note: None,
     };

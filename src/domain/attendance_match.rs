@@ -1,11 +1,12 @@
 //! 課表與考勤記錄的匹配。
 //!
 //! 匹配鍵為（上課日期、起訖節次、地點、教師）；找不到對應記錄時一律回報
-//! 「沒有記錄」，由 [`display_label`] 決定顯示文字——**缺失記錄不得推斷為正常**。
+//! 「沒有記錄」，由 [`display_state`] 決定顯示狀態——**缺失記錄不得推斷為正常**。
 
 use chrono::NaiveDate;
 
 use crate::sites::attendance::{AttendanceStatus, WaterRecord};
+use crate::tone::Tone;
 
 use super::schedule::CourseSlot;
 
@@ -31,20 +32,60 @@ pub fn status_for(
         .max_by_key(|status| status.severity())
 }
 
-/// 顯示用標籤。
+/// 課程的考勤顯示狀態。
+///
+/// 除了伺服器回報的狀態外，還包含兩種由缺失記錄推導的顯示狀態：尚未發生的
+/// 課程為 [`Self::Pending`]，已發生但沒有記錄為 [`Self::Unknown`]。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LessonAttendance {
+    /// 伺服器回報的考勤狀態。
+    Recorded(AttendanceStatus),
+    /// 課程尚未發生，尚無考勤記錄（待考勤）。
+    Pending,
+    /// 課程已過但沒有對應記錄（待核实）。
+    Unknown,
+}
+
+impl LessonAttendance {
+    /// 簡體中文標籤。
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Recorded(status) => status.label(),
+            Self::Pending => "待考勤",
+            Self::Unknown => "待核实",
+        }
+    }
+
+    /// 狀態語意色。
+    pub fn tone(self) -> Tone {
+        match self {
+            Self::Recorded(status) => status.tone(),
+            Self::Pending => Tone::Accent,
+            Self::Unknown => Tone::Warning,
+        }
+    }
+}
+
+impl From<AttendanceStatus> for LessonAttendance {
+    fn from(status: AttendanceStatus) -> Self {
+        Self::Recorded(status)
+    }
+}
+
+/// 顯示用狀態。
 ///
 /// - 有記錄：顯示伺服器回報的狀態。
 /// - 無記錄且課程尚未發生：顯示「待考勤」。
 /// - 無記錄且課程已過：顯示「待核实」。
-pub fn display_label(
+pub fn display_state(
     status: Option<AttendanceStatus>,
     lesson_date: NaiveDate,
     today: NaiveDate,
-) -> &'static str {
+) -> LessonAttendance {
     match status {
-        Some(status) => status.label(),
-        None if lesson_date > today => "待考勤",
-        None => "待核实",
+        Some(status) => LessonAttendance::from(status),
+        None if lesson_date > today => LessonAttendance::Pending,
+        None => LessonAttendance::Unknown,
     }
 }
 

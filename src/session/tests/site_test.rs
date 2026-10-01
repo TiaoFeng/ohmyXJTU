@@ -6,6 +6,38 @@
 
 use super::*;
 
+/// 改址規則單一入口：只有 WebVPN 模式且校內網址才改寫。
+#[test]
+fn rewrite_for_mode_only_touches_school_urls_in_webvpn_mode() {
+    let school = "https://lms.xjtu.edu.cn/api/my-courses";
+    let external = "https://example.com/page";
+
+    assert_eq!(
+        rewrite_for_mode(AccessMode::Direct, school).unwrap(),
+        school,
+        "直连模式不應改寫"
+    );
+    assert_eq!(
+        rewrite_for_mode(AccessMode::Direct, external).unwrap(),
+        external
+    );
+    assert_eq!(
+        rewrite_for_mode(AccessMode::WebVpn, external).unwrap(),
+        external,
+        "非校內網址不應改寫"
+    );
+    let rewritten = rewrite_for_mode(AccessMode::WebVpn, school).unwrap();
+    assert!(
+        rewritten.starts_with("https://webvpn.xjtu.edu.cn/"),
+        "WebVPN 模式應改寫校內網址：{rewritten}"
+    );
+    assert_eq!(
+        rewritten,
+        crate::auth::webvpn::to_webvpn_url(school).unwrap(),
+        "應與底層轉換一致"
+    );
+}
+
 /// 以指定狀態、最終網址與內容組出回應。
 fn response(status: u16, final_url: &str, body: &str) -> HttpResponse {
     HttpResponse {

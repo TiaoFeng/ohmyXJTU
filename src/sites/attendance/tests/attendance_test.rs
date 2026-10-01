@@ -23,8 +23,9 @@ fn parses_semesters_and_term_names() {
     assert_eq!(semesters.len(), 2);
     // 數值型別的識別碼也要能解析。
     assert_eq!(semesters[0].semester_id, "123");
-    assert_eq!(semesters[0].term_name(), "2026-2027-1");
-    assert_eq!(semesters[1].term_name(), "2025-2026-3");
+    assert_eq!(semesters[0].term_name().as_deref(), Some("2026-2027-1"));
+    assert_eq!(semesters[1].term_name().as_deref(), Some("2025-2026-3"));
+    assert_eq!(semesters[0].display_label(), "2026-2027-1");
 }
 
 #[test]
@@ -148,4 +149,81 @@ fn clamps_total_pages_for_hostile_totals() {
         page_size: 20,
     };
     assert_eq!(large.total_pages(), 50_000);
+}
+
+#[test]
+fn unknown_semester_names_do_not_produce_a_zero_ordinal() {
+    let semester = Semester {
+        semester_id: "9".to_owned(),
+        academic_year: "2026-2027".to_owned(),
+        semester_name: "夏季学期".to_owned(),
+        start_date: "2026-07-01".to_owned(),
+        end_date: None,
+    };
+    assert_eq!(semester.term_name(), None, "不得臆造 2026-2027-0");
+    assert_eq!(semester.display_label(), "夏季学期", "显示时回退原始名称");
+
+    let blank = Semester {
+        semester_name: "   ".to_owned(),
+        ..semester
+    };
+    assert_eq!(blank.term_name(), None);
+    assert_eq!(blank.display_label(), "未知学期");
+}
+
+/// 達到分頁上限且仍有記錄未取完時，必須標記截斷（不得靜默傳回部分資料）。
+#[test]
+fn records_between_marks_truncation_at_the_page_cap() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use crate::config::{AccessPolicy, Config};
+    use crate::http::HttpClient;
+    use crate::http::fake::{FakeClient, json};
+    use crate::session::{AccessMode, SessionManager, SiteKind};
+
+    let requests = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&requests);
+    let client = Arc::new(FakeClient::with_responder(move |request: &HttpRequest| {
+        assert!(
+            request.url.contains("attendance-records"),
+            "不应有其他请求：{}",
+            request.url
+        );
+        counter.fetch_add(1, Ordering::SeqCst);
+        let rows: Vec<serde_json::Value> = (0..100)
+            .map(|index| {
+                serde_json::json!({
+                    "resultId": index,
+                    "startSection": 1,
+                    "endSection": 2,
+                    "courseWeek": 1,
+                    "attendanceStatus": "NORMAL",
+                    "attendanceDate": "2026-09-01",
+                })
+            })
+            .collect();
+        Ok(json(serde_json::json!({
+            "code": 0,
+            "message": "ok",
+            "data": { "rows": rows, "total": 2500 },
+        })))
+    }));
+    let direct: Arc<dyn HttpClient> = client.clone();
+    let webvpn: Arc<dyn HttpClient> = client;
+    let config = Config {
+        access_policy: AccessPolicy::Direct,
+        ..Config::default()
+    };
+    let mut session = SessionManager::with_clients(&config, direct, webvpn);
+    session.register(Box::new(AttendanceSite));
+    session.mark_logged_in(SiteKind::Attendance, AccessMode::Direct, Vec::new());
+    let mut api = AttendanceApi::new(&mut session);
+
+    let start = chrono::NaiveDate::from_ymd_opt(2026, 9, 1).expect("日期");
+    let end = chrono::NaiveDate::from_ymd_opt(2026, 9, 7).expect("日期");
+    let batch = api.records_between(start, end).expect("分页查询应成功");
+    assert!(batch.truncated, "达到分页上限时应标记截断");
+    assert_eq!(batch.records.len(), 2000, "至多 20 页 × 100 笔");
+    assert_eq!(requests.load(Ordering::SeqCst), 20, "恰应请求 20 页");
 }

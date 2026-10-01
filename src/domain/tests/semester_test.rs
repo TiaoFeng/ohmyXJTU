@@ -158,3 +158,52 @@ fn extracts_course_terms() {
         "去重並由新到舊"
     );
 }
+
+#[test]
+fn term_options_include_the_current_term_when_missing_from_courses() {
+    let courses = vec![course("1", Some("2026-1")), course("2", Some("2025-2"))];
+
+    // 目前學期不在課程中（例如沿用上次選擇）時仍須列入可選，且維持由新到舊。
+    let missing = TermCode::parse("2024-2025-2").expect("解析");
+    assert_eq!(
+        term_options(&courses, missing),
+        vec![
+            TermCode::parse("2026-2027-1").unwrap(),
+            TermCode::parse("2025-2026-2").unwrap(),
+            missing,
+        ]
+    );
+
+    // 已在課程清單中時不得重複加入。
+    let present = TermCode::parse("2026-2027-1").expect("解析");
+    assert_eq!(
+        term_options(&courses, present),
+        vec![
+            TermCode::parse("2026-2027-1").unwrap(),
+            TermCode::parse("2025-2026-2").unwrap(),
+        ]
+    );
+}
+
+#[test]
+fn splits_courses_by_term_and_counts_missing_semesters() {
+    let courses = vec![
+        course("1", Some("2026-1")),
+        course("2", Some("2025-2")),
+        course("3", None),
+        course("4", Some("bad-code")),
+        course("5", Some("2026-1")),
+    ];
+    let term = TermCode::parse("2026-2027-1").expect("解析");
+
+    let (included, skipped) = courses_for_term(courses, term);
+    assert_eq!(
+        included
+            .iter()
+            .map(|course| course.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["1", "5"],
+        "只納入目標學期的課程"
+    );
+    assert_eq!(skipped, 2, "缺少或無法解析學期的課程計入跳過數");
+}

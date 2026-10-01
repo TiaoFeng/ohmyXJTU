@@ -12,7 +12,7 @@ use ::rsa::pkcs8::EncodePublicKey as _;
 use ::rsa::{RsaPrivateKey, RsaPublicKey};
 use tempfile::TempDir;
 
-use crate::auth::rsa;
+use crate::auth::{AccountType, LoginReply, rsa};
 use crate::domain::homework::HomeworkState;
 use crate::domain::semester::{TermCode, TermSource};
 use crate::error::NetworkKind;

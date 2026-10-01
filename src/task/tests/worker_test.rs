@@ -232,7 +232,7 @@ impl Harness {
                 pending_data: VecDeque::new(),
                 generation: 0,
                 homework_epoch: 0,
-                relogin_attempts: 0,
+                relogin: ReloginBudget::default(),
                 cache: LmsCache::default(),
                 known_term: None,
                 chosen_term: None,
@@ -3817,4 +3817,14 @@ fn credential_save_failure_reports_and_keeps_the_old_vault() {
     let stored = harness.vault.load("secret123").expect("读取凭据");
     assert_eq!(stored.username, "3120000001");
     assert_eq!(stored.password, "old-password");
+}
+
+/// 自動重登額度：耗盡後不得再消耗，重置後重新取得。
+#[test]
+fn relogin_budget_exhausts_and_resets() {
+    let mut budget = ReloginBudget::default();
+    assert!(budget.try_consume(), "首次應可消耗額度");
+    assert!(!budget.try_consume(), "額度用盡後不得再消耗");
+    budget.reset();
+    assert!(budget.try_consume(), "重置後應重新取得額度");
 }

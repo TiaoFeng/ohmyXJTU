@@ -286,7 +286,7 @@ impl Worker {
 
     pub(super) fn retry_login(&mut self, site: SiteKind) -> AppResult<()> {
         // 使用者手動重試：自動重登額度重新計算。
-        self.relogin_attempts = 0;
+        self.relogin.reset();
         self.begin_login(site, None)
     }
 
@@ -304,7 +304,7 @@ impl Worker {
         self.vault.load(passphrase)?;
 
         // 使用者手動重試：自動重登額度重新計算。
-        self.relogin_attempts = 0;
+        self.relogin.reset();
         // 先記下保險庫中的舊憑證，取消或憑證被拒時才能還原（見 `discard_pending_vault`）。
         let previous = self.rollback_credentials();
         // 失敗計數以 (帳號, 後端) 為鍵保存：重複輸入同一帳號（含目前生效的仍是

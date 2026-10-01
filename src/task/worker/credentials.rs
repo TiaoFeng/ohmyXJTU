@@ -61,7 +61,7 @@ impl Worker {
         self.credentials = Some(credentials.clone());
         self.retry = None;
         self.generation += 1;
-        self.relogin_attempts = 0;
+        self.relogin.reset();
         self.pending_data.clear();
         self.cache.clear();
         // 失敗計數以 (帳號, 後端) 為鍵保存：換了帳號自然從 0 起算，
@@ -121,7 +121,7 @@ impl Worker {
         self.login_failure_key = None;
         // 換帳號後舊任務與快取一律作廢，進行中的資料任務不再回報。
         self.generation += 1;
-        self.relogin_attempts = 0;
+        self.relogin.reset();
         self.pending_data.clear();
         self.cache.clear();
         // 舊帳號的站點登入狀態與頁面資料已失效：介面應清除。
@@ -147,7 +147,7 @@ impl Worker {
         // 訪問方式變更：進行中的資料任務作廢，快取失效。
         // 保存設定本身不觸發登入，後續登入由各頁面按需進行。
         self.generation += 1;
-        self.relogin_attempts = 0;
+        self.relogin.reset();
         self.cache.clear();
         // 連線與登入態已重建：介面清除站點登入狀態；既有頁面資料仍有效，
         // 只解除因任務作廢而卡住的載入狀態。

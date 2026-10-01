@@ -6,12 +6,11 @@
 
 use chrono::{Local, NaiveDate};
 
-use crate::auth::webvpn;
 use crate::domain::semester::TermCode;
 use crate::domain::{attendance_match, schedule};
 use crate::error::{AppError, AppResult};
 use crate::model::{ActivityDetailView, FlowData, LessonEntry, ScheduleData};
-use crate::session::{AccessMode, SiteKind};
+use crate::session::SiteKind;
 use crate::sites::attendance::AttendanceApi;
 use crate::sites::lms::{self, ActivityKind, LmsActivity, LmsApi};
 use crate::task::protocol::{CoursesData, Event};
@@ -204,7 +203,7 @@ impl Worker {
             },
             ActivityKind::Material | ActivityKind::Unknown => {}
         }
-        self.rewrite_for_mode(url)
+        self.session_mut()?.rewrite_url(SiteKind::Lms, &url)
     }
 
     /// 課程內容的播放器網址（由伺服器回傳，附帶存取 token）。
@@ -212,20 +211,6 @@ impl Worker {
         let session = self.session_mut()?;
         let mut api = LmsApi::new(session);
         api.lesson_player_url(activity_id)
-    }
-
-    /// WebVPN 模式下改寫校內網址；其他訪問模式或非校內站點原樣回傳。
-    fn rewrite_for_mode(&self, url: String) -> AppResult<String> {
-        let webvpn_mode = matches!(
-            self.session
-                .as_ref()
-                .and_then(|session| session.access_mode(SiteKind::Lms)),
-            Some(AccessMode::WebVpn)
-        );
-        if webvpn_mode && webvpn::should_rewrite(&url) {
-            return webvpn::to_webvpn_url(&url);
-        }
-        Ok(url)
     }
 }
 

@@ -89,7 +89,7 @@ impl ThreadWorker {
             pending_data: VecDeque::new(),
             generation: 0,
             homework_epoch: 0,
-            relogin_attempts: 0,
+            relogin: ReloginBudget::default(),
             cache: LmsCache::default(),
             known_term: None,
             chosen_term: None,

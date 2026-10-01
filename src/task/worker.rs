@@ -53,6 +53,29 @@ use cache::LmsCache;
 ///（每次全新的載入請求都會重新獲得額度）。
 const MAX_AUTO_RELOGINS: u8 = 1;
 
+/// 自動重新登入額度：每個全新載入週期歸零，用完即停止自動重試。
+///
+/// 集中管理歸零與消耗，避免計數散落各處、新增任務路徑時漏歸零。
+#[derive(Debug, Clone, Copy, Default)]
+struct ReloginBudget(u8);
+
+impl ReloginBudget {
+    /// 重新取得完整額度（新的資料請求、使用者手動重試、切換設定）。
+    fn reset(&mut self) {
+        self.0 = 0;
+    }
+
+    /// 嘗試消耗一次額度；已達上限時回傳 `false`。
+    fn try_consume(&mut self) -> bool {
+        if self.0 < MAX_AUTO_RELOGINS {
+            self.0 += 1;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 /// 進行中的登入流程。
 struct LoginFlow {
     site: SiteKind,
@@ -140,8 +163,8 @@ struct Worker {
     /// 學期變更不影響其他資料（課程清單不變，只有分區提示改變），因此不
     /// 共用 `generation`——那會連課程／活動載入一起取消。
     homework_epoch: u64,
-    /// 本輪載入已嘗試的自動重新登入次數（全新的載入請求歸零）。
-    relogin_attempts: u8,
+    /// 自動重新登入額度（全新的載入請求歸零）。
+    relogin: ReloginBudget,
     /// 思源學堂課程／活動快取。
     cache: LmsCache,
     /// 本會話曾查得的考勤學期（供課程分區使用，不重複請求）。
@@ -179,7 +202,7 @@ pub fn spawn(config: Config, vault: Vault) -> AppResult<(Sender<Job>, Receiver<E
         pending_data: VecDeque::new(),
         generation: 0,
         homework_epoch: 0,
-        relogin_attempts: 0,
+        relogin: ReloginBudget::default(),
         cache: LmsCache::default(),
         known_term: None,
         chosen_term: None,
@@ -243,7 +266,7 @@ impl Worker {
     /// 自動重登後的重試（[`Self::finish_login`]）不走這裡，額度才會遞減；
     /// 新的刷新請求則重新獲得完整額度。
     fn run_fresh_data_job(&mut self, job: Job) {
-        self.relogin_attempts = 0;
+        self.relogin.reset();
         self.run_data_job(job);
     }
 
@@ -532,7 +555,7 @@ impl Worker {
             // 登入態失效（或剛切換路由）：記下任務，重新登入後自動重試。
             self.emit(Event::SessionExpired { site });
             self.retry = Some(job);
-            if self.relogin_attempts >= MAX_AUTO_RELOGINS {
+            if !self.relogin.try_consume() {
                 // 自動重登後站點仍回報登入態失效：停止自動重試，避免
                 //「重登→重試→再失效」的無上限迴圈，交由使用者手動重試。
                 if let Some(job) = self.retry.take() {
@@ -540,7 +563,6 @@ impl Worker {
                 }
                 return;
             }
-            self.relogin_attempts += 1;
             if let Err(login_err) = self.begin_login(site, None) {
                 // 登入流程連開始都做不到（離線、DNS 失敗、登入頁取不到…）：
                 // 原任務必須收斂（否則頁面永遠停在「載入中」）。

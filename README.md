@@ -1,3 +1,6 @@
+> [!WARNING]
+> 本软件目前为公开测试版（beta），可能存在一些未预期的问题。**不保证任何查询结果的正确性，也不代表、不接受、不提供任何形式的背书**，使用前请仔细阅读[用户协议](PRIVACY.md)。
+
 # ohmyXJTU
 
 西安交通大学工具箱（TUI）：查询课表与考勤状态、查看考勤流水、汇总思源学堂待提交作业。
@@ -56,7 +59,7 @@ just check   # fmt + clippy(-D warnings) + test + 覆盖率
 
 ## 协议
 - 本项目使用 [BSD 3-Clause License](LICENSE) 开源。
-- 使用前请仔细阅读 [隐私政策与免责声明](PRIVACY.md)。
+- 使用前请仔细阅读 [用户协议](PRIVACY.md)。
 
 ## 其它
 - 项目使用 GPT-6，DeepSeek-V4.1-Flash 构建。

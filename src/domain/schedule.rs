@@ -10,6 +10,8 @@ use crate::sites::attendance::TimetableCourse;
 const REGULAR_TERM_WEEKS: u32 = 22;
 /// 小學期（學期編號以 `-3` 結尾）的週數。
 const SHORT_TERM_WEEKS: u32 = 8;
+/// 解析週次字串時接受的最大週次（資料保護上限，非學期長度）。
+const MAX_PARSED_WEEK: u32 = 60;
 
 /// 一門課的固定時段與其上課週次。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,7 +67,7 @@ pub fn parse_weeks(text: &str) -> BTreeSet<u32> {
                     (start.trim().parse::<u32>(), end.trim().parse::<u32>())
                 {
                     // 上限保護，避免異常字串產生超大集合。
-                    for week in start.min(end)..=end.max(start).min(60) {
+                    for week in start.min(end)..=end.max(start).min(MAX_PARSED_WEEK) {
                         weeks.insert(week);
                     }
                 }

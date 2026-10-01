@@ -3,19 +3,22 @@
 use chrono::NaiveDate;
 
 use super::*;
+use crate::domain::attendance_match::LessonAttendance;
+use crate::model::{FlowData, LessonEntry, ScheduleData};
 use crate::sites::attendance::{AttendanceStatus, FlowRecord};
 use crate::sites::lms::LmsCourse;
 
-fn lesson(sections: &str) -> LessonEntry {
+fn lesson(start_section: u32, end_section: u32) -> LessonEntry {
     LessonEntry {
         date: NaiveDate::from_ymd_opt(2026, 9, 14).expect("日期"),
-        sections: sections.to_owned(),
+        sections: format!("{start_section}-{end_section}"),
+        start_section,
+        end_section,
         course_name: "高等数学".to_owned(),
         classroom: "主楼A101".to_owned(),
         teacher: "张老师".to_owned(),
         weeks: "1-16".to_owned(),
-        status: Some(AttendanceStatus::Normal),
-        label: "正常",
+        attendance: LessonAttendance::Recorded(AttendanceStatus::Normal),
     }
 }
 
@@ -25,9 +28,10 @@ fn app_with_schedule(len: usize) -> App {
         semester: "2026-2027-1".to_owned(),
         week: 2,
         lessons: (0..len)
-            .map(|index| lesson(&format!("1-{}", index + 1)))
+            .map(|index| lesson(1, u32::try_from(index + 1).expect("节次")))
             .collect(),
         skipped: 0,
+        notice: None,
     });
     app
 }
@@ -165,7 +169,10 @@ fn settings_menu_cycles() {
     assert_eq!(state.index, SettingsState::COUNT - 1);
     state.next();
     assert_eq!(state.index, 0);
-    assert_eq!(SettingsState::label(2), "访问模式");
+    assert_eq!(
+        SettingsState::label(SettingsState::POLICY_INDEX),
+        "访问模式"
+    );
 }
 
 #[test]
@@ -325,4 +332,29 @@ fn course_navigation_follows_the_displayed_partition_order() {
     // 反向：從本學期課程往前是歷史課程。
     app.select_previous();
     assert_eq!(app.page_selection(), 0);
+}
+
+/// 清空敏感欄位依「欄位角色」判定：口令與密碼清空、帳號保留。
+#[test]
+fn clear_secrets_follows_field_roles() {
+    let forms = [
+        FormState::setup(),
+        FormState::unlock(),
+        FormState::login_retry(SiteKind::Attendance),
+        FormState::change_account(),
+        FormState::change_passphrase(),
+    ];
+    for mut form in forms {
+        for field in &mut form.fields {
+            field.value.set("secret");
+        }
+        form.clear_secrets();
+        for field in &form.fields {
+            if field.role.is_secret() {
+                assert!(field.value.is_empty(), "{:?} 应清空", field.role);
+            } else {
+                assert_eq!(field.value.value(), "secret", "{:?} 应保留", field.role);
+            }
+        }
+    }
 }

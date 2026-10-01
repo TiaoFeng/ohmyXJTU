@@ -11,11 +11,15 @@ use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
+use crate::auth::rsa;
 use crate::config::{AccessPolicy, Config};
 use crate::http::fake::{FakeClient, json};
 use crate::http::{HttpClient, HttpRequest, HttpResponse};
 use crate::session::AccessMode;
+use crate::sites::attendance::{self, AttendanceSite};
+use crate::sites::lms::{self, ActivityKind, LmsSite};
 
+use super::fixtures::{LMS_POST, login_page, login_page_with_mfa, public_key_pem};
 use super::*;
 
 /// 事件等待時限。
@@ -75,7 +79,8 @@ impl ThreadWorker {
             vault,
             config,
             session: Some(session),
-            credentials: None,
+            // 憑證供自動重新登入使用（登入態失效的測試會走到 `begin_login`）。
+            credentials: Some(Credentials::new("3120000001", "old-password")),
             flow: None,
             retry: None,
             pending_vault: None,
@@ -87,7 +92,7 @@ impl ThreadWorker {
             pending_data: VecDeque::new(),
             generation: 0,
             homework_epoch: 0,
-            relogin_attempts: 0,
+            relogin: ReloginBudgets::default(),
             cache: LmsCache::default(),
             known_term: None,
             chosen_term: None,
@@ -769,4 +774,329 @@ fn set_homework_term_reloads_while_a_forced_load_runs() {
         "重載結果應為新學期"
     );
     assert_eq!(count(&seen, "/api/my-courses"), 2, "最多一次重載");
+}
+
+/// 長查詢期間按 `o` 開啟網頁：應在下一個步進邊界執行，不必等整輪載入。
+#[test]
+fn interactive_open_runs_between_homework_steps() {
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let (started_tx, started_rx) = std_channel::<()>();
+    let (release_tx, release_rx) = std_channel::<()>();
+    let started = Mutex::new(started_tx);
+    let release_rx = Mutex::new(release_rx);
+
+    let site_seen = Arc::clone(&seen);
+    let worker = ThreadWorker::new(move |request: &HttpRequest| {
+        let url = request.url.clone();
+        site_seen.lock().expect("lock").push(url.clone());
+
+        if url.ends_with("/api/my-courses") {
+            return courses_response();
+        }
+        if url.ends_with("/timetable/semesters") {
+            return semester_response();
+        }
+        if url.ends_with("/courses/1/activities") {
+            // 第一門課程的請求先阻塞，讓測試有機會插入 `o` 的開啟任務。
+            started
+                .lock()
+                .expect("lock")
+                .send(())
+                .expect("发送开始信号");
+            release_rx.lock().expect("lock").recv().expect("等待释放");
+            return Ok(json(serde_json::json!({ "activities": [] })));
+        }
+        if url.ends_with("/courses/2/activities") {
+            return Ok(json(serde_json::json!({ "activities": [] })));
+        }
+        panic!("未预期的请求：{url}");
+    });
+
+    worker.send(Job::LoadHomework { force: false });
+    started_rx
+        .recv_timeout(WAIT)
+        .expect("作业应开始查询第一门课程");
+    worker.send(Job::OpenActivity {
+        activity_id: "42".to_owned(),
+        course_id: Some("1".to_owned()),
+        kind: ActivityKind::Homework,
+    });
+    release_tx.send(()).expect("释放请求");
+
+    // 收集事件直到作業終態，再多收一輪尾隨事件：舊行為下 OpenUrl 會落在此時。
+    let mut events = Vec::new();
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .expect("作业加载应在时限内完成");
+        let event = worker.events.recv_timeout(remaining).expect("等待事件");
+        let finished = matches!(&event, Event::Homework(update) if update.progress.is_none());
+        events.push(event);
+        if finished {
+            break;
+        }
+    }
+    events.extend(worker.drain_events());
+
+    let open_at = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                Event::OpenUrl(url) if url == "https://lms.xjtu.edu.cn/course/1/homework"
+            )
+        })
+        .expect("按 o 应开启作业网页");
+    let done_at = events
+        .iter()
+        .position(|event| matches!(event, Event::Homework(update) if update.progress.is_none()))
+        .expect("作业加载应有终态事件");
+    assert!(
+        open_at < done_at,
+        "开启作业网页不应等待整轮加载：{events:?}"
+    );
+
+    let seen = seen.lock().expect("lock").clone();
+    assert!(
+        seen.iter()
+            .any(|url| url.ends_with("/courses/2/activities")),
+        "开启网页不得中断作业加载：{seen:?}"
+    );
+}
+
+/// 長查詢期間按 `o` 觸發重新登入：本輪載入暫停並重新排隊，登入取消後自動續跑。
+#[test]
+fn interactive_open_pauses_homework_until_relogin_settles() {
+    // 預先產生測試公鑰（2048 位元金鑰產生延遲變異大）：放到時限之外，
+    // 否則重新登入流程會把金鑰產生的時間算進等待預算而間歇逾時。
+    let _ = public_key_pem();
+
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let (started_tx, started_rx) = std_channel::<()>();
+    let (release_tx, release_rx) = std_channel::<()>();
+    let started = Mutex::new(started_tx);
+    let release_rx = Mutex::new(release_rx);
+
+    let site_seen = Arc::clone(&seen);
+    let worker = ThreadWorker::new(move |request: &HttpRequest| {
+        let url = request.url.clone();
+        site_seen.lock().expect("lock").push(url.clone());
+
+        if url == rsa::PUBLIC_KEY_URL {
+            return Ok(HttpResponse::new(
+                200,
+                rsa::PUBLIC_KEY_URL,
+                public_key_pem(),
+            ));
+        }
+        if url == lms::LOGIN_URL {
+            return Ok(HttpResponse::new(200, LMS_POST, login_page_with_mfa()));
+        }
+        if url.contains("/mfa/detect") {
+            return Ok(json(serde_json::json!({
+                "code": 0,
+                "data": { "state": "s-1", "need": true }
+            })));
+        }
+        if url.contains("/initByType/securephone") {
+            return Ok(json(serde_json::json!({
+                "code": 0,
+                "data": { "securePhone": "138****1234", "gid": "g-1" }
+            })));
+        }
+        if url.ends_with("/api/my-courses") {
+            return courses_response();
+        }
+        if url.ends_with("/timetable/semesters") {
+            return semester_response();
+        }
+        if url.contains("/api/lessons/7/player-url") {
+            // 播放器網址查詢回報登入態失效：最終位址落在統一認證。
+            return Ok(HttpResponse::new(
+                200,
+                "https://login.xjtu.edu.cn/cas/login?service=lms",
+                login_page(),
+            ));
+        }
+        if url.ends_with("/courses/1/activities") {
+            return Ok(json(serde_json::json!({ "activities": [] })));
+        }
+        if url.ends_with("/courses/2/activities") {
+            // 第二門課程的請求先阻塞，讓測試有機會在載入中途插入 `o`。
+            started
+                .lock()
+                .expect("lock")
+                .send(())
+                .expect("发送开始信号");
+            release_rx.lock().expect("lock").recv().expect("等待释放");
+            return Ok(json(serde_json::json!({ "activities": [] })));
+        }
+        panic!("未预期的请求：{url}");
+    });
+
+    worker.send(Job::LoadHomework { force: false });
+    started_rx
+        .recv_timeout(WAIT)
+        .expect("作业应开始查询第二门课程");
+    worker.send(Job::OpenActivity {
+        activity_id: "7".to_owned(),
+        course_id: Some("1".to_owned()),
+        kind: ActivityKind::Lesson,
+    });
+    release_tx.send(()).expect("释放请求");
+
+    // 等到登入流程停在簡訊驗證：此時本輪載入必須已暫停（沒有終態事件）。
+    let mut events = Vec::new();
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .expect("登录应停在短信验证");
+        let event = worker.events.recv_timeout(remaining).expect("等待事件");
+        let needs_mfa = matches!(&event, Event::LoginNeedsMfa { .. });
+        events.push(event);
+        if needs_mfa {
+            break;
+        }
+    }
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::Homework(update) if update.progress.is_none())),
+        "暂停生效前不得出现作业终态事件：{events:?}"
+    );
+    assert_eq!(
+        count(&seen, "/courses/2/activities"),
+        1,
+        "暂停期间不得继续查询：{:?}",
+        seen.lock().expect("lock")
+    );
+
+    // 使用者取消登入：本輪載入應自動重跑並完成（已取得的資料走快取）。
+    worker.send(Job::CancelLogin);
+    assert!(
+        wait_settled(|| count(&seen, "/timetable/semesters"), 2),
+        "取消登录后作业加载应重新开始：{:?}",
+        seen.lock().expect("lock")
+    );
+
+    let mut events = Vec::new();
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .expect("重跑应在时限内完成");
+        let event = worker.events.recv_timeout(remaining).expect("等待事件");
+        let finished = matches!(&event, Event::Homework(update) if update.progress.is_none());
+        events.push(event);
+        if finished {
+            break;
+        }
+    }
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::Homework(update) if update.progress.is_none())),
+        "重新排队的作业加载应完成：{events:?}"
+    );
+}
+
+/// 登入請求進行中按 esc 取消：遲到的開窗事件之後必須跟著取消完成，
+/// 且取消完成之後不得再出現任何開窗事件（介面已據此關閉覆蓋層）。
+#[test]
+fn cancelling_a_login_in_flight_reports_completion_after_late_events() {
+    // 預先產生測試公鑰（2048 位元金鑰產生延遲變異大）：放到時限之外。
+    let _ = public_key_pem();
+
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let (started_tx, started_rx) = std_channel::<()>();
+    let (release_tx, release_rx) = std_channel::<()>();
+    let started = Mutex::new(started_tx);
+    let release_rx = Mutex::new(release_rx);
+
+    let site_seen = Arc::clone(&seen);
+    let worker = ThreadWorker::lms_only(move |request: &HttpRequest| {
+        let url = request.url.clone();
+        site_seen.lock().expect("lock").push(url.clone());
+
+        if url == rsa::PUBLIC_KEY_URL {
+            return Ok(HttpResponse::new(
+                200,
+                rsa::PUBLIC_KEY_URL,
+                public_key_pem(),
+            ));
+        }
+        if url == attendance::LOGIN_URL {
+            return Ok(HttpResponse::new(
+                200,
+                attendance::LOGIN_URL,
+                login_page_with_mfa(),
+            ));
+        }
+        if url.contains("/mfa/detect") {
+            // MFA 偵測回應先阻塞，讓測試有機會在請求進行中送出取消。
+            started
+                .lock()
+                .expect("lock")
+                .send(())
+                .expect("发送开始信号");
+            release_rx.lock().expect("lock").recv().expect("等待释放");
+            return Ok(json(serde_json::json!({
+                "code": 0,
+                "data": { "state": "s-1", "need": true }
+            })));
+        }
+        if url.contains("/initByType/securephone") {
+            return Ok(json(serde_json::json!({
+                "code": 0,
+                "data": { "securePhone": "138****1234", "gid": "g-1" }
+            })));
+        }
+        panic!("未预期的请求：{url}");
+    });
+
+    worker.send(Job::RetryLogin {
+        site: SiteKind::Attendance,
+    });
+    started_rx.recv_timeout(WAIT).expect("应开始 MFA 检测");
+    // 請求仍在進行中：此時取消（介面按 esc 後送出的就是這個任務）。
+    worker.send(Job::CancelLogin);
+    release_tx.send(()).expect("释放请求");
+
+    // 收集事件直到取消完成。
+    let mut events = Vec::new();
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .expect("取消应在时限内完成");
+        let event = worker.events.recv_timeout(remaining).expect("等待事件");
+        let cancelled = matches!(&event, Event::LoginCancelled);
+        events.push(event);
+        if cancelled {
+            break;
+        }
+    }
+    events.extend(worker.drain_events());
+
+    let mfa_at = events
+        .iter()
+        .position(|event| matches!(event, Event::LoginNeedsMfa { .. }))
+        .expect("MFA 检测完成后应要求短信验证（迟到的开窗事件）");
+    let cancelled_at = events
+        .iter()
+        .position(|event| matches!(event, Event::LoginCancelled))
+        .expect("取消必须回报完成");
+    assert!(
+        mfa_at < cancelled_at,
+        "取消完成必须出现在迟到的登录事件之后：{events:?}"
+    );
+    assert!(
+        !events[cancelled_at + 1..].iter().any(|event| matches!(
+            event,
+            Event::LoginProgress(_) | Event::LoginNeedsCaptcha(_) | Event::LoginNeedsMfa { .. }
+        )),
+        "取消完成之后不得再出现开窗事件：{events:?}"
+    );
 }

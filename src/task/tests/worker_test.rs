@@ -3,80 +3,33 @@
 //! 以假 HTTP 客戶端離線組出「登入頁 → 公鑰 → 提交帳密 → 業務收尾」的完整流程，
 //! 驗證重新輸入的憑證只在登入成功後才寫入保險庫，且登入失敗不會遺失待重試的任務。
 
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ::rsa::pkcs8::EncodePublicKey as _;
-use ::rsa::{RsaPrivateKey, RsaPublicKey};
 use tempfile::TempDir;
 
-use crate::auth::rsa;
+use crate::auth::{AccountType, LoginReply, rsa};
+use crate::config::AccessPolicy;
+use crate::domain::attendance_match::LessonAttendance;
 use crate::domain::homework::HomeworkState;
-use crate::domain::semester::TermCode;
+use crate::domain::semester::{TermCode, TermSource};
 use crate::error::NetworkKind;
 use crate::http::fake::{FakeClient, html, json};
 use crate::http::{HttpClient, HttpRequest, HttpResponse, Method};
 use crate::session::AccessMode;
+use crate::sites::attendance::{AttendanceSite, AttendanceStatus};
+use crate::sites::lms::LmsSite;
 use crate::sites::{attendance, lms};
+use crate::task::protocol::{DataKey, HomeworkUpdate};
 use crate::tui::app::{App, LoginScreen};
 use crate::tui::text::InputLine;
 
+use super::fixtures::{
+    ATTENDANCE_EXCHANGE, ATTENDANCE_POST, ATTENDANCE_TARGET, LMS_COURSES, LMS_HOME, LMS_POST,
+    TARGET_BODY, login_page, login_page_with_mfa, public_key_pem,
+};
 use super::*;
-
-/// 考勤站點的登入頁位址（同時是帳密表單的提交位址）。
-const ATTENDANCE_POST: &str = "https://login.xjtu.edu.cn/cas/login?service=attendance";
-/// 考勤站點的登入回跳位址（帶 `loginRequestId` 與 `ticket`）。
-const ATTENDANCE_TARGET: &str =
-    "https://bk-kq.xjtu.edu.cn/sa/auth/cas/student-pc?loginRequestId=req-1&ticket=ticket-1";
-/// 考勤站點的業務 token 交換端點。
-const ATTENDANCE_EXCHANGE: &str = "https://bk-kq.xjtu.edu.cn/sa/auth/cas/exchange";
-/// 思源學堂的登入頁位址（同時是帳密表單的提交位址）。
-const LMS_POST: &str = "https://login.xjtu.edu.cn/cas/login?service=lms";
-/// 思源學堂首頁位址。
-const LMS_HOME: &str = "https://lms.xjtu.edu.cn/user/index";
-/// 思源學堂課程清單端點。
-const LMS_COURSES: &str = "https://lms.xjtu.edu.cn/api/my-courses";
-/// 登入成功後回傳的目標網頁。
-const TARGET_BODY: &str =
-    "<html><head><title>思源学堂</title></head><body>globalData</body></html>";
-
-/// 測試用公鑰 PEM（2048 位元金鑰產生較慢，整個測試二進位檔共用一份）。
-fn public_key_pem() -> &'static str {
-    static PEM: OnceLock<String> = OnceLock::new();
-    PEM.get_or_init(|| {
-        let mut rng = chacha20poly1305::aead::OsRng;
-        let private = RsaPrivateKey::new(&mut rng, 2048).expect("生成测试密钥");
-        RsaPublicKey::from(&private)
-            .to_public_key_pem(::rsa::pkcs8::LineEnding::LF)
-            .expect("导出公钥 PEM")
-    })
-}
-
-/// 統一認證登入頁（含 `execution`）；`mfa_enabled` 控制是否要求簡訊驗證。
-///
-/// 注意：原始碼中的 `\"` 會原樣出現在頁面文字裡，測試裡要改 `mfaEnabled`
-/// 必須比對整段（見下方兩個包裝函式）。
-fn login_page_with(mfa_enabled: bool) -> String {
-    format!(
-        r#"<html><head><script>
-    var globalConfig = eval('(' + "{{\"mfaEnabled\":{mfa_enabled}}}" + ')');
-    </script></head><body>
-    <input type="hidden" name="execution" value="e1s1" />
-    </body></html>"#
-    )
-}
-
-/// 統一認證登入頁（不需要簡訊驗證）。
-fn login_page() -> String {
-    login_page_with(false)
-}
-
-/// 統一認證登入頁（需要簡訊驗證）。
-fn login_page_with_mfa() -> String {
-    login_page_with(true)
-}
 
 /// 假的站點流程；`public_key_failures` 表示前幾次公鑰請求回傳非 PEM 正文。
 fn fake_flow(
@@ -228,7 +181,7 @@ impl Harness {
                 pending_data: VecDeque::new(),
                 generation: 0,
                 homework_epoch: 0,
-                relogin_attempts: 0,
+                relogin: ReloginBudgets::default(),
                 cache: LmsCache::default(),
                 known_term: None,
                 chosen_term: None,
@@ -872,8 +825,15 @@ fn cancel_login_drops_pending_login_state() {
         Some(Credentials::new("3120000001", "old-password")),
         "工作階段的憑證也應還原"
     );
+    let events = harness.drain_events();
     assert!(
-        harness.saw(|event| matches!(event, Event::Notice(_))),
+        events
+            .iter()
+            .any(|event| matches!(event, Event::LoginCancelled)),
+        "應回報取消完成，介面才能清除等待狀態"
+    );
+    assert!(
+        events.iter().any(|event| matches!(event, Event::Notice(_))),
         "應提示已取消登入"
     );
 }
@@ -1343,7 +1303,7 @@ fn attendance_term_is_none_when_not_logged_in() {
 
 #[test]
 fn parse_date_reports_category_without_echoing_server_value() {
-    let err = super::parse_date("<html>2026/09/07</html>").expect_err("应拒绝非 YYYY-MM-DD");
+    let err = super::data::parse_date("<html>2026/09/07</html>").expect_err("应拒绝非 YYYY-MM-DD");
     let message = err.to_string();
     assert!(!message.contains("2026/09/07"), "不得夹带原始值：{message}");
     assert!(!message.contains("<html>"), "不得夹带原始值：{message}");
@@ -1351,6 +1311,8 @@ fn parse_date_reports_category_without_echoing_server_value() {
 
 #[test]
 fn homework_filters_to_current_term_and_streams_progress() {
+    // 截止時間取遠未來：本測試需要「尚未截止」的作業（`待提交`），
+    // 固定的近日日期會隨時鐘走過而變成「逾期」。
     let site = Arc::new(FakeHomeworkSite {
         seen: Arc::new(Mutex::new(Vec::new())),
         courses: serde_json::json!({ "courses": [
@@ -1363,7 +1325,7 @@ fn homework_filters_to_current_term_and_streams_progress() {
                 "1",
                 serde_json::json!({ "activities": [
                     { "id": "11", "type": "homework", "title": "作业A",
-                      "end_time": "2026-10-01 23:59:59" },
+                      "end_time": "2099-12-31 23:59:59" },
                     { "id": "12", "type": "material", "title": "课件" },
                 ]}),
             ),
@@ -1372,7 +1334,7 @@ fn homework_filters_to_current_term_and_streams_progress() {
         details: vec![(
             "11",
             serde_json::json!({ "id": "11", "type": "homework", "title": "作业A",
-                "end_time": "2026-10-01 23:59:59",
+                "end_time": "2099-12-31 23:59:59",
                 "submit_by_group": true, "group_id": "7" }),
         )],
         expire_first_submission: false,
@@ -1402,7 +1364,11 @@ fn homework_filters_to_current_term_and_streams_progress() {
     assert_eq!(last.courses_included, 2);
     assert_eq!(last.items.len(), 1);
     assert_eq!(last.items[0].state, HomeworkState::Pending);
-    assert!(last.items[0].submit_by_group, "小组判定应取自活动详情");
+    assert_eq!(
+        last.items[0].submit_by_group,
+        Some(true),
+        "小组判定应取自活动详情"
+    );
 
     let seen = site.urls();
     assert!(
@@ -1856,6 +1822,435 @@ fn group_homework_without_group_id_stays_unknown_with_reason() {
 }
 
 #[test]
+fn homework_without_submit_by_group_stays_unknown_without_queries() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let tracker = Arc::clone(&seen);
+    let mut harness = harness(move |request: &HttpRequest| {
+        let url = request.url.clone();
+        tracker.lock().expect("lock").push(url.clone());
+        if url.ends_with("/api/my-courses") {
+            return Ok(json(serde_json::json!({ "courses": [
+                { "id": "1", "name": "编译原理", "semester": { "code": "2026-1" } },
+            ]})));
+        }
+        if url.ends_with("/courses/1/activities") {
+            return Ok(json(serde_json::json!({ "activities": [
+                { "id": "11", "type": "homework", "title": "缺单位作业" },
+            ]})));
+        }
+        if url.ends_with("/api/activities/11") {
+            // 详情缺少 submit_by_group：无法判定个人或小组，不得猜测。
+            return Ok(json(serde_json::json!({
+                "id": "11", "type": "homework", "title": "缺单位作业"
+            })));
+        }
+        panic!("未预期的请求：{url}");
+    });
+    harness.login_lms_only();
+    harness.worker.config.homework_term = Some("2026-2027-1".to_owned());
+
+    harness
+        .dispatch(Job::LoadHomework { force: false })
+        .expect("作业加载应当成功");
+
+    let updates = homework_updates(&mut harness);
+    let last = updates.last().expect("最终更新");
+    assert_eq!(last.items.len(), 1);
+    assert_eq!(last.items[0].state, HomeworkState::Unknown);
+    assert_eq!(last.items[0].submit_by_group, None);
+    let note = last.items[0].note.as_deref().unwrap_or_default();
+    assert!(
+        note.contains("submit_by_group"),
+        "原因应指出缺少提交单位：{note}"
+    );
+    assert_eq!(last.issues.len(), 1, "共同故障只汇总一次");
+    assert!(last.issues[0].reason.contains("submit_by_group"));
+    let seen = seen.lock().expect("lock");
+    assert!(
+        !seen.iter().any(|url| url.contains("/submission_list")),
+        "缺少提交单位时不得请求提交列表：{seen:?}"
+    );
+    assert!(
+        !seen.iter().any(|url| url.ends_with("/user/index")),
+        "缺少提交单位时不得查询用户信息：{seen:?}"
+    );
+}
+
+#[test]
+fn schedule_after_semester_end_is_empty_with_notice_and_no_queries() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let tracker = Arc::clone(&seen);
+    let today = chrono::Local::now().date_naive();
+    let start = (today - chrono::Duration::days(100)).to_string();
+    let end = (today - chrono::Duration::days(1)).to_string();
+    let mut harness = harness(move |request: &HttpRequest| {
+        let url = request.url.clone();
+        tracker.lock().expect("lock").push(url.clone());
+        if url.ends_with("/timetable/semesters") {
+            return Ok(json(serde_json::json!({ "code": 0, "data": [{
+                "semesterId": "s-1",
+                "academicYear": "2026-2027",
+                "semesterName": "第一学期",
+                "startDate": start.clone(),
+                "endDate": end.clone(),
+            }]})));
+        }
+        panic!("学期结束后不应再查询：{url}");
+    });
+    harness.login_both_sites();
+
+    harness
+        .dispatch(Job::LoadSchedule)
+        .expect("课表加载应当成功");
+
+    let schedule = harness
+        .drain_events()
+        .into_iter()
+        .find_map(|event| match event {
+            Event::Schedule(data) => Some(*data),
+            _ => None,
+        })
+        .expect("应发出课表事件");
+    assert!(schedule.lessons.is_empty(), "学期结束后不得显示旧课程");
+    let notice = schedule.notice.as_deref().unwrap_or_default();
+    assert!(notice.contains("已结束"), "应提示学期已结束：{notice}");
+    assert_eq!(schedule.semester, "2026-2027-1");
+    let seen = seen.lock().expect("lock");
+    assert!(
+        !seen.iter().any(|url| url.contains("/timetable/weekly")),
+        "学期结束后不得查询课表：{seen:?}"
+    );
+    assert!(
+        !seen.iter().any(|url| url.contains("attendance-records")),
+        "学期结束后不得查询考勤记录：{seen:?}"
+    );
+}
+
+#[test]
+fn schedule_before_semester_start_is_empty_with_notice() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let tracker = Arc::clone(&seen);
+    let today = chrono::Local::now().date_naive();
+    let start = (today + chrono::Duration::days(3)).to_string();
+    let end = (today + chrono::Duration::days(100)).to_string();
+    let mut harness = harness(move |request: &HttpRequest| {
+        let url = request.url.clone();
+        tracker.lock().expect("lock").push(url.clone());
+        if url.ends_with("/timetable/semesters") {
+            return Ok(json(serde_json::json!({ "code": 0, "data": [{
+                "semesterId": "s-1",
+                "academicYear": "2026-2027",
+                "semesterName": "第一学期",
+                "startDate": start.clone(),
+                "endDate": end.clone(),
+            }]})));
+        }
+        panic!("学期尚未开始时不应再查询：{url}");
+    });
+    harness.login_both_sites();
+
+    harness
+        .dispatch(Job::LoadSchedule)
+        .expect("课表加载应当成功");
+
+    let schedule = harness
+        .drain_events()
+        .into_iter()
+        .find_map(|event| match event {
+            Event::Schedule(data) => Some(*data),
+            _ => None,
+        })
+        .expect("应发出课表事件");
+    assert!(schedule.lessons.is_empty(), "学期开始前不得显示未来课程");
+    let notice = schedule.notice.as_deref().unwrap_or_default();
+    assert!(notice.contains("尚未开始"), "应提示尚未开始：{notice}");
+    let seen = seen.lock().expect("lock");
+    assert!(
+        !seen.iter().any(|url| url.contains("/timetable/weekly")),
+        "学期开始前不得查询课表：{seen:?}"
+    );
+    assert!(
+        !seen.iter().any(|url| url.contains("attendance-records")),
+        "学期开始前不得查询考勤记录：{seen:?}"
+    );
+}
+
+/// 產生「今天正好有一堂課」的學期測資：學期開始日為週一（貼近真實校曆），
+/// 課程排在今天的星期，`weeks` 為今天的週次。
+///
+/// 以推導取代固定值：固定「開始日＝今天減 14 天＋課程排週一」只在今天恰為
+/// 週一時語意自洽，其餘日子並未真正驗證星期與週次的對齊。
+/// 回傳（學期開始日期字串、課程的 `dayOfWeek`）。
+fn semester_fixture_meeting_today(today: chrono::NaiveDate, weeks: u32) -> (String, u32) {
+    use chrono::Datelike as _;
+
+    let monday = today - chrono::Duration::days(i64::from(today.weekday().num_days_from_monday()));
+    let start = monday - chrono::Duration::days(i64::from(weeks - 1) * 7);
+    (
+        start.to_string(),
+        today.weekday().num_days_from_monday() + 1,
+    )
+}
+
+#[test]
+fn schedule_in_session_matches_attendance_without_notice() {
+    let today = chrono::Local::now().date_naive();
+    let (start, day_of_week) = semester_fixture_meeting_today(today, 3);
+    let end = (today + chrono::Duration::days(90)).to_string();
+    let attendance_date = today.to_string();
+    let mut harness = harness(move |request: &HttpRequest| {
+        let url = request.url.clone();
+        if url.ends_with("/timetable/semesters") {
+            return Ok(json(serde_json::json!({ "code": 0, "data": [{
+                "semesterId": "s-1",
+                "academicYear": "2026-2027",
+                "semesterName": "第一学期",
+                "startDate": start.clone(),
+                "endDate": end.clone(),
+            }]})));
+        }
+        if url.contains("/timetable/weekly") {
+            return Ok(json(serde_json::json!({ "code": 0, "data": { "courses": [{
+                "courseName": "线性代数",
+                "teacherName": "张老师",
+                "classroomName": "主楼A101",
+                "dayOfWeek": day_of_week,
+                "startSection": 1,
+                "endSection": 2,
+                "weekRanges": "1-30",
+            }]}})));
+        }
+        if url.contains("attendance-records") {
+            return Ok(json(serde_json::json!({ "code": 0, "data": {
+                "rows": [{
+                    "resultId": 1,
+                    "startSection": 1,
+                    "endSection": 2,
+                    "courseWeek": 3,
+                    "classroomName": "主楼A101",
+                    "teacherName": "张老师",
+                    "attendanceStatus": "NORMAL",
+                    "attendanceDate": attendance_date.clone(),
+                }],
+                "total": 1,
+            }})));
+        }
+        panic!("未预期的请求：{url}");
+    });
+    harness.login_both_sites();
+
+    harness
+        .dispatch(Job::LoadSchedule)
+        .expect("课表加载应当成功");
+
+    let schedule = harness
+        .drain_events()
+        .into_iter()
+        .find_map(|event| match event {
+            Event::Schedule(data) => Some(*data),
+            _ => None,
+        })
+        .expect("应发出课表事件");
+    assert!(schedule.notice.is_none(), "学期内不应有提示");
+    assert_eq!(schedule.week, 3);
+    assert_eq!(schedule.lessons.len(), 1);
+    assert_eq!(schedule.lessons[0].date, today);
+    assert_eq!(
+        schedule.lessons[0].attendance,
+        LessonAttendance::Recorded(AttendanceStatus::Normal)
+    );
+}
+
+/// 第 23 週（超出假設的 22 個教學週、仍在學期內）不得回退顯示第 22 週
+/// 的舊課程：舊碼會夾取週次，讓已結課課程以錯位日期重新出現。
+#[test]
+fn schedule_does_not_fall_back_to_week_22_after_teaching_weeks() {
+    let today = chrono::Local::now().date_naive();
+    let (start, day_of_week) = semester_fixture_meeting_today(today, 23);
+    let end = (today + chrono::Duration::days(30)).to_string();
+    let mut harness = harness(move |request: &HttpRequest| {
+        let url = request.url.clone();
+        if url.ends_with("/timetable/semesters") {
+            return Ok(json(serde_json::json!({ "code": 0, "data": [{
+                "semesterId": "s-1",
+                "academicYear": "2026-2027",
+                "semesterName": "第一学期",
+                "startDate": start.clone(),
+                "endDate": end.clone(),
+            }]})));
+        }
+        if url.contains("/timetable/weekly") {
+            return Ok(json(serde_json::json!({ "code": 0, "data": { "courses": [
+                {
+                    "courseName": "已结课课程",
+                    "teacherName": "张老师",
+                    "classroomName": "主楼A101",
+                    "dayOfWeek": day_of_week,
+                    "startSection": 1,
+                    "endSection": 2,
+                    "weekRanges": "1-22",
+                },
+                {
+                    "courseName": "贯穿课程",
+                    "teacherName": "李老师",
+                    "classroomName": "主楼B202",
+                    "dayOfWeek": day_of_week,
+                    "startSection": 3,
+                    "endSection": 4,
+                    "weekRanges": "1-30",
+                },
+            ]}})));
+        }
+        if url.contains("attendance-records") {
+            return Ok(json(
+                serde_json::json!({ "code": 0, "data": { "rows": [], "total": 0 } }),
+            ));
+        }
+        panic!("未预期的请求：{url}");
+    });
+    harness.login_both_sites();
+
+    harness
+        .dispatch(Job::LoadSchedule)
+        .expect("课表加载应当成功");
+
+    let schedule = harness
+        .drain_events()
+        .into_iter()
+        .find_map(|event| match event {
+            Event::Schedule(data) => Some(*data),
+            _ => None,
+        })
+        .expect("应发出课表事件");
+    assert_eq!(
+        schedule.week, 23,
+        "第 23 週必须以真实週次呈现（不再夹取为 22）"
+    );
+    assert!(schedule.notice.is_none(), "学期内不应有提示");
+    let names: Vec<&str> = schedule
+        .lessons
+        .iter()
+        .map(|lesson| lesson.course_name.as_str())
+        .collect();
+    assert!(
+        !names.contains(&"已结课课程"),
+        "第 22 週后不得回退显示已结课课程：{names:?}"
+    );
+    assert!(
+        names.contains(&"贯穿课程"),
+        "跨越第 23 週的课程仍应显示：{names:?}"
+    );
+}
+
+/// 同日課程的節次必須以數值排序：`sections` 是顯示字串，字典序會讓
+/// 「11-12」排到「3-4」之前；跨日仍以日期為先。
+#[test]
+fn schedule_sorts_lessons_by_numeric_sections() {
+    let today = chrono::Local::now().date_naive();
+    let start = (today - chrono::Duration::days(14)).to_string();
+    let end = (today + chrono::Duration::days(90)).to_string();
+    let mut harness = harness(move |request: &HttpRequest| {
+        let url = request.url.clone();
+        if url.ends_with("/timetable/semesters") {
+            return Ok(json(serde_json::json!({ "code": 0, "data": [{
+                "semesterId": "s-1",
+                "academicYear": "2026-2027",
+                "semesterName": "第一学期",
+                "startDate": start.clone(),
+                "endDate": end.clone(),
+            }]})));
+        }
+        if url.contains("/timetable/weekly") {
+            return Ok(json(serde_json::json!({ "code": 0, "data": { "courses": [
+                {
+                    "courseName": "晚课十一",
+                    "teacherName": "张老师",
+                    "classroomName": "主楼A101",
+                    "dayOfWeek": 1,
+                    "startSection": 11,
+                    "endSection": 12,
+                    "weekRanges": "1-30",
+                },
+                {
+                    "courseName": "早课一",
+                    "teacherName": "李老师",
+                    "classroomName": "主楼A102",
+                    "dayOfWeek": 1,
+                    "startSection": 1,
+                    "endSection": 2,
+                    "weekRanges": "1-30",
+                },
+                {
+                    "courseName": "下午课",
+                    "teacherName": "王老师",
+                    "classroomName": "主楼A103",
+                    "dayOfWeek": 1,
+                    "startSection": 3,
+                    "endSection": 4,
+                    "weekRanges": "1-30",
+                },
+                {
+                    "courseName": "晚课十",
+                    "teacherName": "赵老师",
+                    "classroomName": "主楼A104",
+                    "dayOfWeek": 2,
+                    "startSection": 10,
+                    "endSection": 11,
+                    "weekRanges": "1-30",
+                },
+                {
+                    "courseName": "早课二",
+                    "teacherName": "钱老师",
+                    "classroomName": "主楼A105",
+                    "dayOfWeek": 2,
+                    "startSection": 2,
+                    "endSection": 3,
+                    "weekRanges": "1-30",
+                },
+            ]}})));
+        }
+        if url.contains("attendance-records") {
+            return Ok(json(
+                serde_json::json!({ "code": 0, "data": { "rows": [], "total": 0 } }),
+            ));
+        }
+        panic!("未预期的请求：{url}");
+    });
+    harness.login_both_sites();
+
+    harness
+        .dispatch(Job::LoadSchedule)
+        .expect("课表加载应当成功");
+
+    let schedule = harness
+        .drain_events()
+        .into_iter()
+        .find_map(|event| match event {
+            Event::Schedule(data) => Some(*data),
+            _ => None,
+        })
+        .expect("应发出课表事件");
+
+    let sections: Vec<&str> = schedule
+        .lessons
+        .iter()
+        .map(|lesson| lesson.sections.as_str())
+        .collect();
+    assert_eq!(
+        sections,
+        ["1-2", "3-4", "11-12", "2-3", "10-11"],
+        "同日节次应按数值排序，跨日以日期为先后"
+    );
+    for lesson in &schedule.lessons {
+        assert_eq!(
+            lesson.sections,
+            format!("{}-{}", lesson.start_section, lesson.end_section),
+            "显示字符串应与数值节次一致"
+        );
+    }
+}
+
+#[test]
 fn activity_detail_for_material_skips_submission_request() {
     let site = Arc::new(FakeHomeworkSite {
         seen: Arc::new(Mutex::new(Vec::new())),
@@ -2152,6 +2547,452 @@ fn opening_lesson_without_player_url_falls_back_to_home() {
             Event::OpenUrl(url) if url == "https://lms.xjtu.edu.cn"
         )),
         "應回退到思源學堂首頁"
+    );
+}
+
+#[test]
+fn only_open_activity_is_interactive() {
+    let open = Job::OpenActivity {
+        activity_id: "1".to_owned(),
+        course_id: None,
+        kind: lms::ActivityKind::Homework,
+    };
+    assert!(open.is_interactive(), "開啟活動是互動式資料任務");
+    assert!(
+        !open.is_control(),
+        "互動式任務維持資料任務語意（去重與統一重新登入重試）"
+    );
+
+    for job in [
+        Job::LoadSchedule,
+        Job::LoadHomework { force: false },
+        Job::LoadFlow { page: 1 },
+        Job::LoadCourses { force: false },
+        Job::LoadActivities {
+            course_id: "1".to_owned(),
+            force: false,
+        },
+        Job::LoadActivityDetail {
+            activity_id: "1".to_owned(),
+        },
+        Job::SetHomeworkTerm {
+            term: "2026-2027-1".to_owned(),
+        },
+        Job::CancelLogin,
+        Job::Shutdown,
+    ] {
+        assert!(!job.is_interactive(), "{job:?} 不是互動式任務");
+    }
+}
+
+#[test]
+fn flush_interactive_runs_the_queued_open_and_keeps_other_jobs() {
+    let mut harness = harness(|request: &HttpRequest| -> AppResult<HttpResponse> {
+        panic!("開啟作業網頁不需任何請求：{}", request.url);
+    });
+    harness.login_lms_only();
+    harness.worker.pending_data.push_back(Job::LoadSchedule);
+    harness.worker.pending_data.push_back(Job::OpenActivity {
+        activity_id: "5".to_owned(),
+        course_id: Some("9".to_owned()),
+        kind: lms::ActivityKind::Homework,
+    });
+
+    assert!(
+        !harness.worker.flush_interactive(),
+        "没有登入流程时不应暂停"
+    );
+    assert!(
+        harness.saw(|event| matches!(
+            event,
+            Event::OpenUrl(url) if url == "https://lms.xjtu.edu.cn/course/9/homework"
+        )),
+        "排队中的互动式任务应立即执行"
+    );
+    assert_eq!(
+        harness.worker.pending_data.len(),
+        1,
+        "非互动式任务不符条件，不得被执行"
+    );
+    assert!(matches!(harness.worker.pending_data[0], Job::LoadSchedule));
+}
+
+// ── 互動式任務執行期間的控制任務插隊窗口 ──────────────
+
+/// 把任務送進工作通道（通道注入端在建立 harness 後才會就緒）。
+fn inject(slot: &Arc<Mutex<Option<Sender<Job>>>>, job: Job) {
+    let sender = slot.lock().expect("lock").clone().expect("注入端已就绪");
+    sender.send(job).expect("注入任务");
+}
+
+/// 「互動式任務執行期間插入控制任務」的共用假站點。
+///
+/// 兩門課程（活動皆為空）與完整的思源學堂、考勤同步登入流程：課程 1 的
+/// 活動查詢把 `o`（課程內容）送進工作通道（下一輪排空時合併），思源學堂
+/// 帳密提交（`LMS_POST`）成功那一刻把 `injected` 送進通道——它會在重新
+/// 登入成功後、內層重試排空通道時被處理（本組測試要覆蓋的窗口）。
+fn harness_with_switch_during_open(injected: Job) -> Harness {
+    let slot: Arc<Mutex<Option<Sender<Job>>>> = Arc::new(Mutex::new(None));
+    let injector = Arc::clone(&slot);
+    let player_calls = AtomicUsize::new(0);
+    let harness = harness(move |request: &HttpRequest| {
+        let url = request.url.as_str();
+        if url == rsa::PUBLIC_KEY_URL {
+            return Ok(HttpResponse::new(
+                200,
+                rsa::PUBLIC_KEY_URL,
+                public_key_pem(),
+            ));
+        }
+        if url == lms::LOGIN_URL {
+            return Ok(HttpResponse::new(200, LMS_POST, login_page()));
+        }
+        if url == LMS_POST {
+            // 重新登入提交成功的當下注入控制任務。
+            inject(&injector, injected.clone());
+            return Ok(HttpResponse::new(200, LMS_HOME, TARGET_BODY));
+        }
+        if url == LMS_HOME || url.ends_with("/user/index") {
+            return Ok(HttpResponse::new(200, LMS_HOME, TARGET_BODY));
+        }
+        if url == attendance::LOGIN_URL {
+            return Ok(HttpResponse::new(200, ATTENDANCE_POST, login_page()));
+        }
+        if url == ATTENDANCE_POST {
+            return Ok(HttpResponse::new(200, ATTENDANCE_TARGET, TARGET_BODY));
+        }
+        if url == ATTENDANCE_EXCHANGE {
+            return Ok(json(serde_json::json!({
+                "code": 0,
+                "data": { "tokenValue": "token-1" }
+            })));
+        }
+        if url.ends_with("/api/my-courses") {
+            return Ok(json(serde_json::json!({ "courses": [
+                { "id": "1", "name": "编译原理", "semester": { "code": "2026-1" } },
+                { "id": "2", "name": "操作系统", "semester": { "code": "2026-1" } },
+            ]})));
+        }
+        if url.ends_with("/courses/1/activities") {
+            // 載入進行中按下 `o`。
+            inject(
+                &injector,
+                Job::OpenActivity {
+                    activity_id: "7".to_owned(),
+                    course_id: Some("1".to_owned()),
+                    kind: lms::ActivityKind::Lesson,
+                },
+            );
+            return Ok(json(serde_json::json!({ "activities": [] })));
+        }
+        if url.contains("/player-url") {
+            // 第一次查詢回報登入態失效（觸發同步重新登入）；其後恢復正常。
+            if player_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Ok(HttpResponse::new(
+                    200,
+                    "https://login.xjtu.edu.cn/cas/login?service=lms",
+                    login_page(),
+                ));
+            }
+            return Ok(json(serde_json::json!({
+                "url": "https://lms.xjtu.edu.cn/lesson/player?token=abc"
+            })));
+        }
+        panic!("未预期的请求：{url}");
+    });
+    *slot.lock().expect("lock") = Some(harness._jobs.clone());
+    harness
+}
+
+/// 互動式任務執行期間同步完成的重新登入，若在內層處理了換帳號指令，
+/// 外層不得再以舊帳號的資料繼續載入並回填畫面。
+#[test]
+fn account_switch_during_interactive_open_does_not_backfill_stale_homework() {
+    let mut harness = harness_with_switch_during_open(Job::ChangeAccount {
+        passphrase: "secret123".into(),
+        credentials: Credentials::new("3120000002", "new-password"),
+    });
+    harness.login_lms_only();
+    harness.worker.config.homework_term = Some("2026-2027-1".to_owned());
+
+    harness.worker.run_homework_job(false);
+
+    let events = harness.drain_events();
+    let switched = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                Event::SessionsCleared {
+                    account_changed: true
+                }
+            )
+        })
+        .expect("换帐号应在开启任务执行期间发生");
+    let stale: Vec<&Event> = events[switched..]
+        .iter()
+        .filter(|event| matches!(event, Event::Homework(_)))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "换帐号后不得回填旧帐号的作业数据：{stale:?}"
+    );
+    assert!(
+        harness.worker.pending_data.is_empty(),
+        "被取消的载入不得重新排队"
+    );
+}
+
+/// 執行互動式任務期間的學期切換，外層不得再以舊學期的結果回填。
+#[test]
+fn term_switch_during_interactive_open_does_not_backfill_stale_homework() {
+    let mut harness = harness_with_switch_during_open(Job::SetHomeworkTerm {
+        term: "2025-2026-2".to_owned(),
+    });
+    harness.login_lms_only();
+    harness.worker.config.homework_term = Some("2026-2027-1".to_owned());
+
+    harness.worker.run_homework_job(false);
+
+    let events = harness.drain_events();
+    let switched = events
+        .iter()
+        .position(|event| matches!(event, Event::CoursesTerm(Some(_))))
+        .expect("切换学期应在开启任务执行期间发生");
+    let stale: Vec<&Event> = events[switched..]
+        .iter()
+        .filter(|event| matches!(event, Event::Homework(_)))
+        .collect();
+    assert!(stale.is_empty(), "切换学期后不得回填旧学期结果：{stale:?}");
+    assert!(
+        matches!(
+            harness.worker.pending_data.front(),
+            Some(Job::LoadHomework { force: true })
+        ),
+        "切换学期排入的强制重载必须保留：{:?}",
+        harness.worker.pending_data
+    );
+}
+
+/// 開啟操作獨立取得自動重登額度：長載入已用掉自己的額度時，開啟仍應嘗試
+/// 重新登入，而不是直接被判定為「自動重新登入後仍然失敗」。
+#[test]
+fn interactive_open_gets_its_own_relogin_budget() {
+    let site = Arc::new(FakeHomeworkSite {
+        seen: Arc::new(Mutex::new(Vec::new())),
+        courses: serde_json::json!({ "courses": [] }),
+        activities: Vec::new(),
+        details: Vec::new(),
+        expire_first_submission: false,
+        submissions: AtomicUsize::new(0),
+        attendance_term: None,
+    });
+    let system = Arc::clone(&site);
+    let player_calls = AtomicUsize::new(0);
+    let mut harness = harness(move |request: &HttpRequest| {
+        let url = request.url.as_str();
+        if url.contains("/player-url") {
+            // 第一次回報登入態失效；重新登入後的重試恢復正常。
+            if player_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Ok(HttpResponse::new(
+                    200,
+                    "https://login.xjtu.edu.cn/cas/login?service=lms",
+                    login_page(),
+                ));
+            }
+            return Ok(json(serde_json::json!({
+                "url": "https://lms.xjtu.edu.cn/lesson/player?token=abc"
+            })));
+        }
+        system.handle(request)
+    });
+    harness.login_lms_only();
+    // 模擬作業載入與此開啟任務先前各用掉一次自動重登額度：額度按任務鍵
+    // 獨立保存，新的開啟操作應重新取得自己的額度。
+    assert!(
+        harness.worker.relogin.try_consume(&DataKey::Homework),
+        "前置：額度應可用"
+    );
+    assert!(
+        harness
+            .worker
+            .relogin
+            .try_consume(&DataKey::OpenActivity("7".to_owned())),
+        "前置：額度應可用"
+    );
+    harness.worker.pending_data.push_back(Job::OpenActivity {
+        activity_id: "7".to_owned(),
+        course_id: None,
+        kind: lms::ActivityKind::Lesson,
+    });
+
+    assert!(
+        !harness.worker.flush_interactive(),
+        "登录同步完成后不应留下进行中的流程"
+    );
+
+    let events = harness.drain_events();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::OpenUrl(url) if url == "https://lms.xjtu.edu.cn/lesson/player?token=abc"
+        )),
+        "開啟操作應獨立取得額度並在重登後重試成功：{events:?}"
+    );
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            Event::Failed { message, .. } if message.contains("自动重新登录")
+        )),
+        "不得誤報自動重登失敗：{events:?}"
+    );
+}
+
+/// 開啟操作的自動重登仍有上限：重登後再失效即停止自動重試。
+#[test]
+fn interactive_open_relogin_stays_bounded() {
+    let site = Arc::new(FakeHomeworkSite {
+        seen: Arc::new(Mutex::new(Vec::new())),
+        courses: serde_json::json!({ "courses": [] }),
+        activities: Vec::new(),
+        details: Vec::new(),
+        expire_first_submission: false,
+        submissions: AtomicUsize::new(0),
+        attendance_term: None,
+    });
+    let system = Arc::clone(&site);
+    let logins = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&logins);
+    let mut harness = harness(move |request: &HttpRequest| {
+        let url = request.url.as_str();
+        if url == lms::LOGIN_URL {
+            counter.fetch_add(1, Ordering::SeqCst);
+        }
+        if url.contains("/player-url") {
+            // 永遠回報登入態失效（包含重新登入後的重試）。
+            return Ok(HttpResponse::new(
+                200,
+                "https://login.xjtu.edu.cn/cas/login?service=lms",
+                login_page(),
+            ));
+        }
+        system.handle(request)
+    });
+    harness.login_lms_only();
+    harness.worker.pending_data.push_back(Job::OpenActivity {
+        activity_id: "7".to_owned(),
+        course_id: None,
+        kind: lms::ActivityKind::Lesson,
+    });
+
+    assert!(!harness.worker.flush_interactive());
+
+    let events = harness.drain_events();
+    assert_eq!(logins.load(Ordering::SeqCst), 1, "開啟操作至多自動重登一次");
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Failed {
+                message,
+                target: FailedTarget::ActivityOpen,
+                ..
+            } if message.contains("自动重新登录")
+        )),
+        "重登後仍失效應回報自動重登失敗：{events:?}"
+    );
+    assert!(harness.worker.retry.is_none(), "放棄後不得保留待重試任務");
+}
+
+/// 反向情境：開啟操作先重登成功後，作業載入的第一次失效仍應取得自己的
+/// 自動重登額度（兩者的額度必須互相獨立，不得被對方消耗）。
+#[test]
+fn interactive_open_relogin_does_not_consume_the_homework_budget() {
+    let site = Arc::new(FakeHomeworkSite {
+        seen: Arc::new(Mutex::new(Vec::new())),
+        courses: serde_json::json!({ "courses": [
+            { "id": "1", "name": "编译原理", "semester": { "code": "2026-1" } },
+            { "id": "2", "name": "操作系统", "semester": { "code": "2026-1" } },
+        ]}),
+        activities: vec![
+            ("1", serde_json::json!({ "activities": [] })),
+            ("2", serde_json::json!({ "activities": [] })),
+        ],
+        details: Vec::new(),
+        expire_first_submission: false,
+        submissions: AtomicUsize::new(0),
+        attendance_term: None,
+    });
+    let system = Arc::clone(&site);
+    let logins = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&logins);
+    let player_calls = AtomicUsize::new(0);
+    let activity_calls = AtomicUsize::new(0);
+    let mut harness = harness(move |request: &HttpRequest| {
+        let url = request.url.as_str();
+        if url == lms::LOGIN_URL {
+            counter.fetch_add(1, Ordering::SeqCst);
+        }
+        if url.contains("/player-url") {
+            // 第一次回報登入態失效；重新登入後恢復正常。
+            if player_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Ok(HttpResponse::new(
+                    200,
+                    "https://login.xjtu.edu.cn/cas/login?service=lms",
+                    login_page(),
+                ));
+            }
+            return Ok(json(serde_json::json!({
+                "url": "https://lms.xjtu.edu.cn/lesson/player?token=abc"
+            })));
+        }
+        if url.ends_with("/courses/1/activities") {
+            // 載入的第一次查詢在開啟操作重登之後才失效：載入仍應有自己的額度。
+            if activity_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Ok(HttpResponse::new(
+                    200,
+                    "https://login.xjtu.edu.cn/cas/login?service=lms",
+                    login_page(),
+                ));
+            }
+        }
+        system.handle(request)
+    });
+    harness.login_lms_only();
+    harness.worker.config.homework_term = Some("2026-2027-1".to_owned());
+    // 載入進行中按下 `o`：開啟任務排在步進邊界被立即執行。
+    harness.worker.pending_data.push_back(Job::OpenActivity {
+        activity_id: "7".to_owned(),
+        course_id: Some("1".to_owned()),
+        kind: lms::ActivityKind::Lesson,
+    });
+
+    harness.worker.run_homework_job(false);
+
+    let events = harness.drain_events();
+    assert_eq!(
+        logins.load(Ordering::SeqCst),
+        2,
+        "開啟與載入應各自取得一次自動重登：{events:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::OpenUrl(url) if url == "https://lms.xjtu.edu.cn/lesson/player?token=abc"
+        )),
+        "開啟操作應在重登後完成：{events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::Homework(update) if update.progress.is_none())),
+        "作業載入應在重登後完成，而不是被誤判為自動重登失敗：{events:?}"
+    );
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            Event::Failed { message, .. } if message.contains("自动重新登录")
+        )),
+        "不得誤報自動重登失敗：{events:?}"
     );
 }
 
@@ -3527,6 +4368,12 @@ fn cancel_login_settles_a_page_when_the_flow_already_ended() {
         "必須收斂等待重試的頁面，否則它會永遠停在「載入中」"
     );
     assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::LoginCancelled)),
+        "即使已經沒有進行中的登入，也必須回報取消完成，介面才能清除等待狀態"
+    );
+    assert!(
         !events.iter().any(|event| matches!(event, Event::Notice(_))),
         "沒有進行中的登入時不應覆蓋介面既有的提示"
     );
@@ -3813,4 +4660,24 @@ fn credential_save_failure_reports_and_keeps_the_old_vault() {
     let stored = harness.vault.load("secret123").expect("读取凭据");
     assert_eq!(stored.username, "3120000001");
     assert_eq!(stored.password, "old-password");
+}
+
+/// 自動重登額度：按任務鍵各自計算——同一任務耗盡後不得再消耗，重置只
+/// 影響該任務；其他任務的額度互不影響。
+#[test]
+fn relogin_budget_is_kept_per_task() {
+    let mut budget = ReloginBudgets::default();
+    let open = DataKey::OpenActivity("7".to_owned());
+    let homework = DataKey::Homework;
+
+    assert!(budget.try_consume(&open), "首次應可消耗額度");
+    assert!(!budget.try_consume(&open), "同一任務的額度用盡後不得再消耗");
+    assert!(
+        budget.try_consume(&homework),
+        "其他任務的額度互不影響（不得被對方的消耗拖累）"
+    );
+    budget.reset(&open);
+    assert!(budget.try_consume(&open), "重置後應重新取得額度");
+    budget.clear();
+    assert!(budget.try_consume(&homework), "清空後所有任務重新取得額度");
 }

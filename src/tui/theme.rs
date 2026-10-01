@@ -5,6 +5,8 @@
 
 use ratatui::style::{Color, Modifier, Style};
 
+use crate::tone::Tone;
+
 /// 顏色主題。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Theme {
@@ -83,19 +85,18 @@ impl Theme {
         Style::default().fg(self.red)
     }
 
-    /// 狀態標籤的顏色。
+    /// 狀態語意色的樣式。
     ///
-    /// 「有效」為成功綠；「未匹配」與不確定狀態（待核实／未知）為警告黃，
-    /// 兩者在列表與詳情中必須明顯可辨。
-    pub fn status_style(self, label: &str) -> Style {
-        let color = match label {
-            "正常" | "已完成" | "有效" => self.green,
-            "迟到" | "未匹配" | "待核实" | "未知" => self.yellow,
-            "缺勤" | "逾期" => self.red,
-            "请假" => self.blue,
-            "待考勤" | "待提交" => self.accent,
-            "不考勤" => self.muted,
-            _ => self.yellow,
+    /// 「有效」「正常」「已完成」為成功綠；「未匹配」與不確定狀態（待核实／
+    /// 未知）為警告黃，兩者在列表與詳情中必須明顯可辨。
+    pub fn status_style(self, tone: Tone) -> Style {
+        let color = match tone {
+            Tone::Success => self.green,
+            Tone::Warning => self.yellow,
+            Tone::Danger => self.red,
+            Tone::Info => self.blue,
+            Tone::Accent => self.accent,
+            Tone::Muted => self.muted,
         };
         Style::default().fg(color)
     }

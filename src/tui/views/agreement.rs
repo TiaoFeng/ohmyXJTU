@@ -12,8 +12,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use crate::privacy::{self, DocLine, LineKind};
+use crate::text::{split_at_display, truncate_display};
 use crate::tui::app::AgreementState;
-use crate::tui::text::{split_at_display, truncate_display};
 use crate::tui::theme::THEME;
 use crate::tui::ui::popup_surface;
 

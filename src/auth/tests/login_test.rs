@@ -376,6 +376,75 @@ fn completes_sms_mfa_flow() {
     assert_eq!(json_field(&valid, "code").as_deref(), Some("123456"));
 }
 
+/// 以指定的 `securephone/valid` 回應內容驅動登入至可核對驗證碼的狀態。
+fn mfa_driver_with_valid_data(data: serde_json::Value) -> LoginDriver {
+    let client = Arc::new(FakeClient::with_responder(move |request| {
+        match request.url.as_str() {
+            LOGIN_URL => Ok(page(POST_URL, &login_page(true, "e5s1"))),
+            rsa::PUBLIC_KEY_URL => Ok(public_key_response()),
+            MFA_DETECT_URL => Ok(ok_json(
+                MFA_DETECT_URL,
+                serde_json::json!({ "code": 0, "data": { "state": "mfa-state-1", "need": true } }),
+            )),
+            MFA_SEND_URL => Ok(ok_json(MFA_SEND_URL, serde_json::json!({ "code": 0 }))),
+            MFA_VALID_URL => Ok(ok_json(
+                MFA_VALID_URL,
+                serde_json::json!({ "code": 0, "data": data.clone() }),
+            )),
+            _ if request.url.contains("/cas/mfa/initByType/securephone") => Ok(ok_json(
+                MFA_DETECT_URL,
+                serde_json::json!({
+                    "code": 0,
+                    "data": { "gid": "gid-1", "securePhone": "138****8888" }
+                }),
+            )),
+            _ => Ok(page(TARGET_URL, TARGET_PAGE)),
+        }
+    }));
+
+    let mut driver = driver(&client);
+    assert_eq!(
+        driver
+            .start(&credentials(), AccountType::Undergraduate)
+            .unwrap(),
+        LoginReply::NeedMfa
+    );
+    driver.mfa_phone().expect("读取绑定手机号");
+    driver
+}
+
+#[test]
+fn verify_mfa_code_accepts_success_codes_and_rejects_the_rest() {
+    // 成功：整數 2、字串 "2"、null 與缺少欄位（與參考實作的 status not in (2, "2") 一致）。
+    for data in [
+        serde_json::json!({ "status": 2 }),
+        serde_json::json!({ "status": "2" }),
+        serde_json::json!({ "status": null }),
+        serde_json::json!({}),
+    ] {
+        let mut driver = mfa_driver_with_valid_data(data.clone());
+        driver
+            .verify_mfa_code("123456")
+            .unwrap_or_else(|err| panic!("{data} 應視為通過：{err}"));
+    }
+
+    // 失敗：其他整數與字串（非整數的失敗狀態先前會被誤判為成功）。
+    for data in [
+        serde_json::json!({ "status": 3 }),
+        serde_json::json!({ "status": "3" }),
+        serde_json::json!({ "status": "error" }),
+    ] {
+        let mut driver = mfa_driver_with_valid_data(data.clone());
+        let Err(err) = driver.verify_mfa_code("123456") else {
+            panic!("{data} 應視為失敗");
+        };
+        assert!(
+            matches!(err, AppError::VerificationRetry(_)),
+            "{data} 應為可重試的驗證碼錯誤：{err}"
+        );
+    }
+}
+
 #[test]
 fn selects_undergraduate_account() {
     let choice_page = std::fs::read_to_string(format!(
@@ -451,10 +520,83 @@ fn completes_safety_verify_flow() {
             .unwrap(),
         LoginReply::NeedMfa
     );
+    assert!(
+        !driver.used_existing_session(),
+        "提交帳密後才出現的二次認證不得標記為沿用既有會話"
+    );
     assert_eq!(driver.send_mfa_code().unwrap(), "139****9999");
     driver.verify_mfa_code("654321").expect("核验验证码");
     assert_eq!(driver.resume().unwrap(), LoginReply::Success);
 
+    let verify = client
+        .requests()
+        .into_iter()
+        .find(|request| request.url == safety_url && request.form_field("secState").is_some())
+        .expect("二次认证提交");
+    assert_eq!(verify.form_field("secState"), Some("sec-state-fixture"));
+    assert_eq!(
+        verify.form_field("execution"),
+        Some("e4s1-fixture-execution")
+    );
+}
+
+/// 初始頁即二次認證：必須直接進入安全驗證流程，不抓公鑰、不做 MFA 偵測、
+/// 也不提交帳密（對齊參考實作 `_safety_verify_response` 的處理）。
+#[test]
+fn enters_the_safety_verify_flow_when_the_initial_page_is_safety_verify() {
+    let safety_page = std::fs::read_to_string(format!(
+        "{}/tests/fixtures/safety_verify_page.html",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .expect("读取二次认证 fixture");
+    let safety_url = "https://login.xjtu.edu.cn/cas/sec/verify";
+
+    let client = Arc::new(FakeClient::with_responder(move |request| {
+        match request.url.as_str() {
+            // 登入入口直接落在二次認證頁（CAS 會話仍在、但要求二次認證）。
+            LOGIN_URL => Ok(page(safety_url, &safety_page)),
+            url if url == safety_url => Ok(page(TARGET_URL, TARGET_PAGE)),
+            _ if request.url.contains("/cas/sec/initByType/securephone") => Ok(ok_json(
+                safety_url,
+                serde_json::json!({
+                    "code": 0,
+                    "data": { "gid": "gid-3", "securePhone": "137****7777" }
+                }),
+            )),
+            MFA_VALID_URL => Ok(ok_json(
+                MFA_VALID_URL,
+                serde_json::json!({ "code": 0, "data": { "status": 2 } }),
+            )),
+            MFA_SEND_URL => Ok(ok_json(MFA_SEND_URL, serde_json::json!({ "code": 0 }))),
+            // 抓公鑰或呼叫 `/cas/mfa/detect` 代表走了錯誤的帳密登入流程。
+            other => panic!("初始二次認證不得请求：{other}"),
+        }
+    }));
+
+    let mut driver = driver(&client);
+    assert_eq!(
+        driver
+            .start(&credentials(), AccountType::Undergraduate)
+            .unwrap(),
+        LoginReply::NeedMfa,
+        "初始頁即二次認證時應直接進入安全驗證流程"
+    );
+    assert!(
+        driver.used_existing_session(),
+        "未提交帳密的二次認證流程必須標記為沿用既有會話"
+    );
+    assert_eq!(driver.mfa_phone().unwrap(), "137****7777");
+    assert_eq!(driver.send_mfa_code().unwrap(), "137****7777");
+    driver.verify_mfa_code("654321").expect("核验验证码");
+    assert_eq!(driver.resume().unwrap(), LoginReply::Success);
+
+    // 整個流程完全沒有提交帳密。
+    assert!(
+        client.requests().iter().all(|request| {
+            request.form_field("username").is_none() && request.form_field("password").is_none()
+        }),
+        "初始二次認證流程不得提交帳密"
+    );
     let verify = client
         .requests()
         .into_iter()

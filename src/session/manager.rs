@@ -12,7 +12,7 @@ use crate::http::{HttpClient, HttpRequest, HttpResponse, ReqwestClient};
 
 use super::site::{
     AccessMode, DESKTOP_USER_AGENT, PostLogin, SiteAdapter, SiteKind, SiteLogin, SitePolicy,
-    WEBVPN_LOGIN_URL, is_auth_failure, merge_headers, unknown_site,
+    WEBVPN_LOGIN_URL, is_auth_failure, merge_headers, rewrite_for_mode, unknown_site,
 };
 
 /// 校內網路探測網址（考勤系統登入入口；校外無法直連）。
@@ -363,11 +363,7 @@ impl SessionManager {
         }
 
         let policy = self.policy_for(site)?;
-        let login_url = if mode == AccessMode::WebVpn && webvpn::should_rewrite(policy.login_url) {
-            webvpn::to_webvpn_url(policy.login_url)?
-        } else {
-            policy.login_url.to_owned()
-        };
+        let login_url = rewrite_for_mode(mode, policy.login_url)?;
         let client = self.backend(mode).client.clone();
         let driver = LoginDriver::new(client, &login_url, &self.visitor_id)?;
         self.pending = Some((site, PendingStage::Site));
@@ -451,6 +447,16 @@ impl SessionManager {
         );
     }
 
+    /// 依站點目前的訪問方式改寫網址（供開啟外部網頁等使用）。
+    ///
+    /// 站點尚未登入、訪問方式未知時原樣回傳（瀏覽器開啟後由使用者自行登入）。
+    pub fn rewrite_url(&self, site: SiteKind, url: &str) -> AppResult<String> {
+        match self.access_mode(site) {
+            Some(mode) => rewrite_for_mode(mode, url),
+            None => Ok(url.to_owned()),
+        }
+    }
+
     /// 將請求網址與 `Referer` 改寫為 WebVPN 網址。
     fn rewrite_for_webvpn(&self, request: HttpRequest) -> AppResult<HttpRequest> {
         let mut headers: Vec<(String, String)> = request
@@ -462,12 +468,15 @@ impl SessionManager {
         if let Some(referer) = request.header_value("Referer").map(str::to_owned)
             && webvpn::should_rewrite(&referer)
         {
-            headers.push(("Referer".to_owned(), webvpn::to_webvpn_url(&referer)?));
+            headers.push((
+                "Referer".to_owned(),
+                rewrite_for_mode(AccessMode::WebVpn, &referer)?,
+            ));
         }
 
         Ok(HttpRequest {
             method: request.method,
-            url: webvpn::to_webvpn_url(&request.url)?,
+            url: rewrite_for_mode(AccessMode::WebVpn, &request.url)?,
             headers,
             body: request.body,
             timeout: request.timeout,

@@ -4,10 +4,10 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{List, ListItem, Paragraph};
 
+use crate::text::display_width;
 use crate::tui::app::{App, LmsLevel, NavItem, Screen};
-use crate::tui::text::display_width;
 use crate::tui::theme::THEME;
 use crate::tui::views::{content, settings, term_picker};
 
@@ -37,6 +37,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
 /// 側邊欄載入指示燈的固定寬度（三個點＋一個空白）。
 const LOADING_DOTS_WIDTH: usize = 4;
+
+/// 載入指示的三點動畫相位：每幀前進一格並循環，空相位形成閃爍。
+const LOADING_DOTS_FRAMES: &[&str] = &["", ".", "..", "..."];
 
 fn draw_sidebar(frame: &mut Frame, area: Rect, app: &mut App) {
     let inner_width = usize::from(area.width.saturating_sub(2));
@@ -87,12 +90,8 @@ fn nav_item(nav: NavItem, app: &App, text_start: usize) -> ListItem<'static> {
 
 /// 載入指示的三點動畫：每幀前進一格並循環，空相位形成閃爍。
 fn loading_dots(tick: u64) -> &'static str {
-    match tick % 4 {
-        0 => "",
-        1 => ".",
-        2 => "..",
-        _ => "...",
-    }
+    let phase = usize::try_from(tick % LOADING_DOTS_FRAMES.len() as u64).unwrap_or(0);
+    LOADING_DOTS_FRAMES[phase]
 }
 
 fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
@@ -142,19 +141,4 @@ fn hints(app: &App) -> String {
         }
     }
     text
-}
-
-/// 供其他繪製函式使用的清單狀態包裝。
-pub fn render_list(
-    frame: &mut Frame,
-    area: Rect,
-    title: &str,
-    items: Vec<ListItem<'static>>,
-    state: &mut ListState,
-) {
-    let list = List::new(items)
-        .block(THEME.block(title))
-        .highlight_style(THEME.highlight_style())
-        .highlight_symbol("▍");
-    frame.render_stateful_widget(list, area, state);
 }

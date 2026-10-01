@@ -13,7 +13,7 @@ use std::sync::OnceLock;
 
 use unicode_segmentation::UnicodeSegmentation as _;
 
-use crate::tui::text::display_width;
+use crate::text::display_width;
 
 mod table;
 

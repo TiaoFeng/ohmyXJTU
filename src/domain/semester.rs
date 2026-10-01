@@ -194,6 +194,34 @@ pub fn course_terms(courses: &[LmsCourse]) -> Vec<TermCode> {
     terms
 }
 
+/// 選擇器可用的學期：課程中出現過的學期，另含目前學期（可能來自記憶或本次
+/// 選擇而不在課程清單中）。
+pub fn term_options(courses: &[LmsCourse], term: TermCode) -> Vec<TermCode> {
+    let mut options = course_terms(courses);
+    if !options.contains(&term) {
+        options.push(term);
+        options.sort_unstable_by(|left, right| right.cmp(left));
+    }
+    options
+}
+
+/// 依學期將課程分為「納入本輪查詢」與「缺少學期資訊」兩類。
+///
+/// 回傳（納入的課程、缺少學期資訊而未納入的筆數）；其他學期的課程不參與
+/// 本輪查詢，也不計入回傳的筆數。
+pub fn courses_for_term(courses: Vec<LmsCourse>, term: TermCode) -> (Vec<LmsCourse>, usize) {
+    let mut included: Vec<LmsCourse> = Vec::new();
+    let mut skipped = 0_usize;
+    for course in courses {
+        match course_term(&course) {
+            Some(code) if code == term => included.push(course),
+            Some(_) => {}
+            None => skipped += 1,
+        }
+    }
+    (included, skipped)
+}
+
 #[cfg(test)]
 #[path = "tests/semester_test.rs"]
 mod semester_test;

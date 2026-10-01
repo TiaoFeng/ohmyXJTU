@@ -12,7 +12,7 @@ pub fn fill(buf: &mut [u8]) -> AppResult<()> {
 }
 
 /// 產生指定長度的隨機位元組。
-pub fn bytes(len: usize) -> AppResult<Vec<u8>> {
+fn bytes(len: usize) -> AppResult<Vec<u8>> {
     let mut buf = vec![0_u8; len];
     fill(&mut buf)?;
     Ok(buf)

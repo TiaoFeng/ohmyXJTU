@@ -100,14 +100,33 @@ fn missing_record_is_never_reported_as_normal() {
     let today = date("2026-09-20");
 
     // 過去的課沒有記錄 → 待核实（不得推斷為正常）。
-    assert_eq!(display_label(None, date("2026-09-14"), today), "待核实");
+    assert_eq!(
+        display_state(None, date("2026-09-14"), today),
+        LessonAttendance::Unknown
+    );
     // 未來的課沒有記錄 → 待考勤。
-    assert_eq!(display_label(None, date("2026-09-21"), today), "待考勤");
+    assert_eq!(
+        display_state(None, date("2026-09-21"), today),
+        LessonAttendance::Pending
+    );
     // 有記錄 → 顯示伺服器回報的狀態。
     assert_eq!(
-        display_label(Some(AttendanceStatus::Absent), date("2026-09-14"), today),
-        "缺勤"
+        display_state(Some(AttendanceStatus::Absent), date("2026-09-14"), today),
+        LessonAttendance::Recorded(AttendanceStatus::Absent)
     );
+}
+
+#[test]
+fn lesson_attendance_labels_and_tones_are_stable() {
+    // 合成狀態：待考勤為強調色、待核实為警告色。
+    assert_eq!(LessonAttendance::Pending.label(), "待考勤");
+    assert_eq!(LessonAttendance::Pending.tone(), Tone::Accent);
+    assert_eq!(LessonAttendance::Unknown.label(), "待核实");
+    assert_eq!(LessonAttendance::Unknown.tone(), Tone::Warning);
+    // 有記錄時沿用伺服器狀態的標籤與語意色。
+    let recorded = LessonAttendance::Recorded(AttendanceStatus::Absent);
+    assert_eq!(recorded.label(), "缺勤");
+    assert_eq!(recorded.tone(), Tone::Danger);
 }
 
 #[test]

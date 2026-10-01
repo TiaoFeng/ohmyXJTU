@@ -15,7 +15,7 @@ fn input(title: &str, end_time: Option<&str>, submission_count: Option<usize>) -
         activity_id: format!("a-{title}"),
         title: title.to_owned(),
         end_time: end_time.map(str::to_owned),
-        submit_by_group: false,
+        submit_by_group: Some(false),
         submission_count,
         note: None,
     }
@@ -143,7 +143,7 @@ fn groups_cycle_in_display_order() {
 
 #[test]
 fn parses_lms_time_formats() {
-    let offset = 8 * 3600;
+    let offset = CAMPUS_UTC_OFFSET_SECS;
     assert_eq!(
         parse_time(Some("2026-09-28T23:59:00+08:00")).map(|time| time.offset().local_minus_utc()),
         Some(offset)
@@ -163,7 +163,11 @@ fn normalizes_utc_lms_times_to_school_offset() {
     // 思源學堂以 UTC（`Z` 或 `+00:00`）傳送時間；解析結果一律換算為 +08:00。
     for value in ["2026-10-12T15:59:59.000Z", "2026-10-12T15:59:59+00:00"] {
         let time = parse_time(Some(value)).expect("应可解析");
-        assert_eq!(time.offset().local_minus_utc(), 8 * 3600, "{value}");
+        assert_eq!(
+            time.offset().local_minus_utc(),
+            CAMPUS_UTC_OFFSET_SECS,
+            "{value}"
+        );
         assert_eq!(
             time.format("%Y-%m-%d %H:%M").to_string(),
             "2026-10-12 23:59",

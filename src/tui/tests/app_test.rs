@@ -327,3 +327,28 @@ fn course_navigation_follows_the_displayed_partition_order() {
     app.select_previous();
     assert_eq!(app.page_selection(), 0);
 }
+
+/// 清空敏感欄位依「欄位角色」判定：口令與密碼清空、帳號保留。
+#[test]
+fn clear_secrets_follows_field_roles() {
+    let forms = [
+        FormState::setup(),
+        FormState::unlock(),
+        FormState::login_retry(SiteKind::Attendance),
+        FormState::change_account(),
+        FormState::change_passphrase(),
+    ];
+    for mut form in forms {
+        for field in &mut form.fields {
+            field.value.set("secret");
+        }
+        form.clear_secrets();
+        for field in &form.fields {
+            if field.role.is_secret() {
+                assert!(field.value.is_empty(), "{:?} 应清空", field.role);
+            } else {
+                assert_eq!(field.value.value(), "secret", "{:?} 应保留", field.role);
+            }
+        }
+    }
+}

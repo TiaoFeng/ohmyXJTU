@@ -9,7 +9,9 @@ use std::sync::mpsc::Sender;
 use crate::credentials::{Credentials, Secret};
 use crate::sites::lms::ActivityKind;
 use crate::task::Job;
-use crate::tui::app::{App, FormKind, FormState, LmsLevel, NavItem, Screen, TermPickerState};
+use crate::tui::app::{
+    App, FieldRole, FormKind, FormState, LmsLevel, NavItem, Screen, TermPickerState,
+};
 
 /// 加密口令的最短長度。
 ///
@@ -419,44 +421,35 @@ impl std::fmt::Debug for FormValues {
 }
 
 impl FormValues {
+    /// 依欄位角色取值；欄位順序與標籤的調整不影響對應。
     pub(super) fn from_form(form: &FormState) -> Self {
-        let at = |index: usize| {
-            form.fields
-                .get(index)
-                .map_or_else(String::new, |field| field.value.value().to_owned())
-        };
-        let secret_at = |index: usize| Secret::from(at(index));
-        match form.kind {
-            FormKind::Setup => Self {
-                passphrase: secret_at(0),
-                passphrase_confirm: secret_at(1),
-                username: at(2),
-                password: secret_at(3),
-                password_confirm: secret_at(4),
-            },
-            FormKind::Unlock => Self {
-                passphrase: secret_at(0),
-                ..Self::default()
-            },
-            FormKind::LoginRetry(_) => Self {
-                username: at(0),
-                password: secret_at(1),
-                passphrase: secret_at(2),
-                ..Self::default()
-            },
-            FormKind::ChangeAccount => Self {
-                passphrase: secret_at(0),
-                username: at(1),
-                password: secret_at(2),
-                password_confirm: secret_at(3),
-                ..Self::default()
-            },
-            FormKind::ChangePassphrase => Self {
-                passphrase: secret_at(0),
-                password: secret_at(1),
-                password_confirm: secret_at(2),
-                ..Self::default()
-            },
+        let mut values = Self::default();
+        for field in &form.fields {
+            let text = field.value.value();
+            match field.role {
+                FieldRole::Passphrase | FieldRole::OldPassphrase => {
+                    values.passphrase = Secret::from(text);
+                }
+                FieldRole::PassphraseConfirm => {
+                    values.passphrase_confirm = Secret::from(text);
+                }
+                FieldRole::Username | FieldRole::NewUsername => {
+                    values.username = text.to_owned();
+                }
+                FieldRole::Password | FieldRole::NewPassword | FieldRole::NewPassphrase => {
+                    values.password = Secret::from(text);
+                }
+                FieldRole::PasswordConfirm
+                | FieldRole::NewPasswordConfirm
+                | FieldRole::NewPassphraseConfirm => {
+                    values.password_confirm = Secret::from(text);
+                }
+            }
         }
+        values
     }
 }
+
+#[cfg(test)]
+#[path = "tests/controller_test.rs"]
+mod controller_test;

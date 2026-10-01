@@ -342,9 +342,81 @@ pub enum FormKind {
     ChangePassphrase,
 }
 
+impl FormKind {
+    /// 表單欄位表（角色＋標籤）；順序即畫面順序，是欄位的單一來源。
+    fn fields(self) -> &'static [(FieldRole, &'static str)] {
+        match self {
+            Self::Setup => &[
+                (FieldRole::Passphrase, "加密口令"),
+                (FieldRole::PassphraseConfirm, "确认口令"),
+                (FieldRole::Username, "账号"),
+                (FieldRole::Password, "密码"),
+                (FieldRole::PasswordConfirm, "确认密码"),
+            ],
+            Self::Unlock => &[(FieldRole::Passphrase, "加密口令")],
+            Self::LoginRetry(_) => &[
+                (FieldRole::Username, "账号"),
+                (FieldRole::Password, "密码"),
+                (FieldRole::Passphrase, "加密口令"),
+            ],
+            Self::ChangeAccount => &[
+                (FieldRole::OldPassphrase, "原加密口令"),
+                (FieldRole::NewUsername, "新账号"),
+                (FieldRole::NewPassword, "新密码"),
+                (FieldRole::NewPasswordConfirm, "确认新密码"),
+            ],
+            Self::ChangePassphrase => &[
+                (FieldRole::OldPassphrase, "原加密口令"),
+                (FieldRole::NewPassphrase, "新加密口令"),
+                (FieldRole::NewPassphraseConfirm, "确认新口令"),
+            ],
+        }
+    }
+}
+
+/// 表單欄位的語意角色。
+///
+/// 角色決定是否遮蔽（[`FieldRole::is_secret`]）、失敗時是否清空，以及
+/// [`crate::tui::controller::FormValues`] 取值的對應位置——調整欄位順序或
+/// 標籤都不會讓值落進錯誤的欄位。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldRole {
+    /// 保險庫加密口令（建立、解鎖、驗證）。
+    Passphrase,
+    /// 加密口令的確認輸入。
+    PassphraseConfirm,
+    /// 帳號。
+    Username,
+    /// 帳號密碼。
+    Password,
+    /// 密碼的確認輸入。
+    PasswordConfirm,
+    /// 修改前的原加密口令。
+    OldPassphrase,
+    /// 新的加密口令。
+    NewPassphrase,
+    /// 新加密口令的確認輸入。
+    NewPassphraseConfirm,
+    /// 新的帳號。
+    NewUsername,
+    /// 新的帳號密碼。
+    NewPassword,
+    /// 新密碼的確認輸入。
+    NewPasswordConfirm,
+}
+
+impl FieldRole {
+    /// 是否為敏感欄位（遮蔽輸入、失敗時清空）。
+    pub fn is_secret(self) -> bool {
+        !matches!(self, Self::Username | Self::NewUsername)
+    }
+}
+
 /// 表單欄位。
 #[derive(Debug, Clone)]
 pub struct FormField {
+    /// 欄位語意角色。
+    pub role: FieldRole,
     /// 欄位標籤。
     pub label: &'static str,
     /// 欄位內容。
@@ -369,105 +441,50 @@ pub struct FormState {
 impl FormState {
     /// 首次設定表單。
     pub fn setup() -> Self {
-        Self::new(
-            FormKind::Setup,
-            [
-                ("加密口令", true),
-                ("确认口令", true),
-                ("账号", false),
-                ("密码", true),
-                ("确认密码", true),
-            ]
-            .into_iter()
-            .map(|(label, masked)| FormField {
-                label,
-                value: InputLine::new().masked(masked),
-            })
-            .collect(),
-        )
+        Self::new(FormKind::Setup)
     }
 
     /// 解鎖表單。
     pub fn unlock() -> Self {
-        Self::new(
-            FormKind::Unlock,
-            vec![FormField {
-                label: "加密口令",
-                value: InputLine::new().masked(true),
-            }],
-        )
+        Self::new(FormKind::Unlock)
     }
 
     /// 登入失敗後重新輸入帳號密碼（密碼與口令皆遮蔽，欄位一律留空）。
     ///
     /// `site` 為原本失敗的站點：重試沿用同一個站點，不被另一個站點的可達性牽制。
     pub fn login_retry(site: SiteKind) -> Self {
-        Self::new(
-            FormKind::LoginRetry(site),
-            [("账号", false), ("密码", true), ("加密口令", true)]
-                .into_iter()
-                .map(|(label, masked)| FormField {
-                    label,
-                    value: InputLine::new().masked(masked),
-                })
-                .collect(),
-        )
+        Self::new(FormKind::LoginRetry(site))
     }
 
     /// 修改帳號表單。
     pub fn change_account() -> Self {
-        Self::new(
-            FormKind::ChangeAccount,
-            [
-                ("原加密口令", true),
-                ("新账号", false),
-                ("新密码", true),
-                ("确认新密码", true),
-            ]
-            .into_iter()
-            .map(|(label, masked)| FormField {
-                label,
-                value: InputLine::new().masked(masked),
-            })
-            .collect(),
-        )
+        Self::new(FormKind::ChangeAccount)
     }
 
     /// 修改加密口令表單。
     pub fn change_passphrase() -> Self {
-        Self::new(
-            FormKind::ChangePassphrase,
-            [
-                ("原加密口令", true),
-                ("新加密口令", true),
-                ("确认新口令", true),
-            ]
-            .into_iter()
-            .map(|(label, masked)| FormField {
-                label,
-                value: InputLine::new().masked(masked),
-            })
-            .collect(),
-        )
+        Self::new(FormKind::ChangePassphrase)
     }
 
     /// 清空敏感欄位（口令與密碼）；保留非敏感輸入（例如帳號）。
     pub fn clear_secrets(&mut self) {
-        let sensitive: &[usize] = match self.kind {
-            FormKind::Setup => &[0, 1, 3, 4],
-            FormKind::Unlock => &[0],
-            FormKind::LoginRetry(_) => &[1, 2],
-            FormKind::ChangeAccount => &[0, 2, 3],
-            FormKind::ChangePassphrase => &[0, 1, 2],
-        };
-        for index in sensitive {
-            if let Some(field) = self.fields.get_mut(*index) {
+        for field in &mut self.fields {
+            if field.role.is_secret() {
                 field.value.clear();
             }
         }
     }
 
-    fn new(kind: FormKind, fields: Vec<FormField>) -> Self {
+    fn new(kind: FormKind) -> Self {
+        let fields = kind
+            .fields()
+            .iter()
+            .map(|&(role, label)| FormField {
+                role,
+                label,
+                value: InputLine::new().masked(role.is_secret()),
+            })
+            .collect();
         Self {
             kind,
             fields,

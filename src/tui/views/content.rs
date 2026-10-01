@@ -10,12 +10,11 @@ use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
 use crate::domain::activity::ActivityGroup;
 use crate::domain::course_list::{self, CourseRow};
 use crate::domain::homework::{HomeworkGroup, HomeworkItem, parse_time};
+use crate::model::{ActivityDetailView, LessonEntry};
 use crate::sites::attendance::FlowRecord;
 use crate::sites::lms::{ActivityKind, LmsActivity};
-use crate::tui::app::{
-    ActivityDetailView, App, HomeworkData, LessonEntry, LmsLevel, NavItem, Page,
-};
-use crate::tui::text::{display_width, fit_display, fit_display_start};
+use crate::text::{display_width, fit_display, fit_display_start};
+use crate::tui::app::{App, HomeworkData, LmsLevel, NavItem, Page};
 use crate::tui::theme::THEME;
 use crate::tui::views::main_view::render_list;
 

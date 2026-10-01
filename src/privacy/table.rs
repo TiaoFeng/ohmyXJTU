@@ -5,7 +5,7 @@
 //! 讓長內容（例如 §5.1 的「会上传的内容」欄）仍看得出所屬欄位。排版全部是
 //! 純函式，未新增任何依賴。
 
-use crate::tui::text::{display_width, pad_display};
+use crate::text::{display_width, pad_display};
 
 use super::{DocLine, LineKind, wrap_text};
 

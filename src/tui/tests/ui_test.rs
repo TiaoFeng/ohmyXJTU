@@ -12,13 +12,14 @@ use ratatui::style::Color;
 use crate::config::AccessPolicy;
 use crate::domain::homework::{HomeworkGroup, HomeworkInput, HomeworkItem, aggregate};
 use crate::domain::semester::TermCode;
+use crate::model::{ActivityDetailView, FlowData, LessonEntry, ScheduleData};
 use crate::session::{AccessMode, SiteKind};
 use crate::sites::attendance::FlowRecord;
 use crate::sites::lms::{ActivityKind, LmsActivity, LmsCourse, LmsSubmissionList};
 use crate::task::HomeworkIssue;
 use crate::tui::app::{
-    ActivityDetailView, AgreementState, App, FlowData, FormState, HomeworkData, LessonEntry,
-    LmsLevel, LoginScreen, NavItem, Page, ScheduleData, Screen, SettingsState, TermPickerState,
+    AgreementState, App, FormState, HomeworkData, LmsLevel, LoginScreen, NavItem, Page, Screen,
+    SettingsState, TermPickerState,
 };
 use crate::tui::text::{InputLine, MASK_CHAR};
 use crate::tui::theme::THEME;

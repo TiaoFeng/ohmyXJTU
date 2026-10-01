@@ -1,7 +1,7 @@
 //! 用户协议內容管線測試：Markdown 輕量解析、表格排版、顯示寬度換行與版本一致性。
 
 use crate::privacy::{self, Block, DocLine, LineKind};
-use crate::tui::text::display_width;
+use crate::text::display_width;
 
 /// 以文字列建立文件區塊。
 fn blocks(lines: Vec<DocLine>) -> Vec<Block> {

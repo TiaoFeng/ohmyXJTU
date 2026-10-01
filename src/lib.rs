@@ -7,12 +7,14 @@ pub mod domain;
 pub mod error;
 pub mod http;
 pub mod io;
+pub mod model;
 pub mod privacy;
 pub mod random;
 pub mod session;
 pub mod sites;
 pub mod system;
 pub mod task;
+pub mod text;
 pub mod tui;
 
 pub use error::{AppError, AppResult};

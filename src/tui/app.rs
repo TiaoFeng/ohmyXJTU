@@ -4,7 +4,6 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use chrono::NaiveDate;
 use ratatui::widgets::ListState;
 
 use crate::config::AccessPolicy;
@@ -12,9 +11,9 @@ use crate::domain::activity::{self, ActivityGroup};
 use crate::domain::course_list::{self, CourseRow};
 use crate::domain::homework::{HomeworkGroup, HomeworkItem};
 use crate::domain::semester::TermCode;
+use crate::model::{ActivityDetailView, FlowData, ScheduleData};
 use crate::session::{AccessMode, SiteKind};
-use crate::sites::attendance::{AttendanceStatus, FlowRecord};
-use crate::sites::lms::{ActivityKind, LmsActivity, LmsCourse, LmsSubmission};
+use crate::sites::lms::{LmsActivity, LmsCourse};
 use crate::task::{FailedTarget, HomeworkIssue};
 use crate::tui::text::InputLine;
 
@@ -184,72 +183,6 @@ impl<T> Page<T> {
             stale,
         };
     }
-}
-
-/// 本週的一堂課。
-#[derive(Debug, Clone)]
-pub struct LessonEntry {
-    /// 上課日期。
-    pub date: NaiveDate,
-    /// 節次，例如 `1-2`。
-    pub sections: String,
-    /// 課程名稱。
-    pub course_name: String,
-    /// 上課地點。
-    pub classroom: String,
-    /// 教師。
-    pub teacher: String,
-    /// 週次說明。
-    pub weeks: String,
-    /// 考勤狀態（`None` 代表沒有記錄）。
-    pub status: Option<AttendanceStatus>,
-    /// 顯示用考勤標籤。
-    pub label: &'static str,
-}
-
-/// 課表頁資料。
-#[derive(Debug, Clone, Default)]
-pub struct ScheduleData {
-    /// 學期說明，例如 `2026-2027-1`。
-    pub semester: String,
-    /// 本週週次。
-    pub week: u32,
-    /// 本週課程。
-    pub lessons: Vec<LessonEntry>,
-    /// 因格式問題被跳過的課程筆數。
-    pub skipped: usize,
-}
-
-/// 考勤流水頁資料。
-#[derive(Debug, Clone, Default)]
-pub struct FlowData {
-    /// 本頁流水。
-    pub records: Vec<FlowRecord>,
-    /// 目前頁碼。
-    pub page: u32,
-    /// 總頁數。
-    pub total_pages: u32,
-    /// 總筆數。
-    pub total: u64,
-}
-
-/// 活動詳情檢視資料。
-#[derive(Debug, Clone, Default)]
-pub struct ActivityDetailView {
-    /// 活動識別碼。
-    pub id: String,
-    /// 標題。
-    pub title: String,
-    /// 活動類型。
-    pub kind: ActivityKind,
-    /// 截止時間。
-    pub end_time: Option<String>,
-    /// 是否小組作業。
-    pub submit_by_group: bool,
-    /// 提交記錄；`None` 代表無法確認（僅作業有提交狀態）。
-    pub submissions: Option<Vec<LmsSubmission>>,
-    /// 補充說明（例如無法確認提交狀態的原因）。
-    pub note: Option<String>,
 }
 
 /// 思源學堂的瀏覽層級。

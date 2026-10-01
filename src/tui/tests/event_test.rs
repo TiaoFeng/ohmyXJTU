@@ -7,12 +7,13 @@ use std::time::Duration;
 use crate::config::AccessPolicy;
 use crate::domain::homework::{HomeworkGroup, HomeworkInput, HomeworkState, aggregate};
 use crate::domain::semester::{TermCode, TermSource};
+use crate::model::{ActivityDetailView, FlowData, ScheduleData};
 use crate::session::{AccessMode, SiteKind};
 use crate::sites::lms::LmsCourse;
 use crate::task::{CoursesData, Event, FailedTarget, HomeworkUpdate};
 use crate::tui::app::{
-    ActivityDetailView, AgreementState, App, FlowData, FormState, HomeworkData, LmsLevel,
-    LoginScreen, NavItem, Page, ScheduleData, Screen, SettingsState, TermPickerState,
+    AgreementState, App, FormState, HomeworkData, LmsLevel, LoginScreen, NavItem, Page, Screen,
+    SettingsState, TermPickerState,
 };
 use crate::tui::text::InputLine;
 

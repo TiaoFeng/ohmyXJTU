@@ -29,13 +29,13 @@ use crate::domain::homework::{HomeworkInput, HomeworkItem};
 use crate::domain::semester::{self, TermCode, TermResolution, TermSource};
 use crate::domain::{attendance_match, homework, schedule};
 use crate::error::{AppError, AppResult};
+use crate::model::{ActivityDetailView, FlowData, LessonEntry, ScheduleData};
 use crate::session::{AccessMode, LoginStage, SessionManager, SiteKind};
 use crate::sites::attendance::{AttendanceApi, AttendanceSite};
 use crate::sites::lms::{
     self, ActivityKind, LmsActivity, LmsApi, LmsCourse, LmsSite, SubmissionSummary,
     submission_failure_note,
 };
-use crate::tui::app::{ActivityDetailView, FlowData, LessonEntry, ScheduleData};
 
 /// 考勤流水分頁大小。
 const FLOW_PAGE_SIZE: u32 = 20;

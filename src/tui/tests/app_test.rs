@@ -3,6 +3,7 @@
 use chrono::NaiveDate;
 
 use super::*;
+use crate::model::{FlowData, LessonEntry, ScheduleData};
 use crate::sites::attendance::{AttendanceStatus, FlowRecord};
 use crate::sites::lms::LmsCourse;
 

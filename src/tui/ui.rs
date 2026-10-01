@@ -6,8 +6,9 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 
+use crate::text::display_width;
 use crate::tui::app::{FormState, LoginScreen};
-use crate::tui::text::{InputLine, display_width};
+use crate::tui::text::InputLine;
 use crate::tui::theme::THEME;
 
 /// 視窗最小寬度。

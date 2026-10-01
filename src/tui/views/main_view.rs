@@ -6,8 +6,8 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 
+use crate::text::display_width;
 use crate::tui::app::{App, LmsLevel, NavItem, Screen};
-use crate::tui::text::display_width;
 use crate::tui::theme::THEME;
 use crate::tui::views::{content, settings, term_picker};
 

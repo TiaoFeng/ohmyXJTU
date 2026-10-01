@@ -7,11 +7,12 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::config::AccessPolicy;
 use crate::domain::activity::ActivityGroup;
 use crate::domain::homework::{HomeworkInput, aggregate};
+use crate::model::{ActivityDetailView, ScheduleData};
 use crate::sites::lms::{ActivityKind, LmsActivity, LmsCourse};
 use crate::task::Job;
 use crate::tui::app::{
-    ActivityDetailView, AgreementState, App, FormKind, FormState, HomeworkData, LmsLevel,
-    LoginScreen, NavItem, Page, ScheduleData, Screen, SettingsState,
+    AgreementState, App, FormKind, FormState, HomeworkData, LmsLevel, LoginScreen, NavItem, Page,
+    Screen, SettingsState,
 };
 
 use super::{FormValues, handle_key, handle_paste};
@@ -272,7 +273,7 @@ fn refresh_keeps_flow_page() {
     let mut app = App::new(AccessPolicy::Auto);
     app.set_screen(Screen::Main);
     app.nav = NavItem::Attendance;
-    app.attendance = Page::Ready(crate::tui::app::FlowData {
+    app.attendance = Page::Ready(crate::model::FlowData {
         records: Vec::new(),
         page: 3,
         total_pages: 5,
@@ -289,7 +290,7 @@ fn flow_paging_respects_bounds() {
     let mut app = App::new(AccessPolicy::Auto);
     app.set_screen(Screen::Main);
     app.nav = NavItem::Attendance;
-    app.attendance = Page::Ready(crate::tui::app::FlowData {
+    app.attendance = Page::Ready(crate::model::FlowData {
         records: Vec::new(),
         page: 1,
         total_pages: 2,

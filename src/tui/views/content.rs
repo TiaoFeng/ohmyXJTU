@@ -43,8 +43,10 @@ fn schedule(frame: &mut Frame, area: Rect, app: &mut App) {
         },
     );
 
-    match app.schedule.ready() {
-        None => {
+    // 無法解析星期資訊的課程不會出現在清單中：留一列提示，避免使用者誤以為
+    // 課表完整（與作業頁的警示列同型）。
+    let (warning, has_lessons) = {
+        let Some(data) = app.schedule.ready() else {
             empty(
                 frame,
                 area,
@@ -52,38 +54,52 @@ fn schedule(frame: &mut Frame, area: Rect, app: &mut App) {
                 app.schedule.note(),
                 app.schedule.is_loading(),
             );
-        }
-        Some(data) if data.lessons.is_empty() => {
-            empty(frame, area, &title, Some("本周没有课程安排"), false);
-        }
-        Some(_) => {
-            let (list_area, detail_area) = split_detail(area, app.schedule_detail);
-            let width = row_width(list_area);
-            let (items, detail) = {
-                let Some(data) = app.schedule.ready() else {
-                    return;
-                };
-                let Some(columns) = schedule_columns(width, ScheduleNeeds::of(&data.lessons))
-                else {
-                    too_narrow(frame, list_area, &title, schedule_min_row_width(), width);
-                    return;
-                };
-                let index = app.page_selection().min(data.lessons.len() - 1);
-                let items = data
-                    .lessons
-                    .iter()
-                    .map(|lesson| lesson_item(lesson, columns))
-                    .collect::<Vec<_>>();
-                let detail = app
-                    .schedule_detail
-                    .then(|| lesson_lines(&data.lessons[index]));
-                (items, detail)
-            };
-            render_list(frame, list_area, &title, items, &mut app.schedule_state);
-            if let (Some(area), Some(lines)) = (detail_area, detail) {
-                detail_panel(frame, area, "课程详情", lines);
-            }
-        }
+            return;
+        };
+        let warning = (data.skipped > 0).then(|| {
+            Line::from(Span::styled(
+                format!(" 已跳过 {} 门无法解析的课程", data.skipped),
+                THEME.muted_style(),
+            ))
+        });
+        (warning, !data.lessons.is_empty())
+    };
+    let header_height = u16::from(warning.is_some());
+    let [header_area, body_area] =
+        Layout::vertical([Constraint::Length(header_height), Constraint::Min(3)]).areas(area);
+    if let Some(line) = warning {
+        frame.render_widget(Paragraph::new(line).style(THEME.base_style()), header_area);
+    }
+
+    if !has_lessons {
+        empty_note(frame, body_area, &title, "本周没有课程安排");
+        return;
+    }
+
+    let (list_area, detail_area) = split_detail(body_area, app.schedule_detail);
+    let width = row_width(list_area);
+    let (items, detail) = {
+        let Some(data) = app.schedule.ready() else {
+            return;
+        };
+        let Some(columns) = schedule_columns(width, ScheduleNeeds::of(&data.lessons)) else {
+            too_narrow(frame, list_area, &title, schedule_min_row_width(), width);
+            return;
+        };
+        let index = app.page_selection().min(data.lessons.len() - 1);
+        let items = data
+            .lessons
+            .iter()
+            .map(|lesson| lesson_item(lesson, columns))
+            .collect::<Vec<_>>();
+        let detail = app
+            .schedule_detail
+            .then(|| lesson_lines(&data.lessons[index]));
+        (items, detail)
+    };
+    render_list(frame, list_area, &title, items, &mut app.schedule_state);
+    if let (Some(area), Some(lines)) = (detail_area, detail) {
+        detail_panel(frame, area, "课程详情", lines);
     }
 }
 
@@ -771,7 +787,7 @@ fn flow(frame: &mut Frame, area: Rect, app: &mut App) {
             );
         }
         Some(data) if data.records.is_empty() => {
-            empty(frame, area, &title, Some("本页没有流水记录"), false);
+            empty_note(frame, area, &title, "本页没有流水记录");
         }
         Some(_) => {
             let (list_area, detail_area) = split_detail(area, app.flow_detail);
@@ -907,7 +923,7 @@ fn lms(frame: &mut Frame, area: Rect, app: &mut App) {
                     app.lms.courses.is_loading(),
                 ),
                 Some(courses) if courses.is_empty() => {
-                    empty(frame, area, &title, Some("没有课程"), false);
+                    empty_note(frame, area, &title, "没有课程");
                 }
                 Some(_) => {
                     let rows = {
@@ -942,7 +958,7 @@ fn lms(frame: &mut Frame, area: Rect, app: &mut App) {
                     app.lms.activities.is_loading(),
                 ),
                 Some(activities) if activities.is_empty() => {
-                    empty(frame, area, &title, Some("该课程没有活动"), false);
+                    empty_note(frame, area, &title, "该课程没有活动");
                 }
                 Some(_) => {
                     let width = row_width(area);
@@ -1247,6 +1263,10 @@ fn detail_panel(frame: &mut Frame, area: Rect, title: &str, lines: Vec<Line<'sta
     );
 }
 
+/// 頁面狀態的空畫面：尚未載入（提示按 r）、載入中（muted）或載入失敗（error）。
+///
+/// 「載入成功但沒有資料」請用 [`empty_note`]：同一個 `Some` 說明搭配
+/// `loading = false` 會被視為失敗訊息。
 fn empty(frame: &mut Frame, area: Rect, title: &str, note: Option<&str>, loading: bool) {
     let line = match note {
         Some(note) if loading => Line::from(Span::styled(note.to_owned(), THEME.muted_style())),
@@ -1264,6 +1284,22 @@ fn empty(frame: &mut Frame, area: Rect, title: &str, note: Option<&str>, loading
             .block(THEME.block(title))
             .style(THEME.base_style())
             .wrap(Wrap { trim: true }),
+        area,
+    );
+}
+
+/// 空結果提示：載入成功但沒有資料時使用（中性色）。
+///
+/// 「沒有資料」是正常結果；誤用 [`empty`] 會讓它看起來像載入失敗。
+fn empty_note(frame: &mut Frame, area: Rect, title: &str, message: &str) {
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            message.to_owned(),
+            THEME.muted_style(),
+        )))
+        .block(THEME.block(title))
+        .style(THEME.base_style())
+        .wrap(Wrap { trim: true }),
         area,
     );
 }

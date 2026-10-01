@@ -792,6 +792,84 @@ fn homework_empty_states_distinguish_loading_and_terminal() {
     assert!(!text.contains("加载失败"), "空結果不得顯示為失敗：\n{text}");
 }
 
+/// 「載入成功但沒有資料」的四個頁面都應顯示中性說明，不得誤標為載入失敗。
+#[test]
+fn no_data_states_are_plain_notes_not_failures() {
+    // 課表：本週沒有課程。
+    let mut app = main_screen_app();
+    app.nav = NavItem::Schedule;
+    app.schedule = Page::Ready(schedule_data(Vec::new()));
+    let text = main_text(&mut app);
+    assert!(
+        text.contains("本周没有课程安排"),
+        "課表空結果應顯示說明：\n{text}"
+    );
+    assert!(!text.contains("加载失败"), "空結果不得顯示為失敗：\n{text}");
+
+    // 考勤流水：本頁沒有記錄。
+    let mut app = main_screen_app();
+    app.nav = NavItem::Attendance;
+    app.attendance = Page::Ready(FlowData {
+        records: Vec::new(),
+        page: 1,
+        total_pages: 1,
+        total: 0,
+    });
+    let text = main_text(&mut app);
+    assert!(
+        text.contains("本页没有流水记录"),
+        "流水空結果應顯示說明：\n{text}"
+    );
+    assert!(!text.contains("加载失败"), "空結果不得顯示為失敗：\n{text}");
+
+    // 思源學堂：沒有課程。
+    let mut app = main_screen_app();
+    app.nav = NavItem::Lms;
+    app.lms.level = LmsLevel::Courses;
+    app.lms.courses = Page::Ready(Vec::new());
+    let text = main_text(&mut app);
+    assert!(text.contains("没有课程"), "課程空結果應顯示說明：\n{text}");
+    assert!(!text.contains("加载失败"), "空結果不得顯示為失敗：\n{text}");
+
+    // 思源學堂：該課程沒有活動。
+    let mut app = main_screen_app();
+    app.nav = NavItem::Lms;
+    app.lms.level = LmsLevel::Activities;
+    app.lms.activities = Page::Ready(Vec::new());
+    let text = main_text(&mut app);
+    assert!(
+        text.contains("该课程没有活动"),
+        "活動空結果應顯示說明：\n{text}"
+    );
+    assert!(!text.contains("加载失败"), "空結果不得顯示為失敗：\n{text}");
+}
+
+/// 課表：有無法解析的課程時顯示提示，數字為零時不顯示。
+#[test]
+fn schedule_shows_skipped_course_warning() {
+    let mut app = main_screen_app();
+    app.nav = NavItem::Schedule;
+    let mut data = schedule_data(vec![lesson_entry("高等数学", "主楼A101", "张老师", "正常")]);
+    data.skipped = 2;
+    app.schedule = Page::Ready(data);
+    let text = main_text(&mut app);
+    assert!(
+        text.contains("已跳过 2 门无法解析的课程"),
+        "應顯示跳過提示：\n{text}"
+    );
+
+    let mut app = main_screen_app();
+    app.nav = NavItem::Schedule;
+    app.schedule = Page::Ready(schedule_data(vec![lesson_entry(
+        "高等数学",
+        "主楼A101",
+        "张老师",
+        "正常",
+    )]));
+    let text = main_text(&mut app);
+    assert!(!text.contains("已跳过"), "沒有跳過時不應顯示提示：\n{text}");
+}
+
 #[test]
 fn homework_shows_failed_course_count() {
     let mut app = App::new(AccessPolicy::Auto);
@@ -1447,6 +1525,12 @@ fn main_screen_app() -> App {
     let mut app = App::new(AccessPolicy::Auto);
     app.set_screen(Screen::Main);
     app
+}
+
+/// 以標準尺寸繪製主畫面並回傳畫面文字。
+fn main_text(app: &mut App) -> String {
+    let terminal = draw(WIDTH, HEIGHT, |frame| crate::tui::views::draw(frame, app));
+    screen_text(terminal.backend())
 }
 
 #[test]

@@ -14,13 +14,13 @@ use tempfile::TempDir;
 
 use crate::auth::rsa;
 use crate::domain::homework::HomeworkState;
-use crate::domain::semester::TermCode;
+use crate::domain::semester::{TermCode, TermSource};
 use crate::error::NetworkKind;
 use crate::http::fake::{FakeClient, html, json};
 use crate::http::{HttpClient, HttpRequest, HttpResponse, Method};
 use crate::session::AccessMode;
 use crate::sites::{attendance, lms};
-use crate::task::protocol::DataKey;
+use crate::task::protocol::{DataKey, HomeworkUpdate};
 use crate::tui::app::{App, LoginScreen};
 use crate::tui::text::InputLine;
 

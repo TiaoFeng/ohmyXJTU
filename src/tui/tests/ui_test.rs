@@ -1721,3 +1721,96 @@ fn agreement_failure_is_shown_in_footer() {
         "錯誤訊息應以紅色顯示"
     );
 }
+
+/// 開啟閱讀門並捲到協議中第一個含 `needle` 的列。
+///
+/// 捲動需要已知的視窗高度與總列數，因此先繪製一次再捲動，最後重繪並回傳。
+fn agreement_showing(app: &mut App, needle: &str) -> Terminal<TestBackend> {
+    drop(draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut *app)
+    }));
+    let lines = crate::privacy::wrap(crate::privacy::document(), usize::from(WIDTH) - 2);
+    let index = i32::try_from(
+        lines
+            .iter()
+            .position(|line| line.text.contains(needle))
+            .unwrap_or_else(|| panic!("協議中找不到 {needle}")),
+    )
+    .expect("列號可轉為 i32");
+    app.agreement.as_mut().expect("閱讀門").scroll_by(index);
+    draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut *app)
+    })
+}
+
+#[test]
+fn agreement_table_cards_align_labels_with_their_values() {
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.agreement = Some(Box::new(AgreementState::new()));
+
+    let terminal = agreement_showing(&mut app, "login.xjtu.edu.cn");
+
+    // 卡片標題：符號為次要色、主機名為強調色。
+    let (title_y, title_row) = find_row(terminal.backend(), "▸ login.xjtu.edu.cn");
+    assert_eq!(column_of(&title_row, "▸"), 1, "外框後即為卡片標題");
+    assert_eq!(
+        terminal.backend().buffer()[(1, title_y)].fg,
+        THEME.muted,
+        "標題符號以次要色呈現"
+    );
+    assert_eq!(
+        terminal.backend().buffer()[(3, title_y)].fg,
+        THEME.accent,
+        "主機名以強調色呈現"
+    );
+
+    // 欄位列：標籤與值同行，值自固定欄起算。
+    let (label_y, label_row) = find_row(terminal.backend(), "会上传的内容");
+    assert!(label_row.contains("账号、RSA 加密后的密码"), "{label_row}");
+    assert_eq!(column_of(&label_row, "会上传的内容"), 3, "縮排 2 ＋ 外框 1");
+    assert_eq!(terminal.backend().buffer()[(1, label_y)].fg, THEME.muted);
+    assert_eq!(terminal.backend().buffer()[(17, label_y)].fg, THEME.text);
+
+    // 續行以標籤欄懸掛縮排，仍屬同一欄位。
+    let next = row_text(terminal.backend(), label_y + 1);
+    assert!(
+        next.contains("所需的会话与状态字段"),
+        "續行應接續同一欄的值：{next}"
+    );
+    assert_eq!(column_of(&next, "所需的会话与状态字段"), 17);
+    assert_eq!(
+        terminal.backend().buffer()[(17, label_y + 1)].fg,
+        THEME.text
+    );
+}
+
+#[test]
+fn agreement_table_grid_aligns_columns_when_it_fits() {
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.agreement = Some(Box::new(AgreementState::new()));
+
+    let terminal = agreement_showing(&mut app, "平台");
+
+    // 短表格排成對齊表格：標頭兩欄同行、使用標題色。
+    let (header_y, header) = find_row(terminal.backend(), "平台");
+    assert!(header.contains("目录"), "標頭應與另一欄同行：{header}");
+    assert_eq!(
+        terminal.backend().buffer()[(1, header_y)].fg,
+        THEME.blue,
+        "標頭列使用標題色"
+    );
+
+    // 資料列的第二欄與標頭的第二欄起點一致。
+    let (_, row) = find_row(terminal.backend(), "Linux");
+    assert!(row.contains("~/.local/share/ohmyXJTU/"), "{row}");
+    assert_eq!(
+        column_of(&row, "~/.local/share/ohmyXJTU/"),
+        column_of(&header, "目录"),
+        "兩列的欄位起點必須一致"
+    );
+
+    let rule = row_text(terminal.backend(), header_y + 1);
+    assert!(rule.contains("───"), "標頭下方應為表格細線：{rule}");
+}

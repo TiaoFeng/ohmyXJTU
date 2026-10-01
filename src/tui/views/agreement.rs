@@ -1,40 +1,49 @@
 //! 用户协议覆蓋層：滿版顯示協議全文，讀到底部後按 enter 才能同意。
 //!
-//! 排版由 [`crate::privacy`] 完成（輕量 Markdown 整理＋顯示寬度換行），
-//! 本模組只負責上色與版面：內文獨占畫面，頁腳顯示閱讀進度、確認按鈕與
-//! 保存錯誤。呼叫端（[`super::draw`]）已確保此畫面開啟時不繪製底層。
+//! 排版由 [`crate::privacy`] 完成（輕量 Markdown 整理＋表格排版＋顯示寬度換行），
+//! 本模組只負責上色與版面：表格的標籤欄以次要色、內容以一般色呈現；內文獨占
+//! 畫面，頁腳顯示閱讀進度、確認按鈕與保存錯誤。呼叫端（[`super::draw`]）已確保
+//! 此畫面開啟時不繪製底層。
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use crate::privacy::{self, DocLine, LineKind};
 use crate::tui::app::AgreementState;
-use crate::tui::text::truncate_display;
+use crate::tui::text::{split_at_display, truncate_display};
 use crate::tui::theme::THEME;
 use crate::tui::ui::popup_surface;
 
 /// 依列種類決定文字樣式。
 fn line_style(kind: LineKind) -> Style {
     match kind {
-        LineKind::Title => THEME.accent_style().add_modifier(Modifier::BOLD),
-        LineKind::Heading => THEME.title_style(),
-        LineKind::Quote => THEME.muted_style(),
-        LineKind::Body | LineKind::Bullet | LineKind::Table | LineKind::Rule => {
-            Style::default().fg(THEME.text)
-        }
+        LineKind::Title | LineKind::TableTitle => THEME.accent_style().add_modifier(Modifier::BOLD),
+        LineKind::Heading | LineKind::TableHeader => THEME.title_style(),
+        LineKind::Quote | LineKind::TableRule => THEME.muted_style(),
+        LineKind::Body
+        | LineKind::Bullet
+        | LineKind::TableRow
+        | LineKind::TableField
+        | LineKind::Rule => Style::default().fg(THEME.text),
     }
 }
 
-/// 將文件列轉為可繪製的列（分隔線依寬度鋪滿）。
+/// 將文件列轉為可繪製的列（分隔線依寬度鋪滿；標籤欄與值分色）。
 fn rendered_line(line: &DocLine, width: usize) -> Line<'static> {
     if line.kind == LineKind::Rule {
-        Line::styled("─".repeat(width), THEME.muted_style())
-    } else {
-        Line::styled(line.text.clone(), line_style(line.kind))
+        return Line::styled("─".repeat(width), THEME.muted_style());
     }
+    if line.label_len == 0 {
+        return Line::styled(line.text.clone(), line_style(line.kind));
+    }
+    let (label, value) = split_at_display(&line.text, line.label_len);
+    Line::from(vec![
+        Span::styled(label.to_owned(), THEME.muted_style()),
+        Span::styled(value.to_owned(), line_style(line.kind)),
+    ])
 }
 
 /// 繪製協議閱讀門（滿版、不透明）。

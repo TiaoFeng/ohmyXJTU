@@ -224,6 +224,23 @@ pub fn pad_display(text: &str, width: usize) -> String {
     result
 }
 
+/// 依顯示寬度切成「前 `columns` 欄」與其餘兩段（不切開字素）。
+///
+/// 用於把一列拆成標籤與值兩個區段：邊界落在寬字元中間時，整個字素歸入前段。
+pub fn split_at_display(text: &str, columns: usize) -> (&str, &str) {
+    if columns == 0 {
+        return ("", text);
+    }
+    let mut width = 0;
+    for (offset, grapheme) in text.grapheme_indices(true) {
+        if width >= columns {
+            return text.split_at(offset);
+        }
+        width += display_width(grapheme);
+    }
+    (text, "")
+}
+
 /// 截斷並補齊到固定顯示寬度（列表欄位排版用；`width` 為 0 時為空字串）。
 pub fn fit_display(text: &str, width: usize) -> String {
     let truncated = truncate_display(text, width);

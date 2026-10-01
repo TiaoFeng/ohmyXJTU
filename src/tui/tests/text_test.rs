@@ -214,3 +214,30 @@ fn keeps_the_cursor_inside_a_narrow_field() {
     );
     assert_eq!(visible, "中a文");
 }
+
+#[test]
+fn splits_a_line_by_display_width() {
+    // ASCII：欄數即字元數。
+    assert_eq!(split_at_display("abcdef", 3), ("abc", "def"));
+
+    // 中文：欄數以顯示寬度計算（「用途」佔 4 欄），且不切開字素。
+    let text = "  用途        ：统一身份认证";
+    let (label, value) = split_at_display(text, 16);
+    assert_eq!(label, "  用途        ：");
+    assert_eq!(display_width(label), 16);
+    assert_eq!(value, "统一身份认证");
+
+    // 邊界情形：0 欄與超過整列寬度。
+    assert_eq!(split_at_display("abc", 0), ("", "abc"));
+    assert_eq!(split_at_display("abc", 9), ("abc", ""));
+}
+
+#[test]
+fn split_at_display_never_cuts_a_grapheme() {
+    // 要求 1 欄，但「中」佔 2 欄：整個字素歸入前段。
+    assert_eq!(split_at_display("中文", 1), ("中", "文"));
+
+    // 組合字元自成一個字素，不會被拆成 e 與重音。
+    let text = "e\u{301}xyz";
+    assert_eq!(split_at_display(text, 1), ("e\u{301}", "xyz"));
+}

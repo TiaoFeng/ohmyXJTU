@@ -3,13 +3,10 @@
 //! 以假 HTTP 客戶端離線組出「登入頁 → 公鑰 → 提交帳密 → 業務收尾」的完整流程，
 //! 驗證重新輸入的憑證只在登入成功後才寫入保險庫，且登入失敗不會遺失待重試的任務。
 
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ::rsa::pkcs8::EncodePublicKey as _;
-use ::rsa::{RsaPrivateKey, RsaPublicKey};
 use tempfile::TempDir;
 
 use crate::auth::{AccountType, LoginReply, rsa};
@@ -28,60 +25,11 @@ use crate::task::protocol::{DataKey, HomeworkUpdate};
 use crate::tui::app::{App, LoginScreen};
 use crate::tui::text::InputLine;
 
+use super::fixtures::{
+    ATTENDANCE_EXCHANGE, ATTENDANCE_POST, ATTENDANCE_TARGET, LMS_COURSES, LMS_HOME, LMS_POST,
+    TARGET_BODY, login_page, login_page_with_mfa, public_key_pem,
+};
 use super::*;
-
-/// 考勤站點的登入頁位址（同時是帳密表單的提交位址）。
-const ATTENDANCE_POST: &str = "https://login.xjtu.edu.cn/cas/login?service=attendance";
-/// 考勤站點的登入回跳位址（帶 `loginRequestId` 與 `ticket`）。
-const ATTENDANCE_TARGET: &str =
-    "https://bk-kq.xjtu.edu.cn/sa/auth/cas/student-pc?loginRequestId=req-1&ticket=ticket-1";
-/// 考勤站點的業務 token 交換端點。
-const ATTENDANCE_EXCHANGE: &str = "https://bk-kq.xjtu.edu.cn/sa/auth/cas/exchange";
-/// 思源學堂的登入頁位址（同時是帳密表單的提交位址）。
-const LMS_POST: &str = "https://login.xjtu.edu.cn/cas/login?service=lms";
-/// 思源學堂首頁位址。
-const LMS_HOME: &str = "https://lms.xjtu.edu.cn/user/index";
-/// 思源學堂課程清單端點。
-const LMS_COURSES: &str = "https://lms.xjtu.edu.cn/api/my-courses";
-/// 登入成功後回傳的目標網頁。
-const TARGET_BODY: &str =
-    "<html><head><title>思源学堂</title></head><body>globalData</body></html>";
-
-/// 測試用公鑰 PEM（2048 位元金鑰產生較慢，整個測試二進位檔共用一份）。
-fn public_key_pem() -> &'static str {
-    static PEM: OnceLock<String> = OnceLock::new();
-    PEM.get_or_init(|| {
-        let mut rng = chacha20poly1305::aead::OsRng;
-        let private = RsaPrivateKey::new(&mut rng, 2048).expect("生成测试密钥");
-        RsaPublicKey::from(&private)
-            .to_public_key_pem(::rsa::pkcs8::LineEnding::LF)
-            .expect("导出公钥 PEM")
-    })
-}
-
-/// 統一認證登入頁（含 `execution`）；`mfa_enabled` 控制是否要求簡訊驗證。
-///
-/// 注意：原始碼中的 `\"` 會原樣出現在頁面文字裡，測試裡要改 `mfaEnabled`
-/// 必須比對整段（見下方兩個包裝函式）。
-fn login_page_with(mfa_enabled: bool) -> String {
-    format!(
-        r#"<html><head><script>
-    var globalConfig = eval('(' + "{{\"mfaEnabled\":{mfa_enabled}}}" + ')');
-    </script></head><body>
-    <input type="hidden" name="execution" value="e1s1" />
-    </body></html>"#
-    )
-}
-
-/// 統一認證登入頁（不需要簡訊驗證）。
-fn login_page() -> String {
-    login_page_with(false)
-}
-
-/// 統一認證登入頁（需要簡訊驗證）。
-fn login_page_with_mfa() -> String {
-    login_page_with(true)
-}
 
 /// 假的站點流程；`public_key_failures` 表示前幾次公鑰請求回傳非 PEM 正文。
 fn fake_flow(
@@ -233,7 +181,7 @@ impl Harness {
                 pending_data: VecDeque::new(),
                 generation: 0,
                 homework_epoch: 0,
-                relogin: ReloginBudget::default(),
+                relogin: ReloginBudgets::default(),
                 cache: LmsCache::default(),
                 known_term: None,
                 chosen_term: None,
@@ -1356,6 +1304,8 @@ fn parse_date_reports_category_without_echoing_server_value() {
 
 #[test]
 fn homework_filters_to_current_term_and_streams_progress() {
+    // 截止時間取遠未來：本測試需要「尚未截止」的作業（`待提交`），
+    // 固定的近日日期會隨時鐘走過而變成「逾期」。
     let site = Arc::new(FakeHomeworkSite {
         seen: Arc::new(Mutex::new(Vec::new())),
         courses: serde_json::json!({ "courses": [
@@ -1368,7 +1318,7 @@ fn homework_filters_to_current_term_and_streams_progress() {
                 "1",
                 serde_json::json!({ "activities": [
                     { "id": "11", "type": "homework", "title": "作业A",
-                      "end_time": "2026-10-01 23:59:59" },
+                      "end_time": "2099-12-31 23:59:59" },
                     { "id": "12", "type": "material", "title": "课件" },
                 ]}),
             ),
@@ -1377,7 +1327,7 @@ fn homework_filters_to_current_term_and_streams_progress() {
         details: vec![(
             "11",
             serde_json::json!({ "id": "11", "type": "homework", "title": "作业A",
-                "end_time": "2026-10-01 23:59:59",
+                "end_time": "2099-12-31 23:59:59",
                 "submit_by_group": true, "group_id": "7" }),
         )],
         expire_first_submission: false,
@@ -2482,6 +2432,452 @@ fn opening_lesson_without_player_url_falls_back_to_home() {
             Event::OpenUrl(url) if url == "https://lms.xjtu.edu.cn"
         )),
         "應回退到思源學堂首頁"
+    );
+}
+
+#[test]
+fn only_open_activity_is_interactive() {
+    let open = Job::OpenActivity {
+        activity_id: "1".to_owned(),
+        course_id: None,
+        kind: lms::ActivityKind::Homework,
+    };
+    assert!(open.is_interactive(), "開啟活動是互動式資料任務");
+    assert!(
+        !open.is_control(),
+        "互動式任務維持資料任務語意（去重與統一重新登入重試）"
+    );
+
+    for job in [
+        Job::LoadSchedule,
+        Job::LoadHomework { force: false },
+        Job::LoadFlow { page: 1 },
+        Job::LoadCourses { force: false },
+        Job::LoadActivities {
+            course_id: "1".to_owned(),
+            force: false,
+        },
+        Job::LoadActivityDetail {
+            activity_id: "1".to_owned(),
+        },
+        Job::SetHomeworkTerm {
+            term: "2026-2027-1".to_owned(),
+        },
+        Job::CancelLogin,
+        Job::Shutdown,
+    ] {
+        assert!(!job.is_interactive(), "{job:?} 不是互動式任務");
+    }
+}
+
+#[test]
+fn flush_interactive_runs_the_queued_open_and_keeps_other_jobs() {
+    let mut harness = harness(|request: &HttpRequest| -> AppResult<HttpResponse> {
+        panic!("開啟作業網頁不需任何請求：{}", request.url);
+    });
+    harness.login_lms_only();
+    harness.worker.pending_data.push_back(Job::LoadSchedule);
+    harness.worker.pending_data.push_back(Job::OpenActivity {
+        activity_id: "5".to_owned(),
+        course_id: Some("9".to_owned()),
+        kind: lms::ActivityKind::Homework,
+    });
+
+    assert!(
+        !harness.worker.flush_interactive(),
+        "没有登入流程时不应暂停"
+    );
+    assert!(
+        harness.saw(|event| matches!(
+            event,
+            Event::OpenUrl(url) if url == "https://lms.xjtu.edu.cn/course/9/homework"
+        )),
+        "排队中的互动式任务应立即执行"
+    );
+    assert_eq!(
+        harness.worker.pending_data.len(),
+        1,
+        "非互动式任务不符条件，不得被执行"
+    );
+    assert!(matches!(harness.worker.pending_data[0], Job::LoadSchedule));
+}
+
+// ── 互動式任務執行期間的控制任務插隊窗口 ──────────────
+
+/// 把任務送進工作通道（通道注入端在建立 harness 後才會就緒）。
+fn inject(slot: &Arc<Mutex<Option<Sender<Job>>>>, job: Job) {
+    let sender = slot.lock().expect("lock").clone().expect("注入端已就绪");
+    sender.send(job).expect("注入任务");
+}
+
+/// 「互動式任務執行期間插入控制任務」的共用假站點。
+///
+/// 兩門課程（活動皆為空）與完整的思源學堂、考勤同步登入流程：課程 1 的
+/// 活動查詢把 `o`（課程內容）送進工作通道（下一輪排空時合併），思源學堂
+/// 帳密提交（`LMS_POST`）成功那一刻把 `injected` 送進通道——它會在重新
+/// 登入成功後、內層重試排空通道時被處理（本組測試要覆蓋的窗口）。
+fn harness_with_switch_during_open(injected: Job) -> Harness {
+    let slot: Arc<Mutex<Option<Sender<Job>>>> = Arc::new(Mutex::new(None));
+    let injector = Arc::clone(&slot);
+    let player_calls = AtomicUsize::new(0);
+    let harness = harness(move |request: &HttpRequest| {
+        let url = request.url.as_str();
+        if url == rsa::PUBLIC_KEY_URL {
+            return Ok(HttpResponse::new(
+                200,
+                rsa::PUBLIC_KEY_URL,
+                public_key_pem(),
+            ));
+        }
+        if url == lms::LOGIN_URL {
+            return Ok(HttpResponse::new(200, LMS_POST, login_page()));
+        }
+        if url == LMS_POST {
+            // 重新登入提交成功的當下注入控制任務。
+            inject(&injector, injected.clone());
+            return Ok(HttpResponse::new(200, LMS_HOME, TARGET_BODY));
+        }
+        if url == LMS_HOME || url.ends_with("/user/index") {
+            return Ok(HttpResponse::new(200, LMS_HOME, TARGET_BODY));
+        }
+        if url == attendance::LOGIN_URL {
+            return Ok(HttpResponse::new(200, ATTENDANCE_POST, login_page()));
+        }
+        if url == ATTENDANCE_POST {
+            return Ok(HttpResponse::new(200, ATTENDANCE_TARGET, TARGET_BODY));
+        }
+        if url == ATTENDANCE_EXCHANGE {
+            return Ok(json(serde_json::json!({
+                "code": 0,
+                "data": { "tokenValue": "token-1" }
+            })));
+        }
+        if url.ends_with("/api/my-courses") {
+            return Ok(json(serde_json::json!({ "courses": [
+                { "id": "1", "name": "编译原理", "semester": { "code": "2026-1" } },
+                { "id": "2", "name": "操作系统", "semester": { "code": "2026-1" } },
+            ]})));
+        }
+        if url.ends_with("/courses/1/activities") {
+            // 載入進行中按下 `o`。
+            inject(
+                &injector,
+                Job::OpenActivity {
+                    activity_id: "7".to_owned(),
+                    course_id: Some("1".to_owned()),
+                    kind: lms::ActivityKind::Lesson,
+                },
+            );
+            return Ok(json(serde_json::json!({ "activities": [] })));
+        }
+        if url.contains("/player-url") {
+            // 第一次查詢回報登入態失效（觸發同步重新登入）；其後恢復正常。
+            if player_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Ok(HttpResponse::new(
+                    200,
+                    "https://login.xjtu.edu.cn/cas/login?service=lms",
+                    login_page(),
+                ));
+            }
+            return Ok(json(serde_json::json!({
+                "url": "https://lms.xjtu.edu.cn/lesson/player?token=abc"
+            })));
+        }
+        panic!("未预期的请求：{url}");
+    });
+    *slot.lock().expect("lock") = Some(harness._jobs.clone());
+    harness
+}
+
+/// 互動式任務執行期間同步完成的重新登入，若在內層處理了換帳號指令，
+/// 外層不得再以舊帳號的資料繼續載入並回填畫面。
+#[test]
+fn account_switch_during_interactive_open_does_not_backfill_stale_homework() {
+    let mut harness = harness_with_switch_during_open(Job::ChangeAccount {
+        passphrase: "secret123".into(),
+        credentials: Credentials::new("3120000002", "new-password"),
+    });
+    harness.login_lms_only();
+    harness.worker.config.homework_term = Some("2026-2027-1".to_owned());
+
+    harness.worker.run_homework_job(false);
+
+    let events = harness.drain_events();
+    let switched = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                Event::SessionsCleared {
+                    account_changed: true
+                }
+            )
+        })
+        .expect("换帐号应在开启任务执行期间发生");
+    let stale: Vec<&Event> = events[switched..]
+        .iter()
+        .filter(|event| matches!(event, Event::Homework(_)))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "换帐号后不得回填旧帐号的作业数据：{stale:?}"
+    );
+    assert!(
+        harness.worker.pending_data.is_empty(),
+        "被取消的载入不得重新排队"
+    );
+}
+
+/// 執行互動式任務期間的學期切換，外層不得再以舊學期的結果回填。
+#[test]
+fn term_switch_during_interactive_open_does_not_backfill_stale_homework() {
+    let mut harness = harness_with_switch_during_open(Job::SetHomeworkTerm {
+        term: "2025-2026-2".to_owned(),
+    });
+    harness.login_lms_only();
+    harness.worker.config.homework_term = Some("2026-2027-1".to_owned());
+
+    harness.worker.run_homework_job(false);
+
+    let events = harness.drain_events();
+    let switched = events
+        .iter()
+        .position(|event| matches!(event, Event::CoursesTerm(Some(_))))
+        .expect("切换学期应在开启任务执行期间发生");
+    let stale: Vec<&Event> = events[switched..]
+        .iter()
+        .filter(|event| matches!(event, Event::Homework(_)))
+        .collect();
+    assert!(stale.is_empty(), "切换学期后不得回填旧学期结果：{stale:?}");
+    assert!(
+        matches!(
+            harness.worker.pending_data.front(),
+            Some(Job::LoadHomework { force: true })
+        ),
+        "切换学期排入的强制重载必须保留：{:?}",
+        harness.worker.pending_data
+    );
+}
+
+/// 開啟操作獨立取得自動重登額度：長載入已用掉自己的額度時，開啟仍應嘗試
+/// 重新登入，而不是直接被判定為「自動重新登入後仍然失敗」。
+#[test]
+fn interactive_open_gets_its_own_relogin_budget() {
+    let site = Arc::new(FakeHomeworkSite {
+        seen: Arc::new(Mutex::new(Vec::new())),
+        courses: serde_json::json!({ "courses": [] }),
+        activities: Vec::new(),
+        details: Vec::new(),
+        expire_first_submission: false,
+        submissions: AtomicUsize::new(0),
+        attendance_term: None,
+    });
+    let system = Arc::clone(&site);
+    let player_calls = AtomicUsize::new(0);
+    let mut harness = harness(move |request: &HttpRequest| {
+        let url = request.url.as_str();
+        if url.contains("/player-url") {
+            // 第一次回報登入態失效；重新登入後的重試恢復正常。
+            if player_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Ok(HttpResponse::new(
+                    200,
+                    "https://login.xjtu.edu.cn/cas/login?service=lms",
+                    login_page(),
+                ));
+            }
+            return Ok(json(serde_json::json!({
+                "url": "https://lms.xjtu.edu.cn/lesson/player?token=abc"
+            })));
+        }
+        system.handle(request)
+    });
+    harness.login_lms_only();
+    // 模擬作業載入與此開啟任務先前各用掉一次自動重登額度：額度按任務鍵
+    // 獨立保存，新的開啟操作應重新取得自己的額度。
+    assert!(
+        harness.worker.relogin.try_consume(&DataKey::Homework),
+        "前置：額度應可用"
+    );
+    assert!(
+        harness
+            .worker
+            .relogin
+            .try_consume(&DataKey::OpenActivity("7".to_owned())),
+        "前置：額度應可用"
+    );
+    harness.worker.pending_data.push_back(Job::OpenActivity {
+        activity_id: "7".to_owned(),
+        course_id: None,
+        kind: lms::ActivityKind::Lesson,
+    });
+
+    assert!(
+        !harness.worker.flush_interactive(),
+        "登录同步完成后不应留下进行中的流程"
+    );
+
+    let events = harness.drain_events();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::OpenUrl(url) if url == "https://lms.xjtu.edu.cn/lesson/player?token=abc"
+        )),
+        "開啟操作應獨立取得額度並在重登後重試成功：{events:?}"
+    );
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            Event::Failed { message, .. } if message.contains("自动重新登录")
+        )),
+        "不得誤報自動重登失敗：{events:?}"
+    );
+}
+
+/// 開啟操作的自動重登仍有上限：重登後再失效即停止自動重試。
+#[test]
+fn interactive_open_relogin_stays_bounded() {
+    let site = Arc::new(FakeHomeworkSite {
+        seen: Arc::new(Mutex::new(Vec::new())),
+        courses: serde_json::json!({ "courses": [] }),
+        activities: Vec::new(),
+        details: Vec::new(),
+        expire_first_submission: false,
+        submissions: AtomicUsize::new(0),
+        attendance_term: None,
+    });
+    let system = Arc::clone(&site);
+    let logins = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&logins);
+    let mut harness = harness(move |request: &HttpRequest| {
+        let url = request.url.as_str();
+        if url == lms::LOGIN_URL {
+            counter.fetch_add(1, Ordering::SeqCst);
+        }
+        if url.contains("/player-url") {
+            // 永遠回報登入態失效（包含重新登入後的重試）。
+            return Ok(HttpResponse::new(
+                200,
+                "https://login.xjtu.edu.cn/cas/login?service=lms",
+                login_page(),
+            ));
+        }
+        system.handle(request)
+    });
+    harness.login_lms_only();
+    harness.worker.pending_data.push_back(Job::OpenActivity {
+        activity_id: "7".to_owned(),
+        course_id: None,
+        kind: lms::ActivityKind::Lesson,
+    });
+
+    assert!(!harness.worker.flush_interactive());
+
+    let events = harness.drain_events();
+    assert_eq!(logins.load(Ordering::SeqCst), 1, "開啟操作至多自動重登一次");
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Failed {
+                message,
+                target: FailedTarget::ActivityOpen,
+                ..
+            } if message.contains("自动重新登录")
+        )),
+        "重登後仍失效應回報自動重登失敗：{events:?}"
+    );
+    assert!(harness.worker.retry.is_none(), "放棄後不得保留待重試任務");
+}
+
+/// 反向情境：開啟操作先重登成功後，作業載入的第一次失效仍應取得自己的
+/// 自動重登額度（兩者的額度必須互相獨立，不得被對方消耗）。
+#[test]
+fn interactive_open_relogin_does_not_consume_the_homework_budget() {
+    let site = Arc::new(FakeHomeworkSite {
+        seen: Arc::new(Mutex::new(Vec::new())),
+        courses: serde_json::json!({ "courses": [
+            { "id": "1", "name": "编译原理", "semester": { "code": "2026-1" } },
+            { "id": "2", "name": "操作系统", "semester": { "code": "2026-1" } },
+        ]}),
+        activities: vec![
+            ("1", serde_json::json!({ "activities": [] })),
+            ("2", serde_json::json!({ "activities": [] })),
+        ],
+        details: Vec::new(),
+        expire_first_submission: false,
+        submissions: AtomicUsize::new(0),
+        attendance_term: None,
+    });
+    let system = Arc::clone(&site);
+    let logins = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&logins);
+    let player_calls = AtomicUsize::new(0);
+    let activity_calls = AtomicUsize::new(0);
+    let mut harness = harness(move |request: &HttpRequest| {
+        let url = request.url.as_str();
+        if url == lms::LOGIN_URL {
+            counter.fetch_add(1, Ordering::SeqCst);
+        }
+        if url.contains("/player-url") {
+            // 第一次回報登入態失效；重新登入後恢復正常。
+            if player_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Ok(HttpResponse::new(
+                    200,
+                    "https://login.xjtu.edu.cn/cas/login?service=lms",
+                    login_page(),
+                ));
+            }
+            return Ok(json(serde_json::json!({
+                "url": "https://lms.xjtu.edu.cn/lesson/player?token=abc"
+            })));
+        }
+        if url.ends_with("/courses/1/activities") {
+            // 載入的第一次查詢在開啟操作重登之後才失效：載入仍應有自己的額度。
+            if activity_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Ok(HttpResponse::new(
+                    200,
+                    "https://login.xjtu.edu.cn/cas/login?service=lms",
+                    login_page(),
+                ));
+            }
+        }
+        system.handle(request)
+    });
+    harness.login_lms_only();
+    harness.worker.config.homework_term = Some("2026-2027-1".to_owned());
+    // 載入進行中按下 `o`：開啟任務排在步進邊界被立即執行。
+    harness.worker.pending_data.push_back(Job::OpenActivity {
+        activity_id: "7".to_owned(),
+        course_id: Some("1".to_owned()),
+        kind: lms::ActivityKind::Lesson,
+    });
+
+    harness.worker.run_homework_job(false);
+
+    let events = harness.drain_events();
+    assert_eq!(
+        logins.load(Ordering::SeqCst),
+        2,
+        "開啟與載入應各自取得一次自動重登：{events:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::OpenUrl(url) if url == "https://lms.xjtu.edu.cn/lesson/player?token=abc"
+        )),
+        "開啟操作應在重登後完成：{events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::Homework(update) if update.progress.is_none())),
+        "作業載入應在重登後完成，而不是被誤判為自動重登失敗：{events:?}"
+    );
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            Event::Failed { message, .. } if message.contains("自动重新登录")
+        )),
+        "不得誤報自動重登失敗：{events:?}"
     );
 }
 
@@ -4145,12 +4541,22 @@ fn credential_save_failure_reports_and_keeps_the_old_vault() {
     assert_eq!(stored.password, "old-password");
 }
 
-/// 自動重登額度：耗盡後不得再消耗，重置後重新取得。
+/// 自動重登額度：按任務鍵各自計算——同一任務耗盡後不得再消耗，重置只
+/// 影響該任務；其他任務的額度互不影響。
 #[test]
-fn relogin_budget_exhausts_and_resets() {
-    let mut budget = ReloginBudget::default();
-    assert!(budget.try_consume(), "首次應可消耗額度");
-    assert!(!budget.try_consume(), "額度用盡後不得再消耗");
-    budget.reset();
-    assert!(budget.try_consume(), "重置後應重新取得額度");
+fn relogin_budget_is_kept_per_task() {
+    let mut budget = ReloginBudgets::default();
+    let open = DataKey::OpenActivity("7".to_owned());
+    let homework = DataKey::Homework;
+
+    assert!(budget.try_consume(&open), "首次應可消耗額度");
+    assert!(!budget.try_consume(&open), "同一任務的額度用盡後不得再消耗");
+    assert!(
+        budget.try_consume(&homework),
+        "其他任務的額度互不影響（不得被對方的消耗拖累）"
+    );
+    budget.reset(&open);
+    assert!(budget.try_consume(&open), "重置後應重新取得額度");
+    budget.clear();
+    assert!(budget.try_consume(&homework), "清空後所有任務重新取得額度");
 }

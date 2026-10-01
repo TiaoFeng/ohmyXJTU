@@ -77,6 +77,16 @@ impl Worker {
         }
     }
 
+    /// 等待重登的任務重新取得自動重登額度（使用者手動重試時）。
+    ///
+    /// 額度按任務鍵各自保存：手動重試只為「正在等待的任務」重新計算，
+    /// 不影響其他任務的額度。
+    fn reset_pending_retry_budget(&mut self) {
+        if let Some(key) = self.retry.as_ref().and_then(Job::data_key) {
+            self.relogin.reset(&key);
+        }
+    }
+
     /// 開始登入：取得第一個登入步驟後才回報進度。
     pub(super) fn begin_login(&mut self, site: SiteKind, retry: Option<Job>) -> AppResult<()> {
         let credentials = self
@@ -285,8 +295,8 @@ impl Worker {
     }
 
     pub(super) fn retry_login(&mut self, site: SiteKind) -> AppResult<()> {
-        // 使用者手動重試：自動重登額度重新計算。
-        self.relogin.reset();
+        // 使用者手動重試：等待重登的任務重新取得自動重登額度。
+        self.reset_pending_retry_budget();
         self.begin_login(site, None)
     }
 
@@ -303,8 +313,8 @@ impl Worker {
         // 口令錯誤時回報 [`AppError::WrongPassphrase`]，舊憑證不受影響。
         self.vault.load(passphrase)?;
 
-        // 使用者手動重試：自動重登額度重新計算。
-        self.relogin.reset();
+        // 使用者手動重試：等待重登的任務重新取得自動重登額度。
+        self.reset_pending_retry_budget();
         // 先記下保險庫中的舊憑證，取消或憑證被拒時才能還原（見 `discard_pending_vault`）。
         let previous = self.rollback_credentials();
         // 失敗計數以 (帳號, 後端) 為鍵保存：重複輸入同一帳號（含目前生效的仍是

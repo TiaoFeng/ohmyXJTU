@@ -18,6 +18,8 @@
 //!
 //! - 控制任務（登入、設定、憑證）優先於資料任務；資料任務以「步進」執行，
 //!   每一步之間先處理排隊中的控制任務，避免長查詢阻塞設定操作。
+//! - 互動式資料任務（按 `o` 開啟活動網頁）同樣在步進邊界立即執行，不排在
+//!   整輪載入之後；若其觸發重新登入，本輪載入先暫停並重新排隊。
 //! - 重複的資料查詢會被合併；帳號或訪問模式變更後，進行中的資料任務立即
 //!   中止且不再回報舊結果。
 //! - 解鎖憑證後不預先登入任何站點：頁面需要時才按站點惰性登入，
@@ -35,7 +37,8 @@ use crate::domain::semester::TermCode;
 use crate::error::{AppError, AppResult};
 use crate::session::{AccessMode, SessionManager, SiteKind};
 use crate::task::protocol::{
-    Event, FailedTarget, Job, failed_target_of, is_account_switch_step, resource_of, site_of,
+    DataKey, Event, FailedTarget, Job, failed_target_of, is_account_switch_step, resource_of,
+    site_of,
 };
 
 mod cache;
@@ -46,29 +49,40 @@ mod login;
 
 use cache::LmsCache;
 
-/// 單一載入週期允許的自動重新登入次數上限。
+/// 單一任務（及其自動重試鏈）允許的自動重新登入次數上限。
 ///
 /// 站點持續回報登入態失效時，「自動重登 → 重試 → 再失效」會形成無上限的
 /// 迴圈；超過上限即停止自動重試並回報錯誤，由使用者手動按 `r` 重試
-///（每次全新的載入請求都會重新獲得額度）。
+///（每次全新的使用者操作都會為該任務重新獲得額度）。
 const MAX_AUTO_RELOGINS: u8 = 1;
 
-/// 自動重新登入額度：每個全新載入週期歸零，用完即停止自動重試。
+/// 自動重新登入額度：以任務鍵（[`DataKey`]）各自計算，用完即停止自動重試。
 ///
-/// 集中管理歸零與消耗，避免計數散落各處、新增任務路徑時漏歸零。
-#[derive(Debug, Clone, Copy, Default)]
-struct ReloginBudget(u8);
+/// 互動式任務（開啟活動網頁）與長載入（作業彙總）的額度互相獨立——一方
+/// 重登不會讓另一方的失效被誤判為「自動重新登入後仍然失敗」；同一任務的
+/// 自動重試鏈共用同一份額度（重試後再失效時遞減）。新的使用者操作（新的
+/// 資料請求、手動重試、執行互動式任務）為該任務重新歸零；工作階段重建、
+/// 換帳號或切換訪問模式時全部清空。
+#[derive(Debug, Default)]
+struct ReloginBudgets(HashMap<DataKey, u8>);
 
-impl ReloginBudget {
-    /// 重新取得完整額度（新的資料請求、使用者手動重試、切換設定）。
-    fn reset(&mut self) {
-        self.0 = 0;
+impl ReloginBudgets {
+    /// 讓指定任務重新取得完整額度（新的資料請求、執行互動式任務、
+    /// 使用者手動重試）。
+    fn reset(&mut self, key: &DataKey) {
+        self.0.remove(key);
     }
 
-    /// 嘗試消耗一次額度；已達上限時回傳 `false`。
-    fn try_consume(&mut self) -> bool {
-        if self.0 < MAX_AUTO_RELOGINS {
-            self.0 += 1;
+    /// 清空所有任務的額度（工作階段重建、換帳號或切換訪問模式時）。
+    fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    /// 嘗試為指定任務消耗一次額度；已達上限時回傳 `false`。
+    fn try_consume(&mut self, key: &DataKey) -> bool {
+        let used = self.0.entry(key.clone()).or_insert(0);
+        if *used < MAX_AUTO_RELOGINS {
+            *used += 1;
             true
         } else {
             false
@@ -163,8 +177,8 @@ struct Worker {
     /// 學期變更不影響其他資料（課程清單不變，只有分區提示改變），因此不
     /// 共用 `generation`——那會連課程／活動載入一起取消。
     homework_epoch: u64,
-    /// 自動重新登入額度（全新的載入請求歸零）。
-    relogin: ReloginBudget,
+    /// 自動重新登入額度（以任務鍵各自保存）。
+    relogin: ReloginBudgets,
     /// 思源學堂課程／活動快取。
     cache: LmsCache,
     /// 本會話曾查得的考勤學期（供課程分區使用，不重複請求）。
@@ -202,7 +216,7 @@ pub fn spawn(config: Config, vault: Vault) -> AppResult<(Sender<Job>, Receiver<E
         pending_data: VecDeque::new(),
         generation: 0,
         homework_epoch: 0,
-        relogin: ReloginBudget::default(),
+        relogin: ReloginBudgets::default(),
         cache: LmsCache::default(),
         known_term: None,
         chosen_term: None,
@@ -261,12 +275,14 @@ impl Worker {
         }
     }
 
-    /// 執行使用者發起的全新資料任務：重置自動重登額度後再執行。
+    /// 執行使用者發起的全新資料任務：讓該任務重新取得自動重登額度後再執行。
     ///
     /// 自動重登後的重試（[`Self::finish_login`]）不走這裡，額度才會遞減；
     /// 新的刷新請求則重新獲得完整額度。
     fn run_fresh_data_job(&mut self, job: Job) {
-        self.relogin.reset();
+        if let Some(key) = job.data_key() {
+            self.relogin.reset(&key);
+        }
         self.run_data_job(job);
     }
 
@@ -438,6 +454,12 @@ impl Worker {
             return;
         }
 
+        self.execute_data_job(job);
+    }
+
+    /// 執行單步資料請求並回報結果（錯誤走統一的重新登入與路由回退）。
+    fn execute_data_job(&mut self, job: Job) {
+        let generation = self.generation;
         match self.load_once(&job) {
             Ok(Some(event)) => self.emit(event),
             Ok(None) => {}
@@ -446,6 +468,35 @@ impl Worker {
                 None => self.emit_failed(&job, None, err),
             },
         }
+    }
+
+    /// 在長任務（作業載入）的步進邊界執行排隊中的互動式資料任務。
+    ///
+    /// 按 `o` 開啟活動網頁之類的操作由使用者觸發，不應等待整輪載入：在下
+    /// 一個步進邊界立即執行（每個邊界只會執行恰一次）。每個任務都是新的
+    /// 使用者操作，其自動重登額度以任務鍵獨立保存——互動操作與長載入互不
+    /// 消耗（一方重登後，另一方的失效仍能嘗試自己的重登）；任務其後的重試
+    /// 鏈共用同一份額度，仍受 [`MAX_AUTO_RELOGINS`] 上限約束。回傳 `true`
+    /// 代表目前有互動式登入正在進行（原本就在進行，或由本次執行觸發），
+    /// 呼叫端必須暫停本輪載入（重新排隊後返回），等登入完成或取消後再繼續。
+    fn flush_interactive(&mut self) -> bool {
+        if self.flow.is_some() {
+            return true;
+        }
+        while let Some(index) = self.pending_data.iter().position(Job::is_interactive) {
+            let Some(job) = self.pending_data.remove(index) else {
+                continue;
+            };
+            // 互動式任務是新的使用者操作：讓該任務重新取得完整重登額度。
+            if let Some(key) = job.data_key() {
+                self.relogin.reset(&key);
+            }
+            self.execute_data_job(job);
+            if self.flow.is_some() {
+                return true;
+            }
+        }
+        false
     }
 
     /// 執行一次單步請求，回傳要回報的事件。
@@ -554,8 +605,11 @@ impl Worker {
         if err.needs_relogin() || switched {
             // 登入態失效（或剛切換路由）：記下任務，重新登入後自動重試。
             self.emit(Event::SessionExpired { site });
+            // 額度按任務鍵各自計算：互動式任務與長載入互不消耗；同一任務的
+            // 自動重試鏈則共用同一份額度（重試後再失效時遞減）。
+            let key = job.data_key();
             self.retry = Some(job);
-            if !self.relogin.try_consume() {
+            if !key.is_some_and(|key| self.relogin.try_consume(&key)) {
                 // 自動重登後站點仍回報登入態失效：停止自動重試，避免
                 //「重登→重試→再失效」的無上限迴圈，交由使用者手動重試。
                 if let Some(job) = self.retry.take() {
@@ -609,6 +663,10 @@ fn is_recoverable(err: &AppError) -> bool {
     }
     !matches!(err, AppError::Network { kind, .. } if kind.is_connection_level())
 }
+
+#[cfg(test)]
+#[path = "tests/fixtures.rs"]
+mod fixtures;
 
 #[cfg(test)]
 #[path = "tests/worker_test.rs"]

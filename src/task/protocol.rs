@@ -167,6 +167,15 @@ impl Job {
         )
     }
 
+    /// 是否為互動式資料任務（使用者正在等待結果）。
+    ///
+    /// 這類任務由使用者操作直接觸發（例如按 `o` 開啟活動網頁）：長載入
+    ///（作業彙總）進行時必須在下一個步進邊界立即執行，而不是排在整輪
+    /// 載入之後。它仍屬於資料任務——去重與統一重新登入重試等語意不變。
+    pub fn is_interactive(&self) -> bool {
+        matches!(self, Self::OpenActivity { .. })
+    }
+
     /// 資料任務的合併鍵；同鍵的排隊請求視為重複而合併。
     pub(super) fn data_key(&self) -> Option<DataKey> {
         match self {
@@ -197,7 +206,7 @@ impl Job {
 }
 
 /// 資料任務的合併鍵。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) enum DataKey {
     Schedule,
     Homework,

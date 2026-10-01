@@ -212,21 +212,22 @@ impl Worker {
             if !self.drain_channel(&job) {
                 return;
             }
-            if generation != self.generation {
-                self.emit(Event::Notice(
-                    "账号或访问模式已变更，已取消进行中的作业加载".to_owned(),
-                ));
-                self.emit(Event::LoadingCancelled {
-                    target: FailedTarget::Homework,
-                });
+            if self.homework_cancelled(generation, epoch) {
                 return;
             }
-            if epoch != self.homework_epoch {
-                // 學期已切換：本輪基於舊學期，停止並讓已排入的強制重載接手，
-                // 避免舊學期的進度與完成結果繼續回填畫面。
-                self.emit(Event::LoadingCancelled {
-                    target: FailedTarget::Homework,
-                });
+            // 互動式資料任務（按 `o` 開啟網頁）不應等待整輪載入：在下一個
+            // 步進邊界立即執行。執行期間可能同步完成重新登入——登入成功後的
+            // 內層重試會排空通道，可能處理換帳號／換學期指令（代際或學期在
+            // 這裡被改動）；返回後必須重新驗證，否則會以舊帳號或舊學期的
+            // 資料繼續載入並回填畫面。
+            let login_pending = self.flush_interactive();
+            if self.homework_cancelled(generation, epoch) {
+                return;
+            }
+            if login_pending {
+                // 觸發了互動式登入：暫停本輪載入並重新排隊——登入完成（或
+                // 取消）後會再跑一次，已取得的資料多在快取中。
+                self.merge_data_job(job, None);
                 return;
             }
             if matches!(runner.stage, HomeworkStage::Done) {
@@ -239,6 +240,35 @@ impl Worker {
                 return;
             }
         }
+    }
+
+    /// 本輪作業載入是否已失效（換帳號、切換模式、學期切換或收到結束指令）。
+    ///
+    /// 換帳號／切換模式與學期切換會一併回報事件收斂介面（結束指令除外：
+    /// 程式正在退出，介面不需要收斂事件）；回傳 `true` 代表呼叫端必須停止
+    /// 本輪，且不得重新排隊。
+    fn homework_cancelled(&mut self, generation: u64, epoch: u64) -> bool {
+        if self.shutdown {
+            return true;
+        }
+        if generation != self.generation {
+            self.emit(Event::Notice(
+                "账号或访问模式已变更，已取消进行中的作业加载".to_owned(),
+            ));
+            self.emit(Event::LoadingCancelled {
+                target: FailedTarget::Homework,
+            });
+            return true;
+        }
+        if epoch != self.homework_epoch {
+            // 學期已切換：本輪基於舊學期，停止並讓已排入的強制重載接手，
+            // 避免舊學期的進度與完成結果繼續回填畫面。
+            self.emit(Event::LoadingCancelled {
+                target: FailedTarget::Homework,
+            });
+            return true;
+        }
+        false
     }
 
     /// 準備作業載入：載入課程、判定學期、過濾課程並回報首批進度。

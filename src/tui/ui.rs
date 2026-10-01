@@ -4,7 +4,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::text::display_width;
 use crate::tui::app::{FormState, LoginScreen};
@@ -44,6 +44,24 @@ pub fn popup_surface(frame: &mut Frame, area: Rect, title: &str) -> Rect {
     let inner = block.inner(area);
     frame.render_widget(block, area);
     inner
+}
+
+/// 共用清單繪製：統一外框、選取高亮與 `▍` 選取符號。
+///
+/// 欄寬計算（見 `views::content`）以本函式的實際排版為準：外框左右欄線與
+/// 選取符號各佔一欄，最寬的內容才不會在最後一欄被裁掉。
+pub fn render_list(
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    items: Vec<ListItem<'static>>,
+    state: &mut ListState,
+) {
+    let list = List::new(items)
+        .block(THEME.block(title))
+        .highlight_style(THEME.highlight_style())
+        .highlight_symbol("▍");
+    frame.render_stateful_widget(list, area, state);
 }
 
 /// 輸入框的可見內容與游標欄位（水平捲動，含寬字元）。

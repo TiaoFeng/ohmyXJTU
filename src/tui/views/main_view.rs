@@ -4,7 +4,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{List, ListItem, Paragraph};
 
 use crate::text::display_width;
 use crate::tui::app::{App, LmsLevel, NavItem, Screen};
@@ -142,19 +142,4 @@ fn hints(app: &App) -> String {
         }
     }
     text
-}
-
-/// 供其他繪製函式使用的清單狀態包裝。
-pub fn render_list(
-    frame: &mut Frame,
-    area: Rect,
-    title: &str,
-    items: Vec<ListItem<'static>>,
-    state: &mut ListState,
-) {
-    let list = List::new(items)
-        .block(THEME.block(title))
-        .highlight_style(THEME.highlight_style())
-        .highlight_symbol("▍");
-    frame.render_stateful_widget(list, area, state);
 }

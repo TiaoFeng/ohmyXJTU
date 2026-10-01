@@ -12,7 +12,7 @@ use crate::sites::lms::LmsCourse;
 use crate::task::{CoursesData, Event, FailedTarget, HomeworkUpdate};
 use crate::tui::app::{
     ActivityDetailView, AgreementState, App, FlowData, FormState, HomeworkData, LmsLevel,
-    LoginScreen, NavItem, Page, ScheduleData, Screen, SettingsState,
+    LoginScreen, NavItem, Page, ScheduleData, Screen, SettingsState, TermPickerState,
 };
 use crate::tui::text::InputLine;
 
@@ -240,6 +240,7 @@ fn data_failure_settles_page_and_stuck_login_progress() {
             message: "网络连接失败（域名解析失败）".to_owned(),
             target: FailedTarget::Schedule,
             site: None,
+            resource: None,
         },
     );
 
@@ -269,6 +270,7 @@ fn data_failure_settles_page_and_stuck_login_progress() {
             message: "网络连接失败".to_owned(),
             target: FailedTarget::Schedule,
             site: None,
+            resource: None,
         },
     );
     assert!(
@@ -293,6 +295,7 @@ fn login_failure_shows_failed_overlay() {
             message: "网络连接失败".to_owned(),
             target: FailedTarget::Login,
             site: Some(crate::session::SiteKind::Attendance),
+            resource: None,
         },
     );
 
@@ -318,6 +321,7 @@ fn late_login_failure_does_not_reopen_dismissed_overlay() {
             message: "网络连接失败".to_owned(),
             target: FailedTarget::Login,
             site: Some(crate::session::SiteKind::Attendance),
+            resource: None,
         },
     );
 
@@ -343,6 +347,7 @@ fn settings_failure_keeps_popup_and_draft() {
             message: "配置错误".to_owned(),
             target: FailedTarget::Settings,
             site: None,
+            resource: None,
         },
     );
 
@@ -377,6 +382,7 @@ fn credential_failure_restores_unlock_form_with_error() {
             message: "加密口令错误".to_owned(),
             target: FailedTarget::Credentials,
             site: None,
+            resource: None,
         },
     );
 
@@ -407,6 +413,7 @@ fn credential_failure_keeps_setup_account_but_clears_secrets() {
             message: "凭证文件写入失败".to_owned(),
             target: FailedTarget::Credentials,
             site: None,
+            resource: None,
         },
     );
 
@@ -547,6 +554,7 @@ fn task_failure_stays_on_credentials_form() {
             message: "口令错误或凭证文件已损坏".to_owned(),
             target: FailedTarget::Login,
             site: Some(crate::session::SiteKind::Attendance),
+            resource: None,
         },
     );
 
@@ -884,6 +892,7 @@ fn agreement_failure_keeps_gate_with_inline_error() {
             message: "写入配置文件失败".to_owned(),
             target: FailedTarget::Agreement,
             site: None,
+            resource: None,
         },
     );
     let state = app.agreement.as_deref().expect("失败后閱讀門应保留");
@@ -989,6 +998,172 @@ fn course(id: &str) -> LmsCourse {
     }
 }
 
+/// 測試用作業更新（空清單）。
+fn homework_update(progress: Option<(usize, usize)>) -> HomeworkUpdate {
+    HomeworkUpdate {
+        term_label: Some("2026-2027 学年 第 1 学期".to_owned()),
+        term_source: Some(TermSource::Attendance),
+        courses_included: 0,
+        courses_skipped: 0,
+        term_options: Vec::new(),
+        items: Vec::new(),
+        issues: Vec::new(),
+        courses_failed: 0,
+        progress,
+        elapsed: Duration::from_millis(10),
+        requests: 1,
+    }
+}
+
+/// 背景資料更新不得關閉使用者正在操作的學期選擇器。
+#[test]
+fn term_picker_survives_background_data_updates() {
+    let mut app = app();
+    app.set_screen(Screen::TermPicker(TermPickerState::new(
+        vec![TermCode::parse("2026-2027-1").expect("学期")],
+        None,
+        "无法判定本学期".to_owned(),
+    )));
+    app.lms.activities_course = Some("1".to_owned());
+
+    // 作業進度（部分結果與終態）都不得把選擇器換成主畫面。
+    apply_event(&mut app, Event::Homework(homework_update(Some((0, 2)))));
+    assert!(
+        matches!(app.screen, Screen::TermPicker(_)),
+        "作業進度不得關閉學期選擇器"
+    );
+    apply_event(&mut app, Event::Homework(homework_update(None)));
+    assert!(matches!(app.screen, Screen::TermPicker(_)));
+
+    // 其他頁面的資料事件同理。
+    apply_event(&mut app, Event::Flow(Box::default()));
+    apply_event(
+        &mut app,
+        Event::Courses(CoursesData {
+            courses: vec![course("1")],
+            current_term: None,
+        }),
+    );
+    apply_event(
+        &mut app,
+        Event::Activities {
+            course_id: "1".to_owned(),
+            activities: Vec::new(),
+        },
+    );
+    assert!(
+        matches!(app.screen, Screen::TermPicker(_)),
+        "其他資料事件也不得關閉學期選擇器"
+    );
+}
+
+/// 切到新課程後，前一門課遲到的失敗不得把新課程的活動頁標成失敗。
+#[test]
+fn stale_activities_failure_does_not_pollute_the_new_course() {
+    let mut app = app();
+    app.nav = NavItem::Lms;
+    app.lms.level = LmsLevel::Activities;
+    app.lms.activities_course = Some("B".to_owned());
+    app.lms.activities.start_loading("正在加载课程活动…");
+
+    // A 課（已離開）的失敗：忽略。
+    apply_event(
+        &mut app,
+        Event::Failed {
+            what: "课程活动".to_owned(),
+            message: "连接失败".to_owned(),
+            target: FailedTarget::Activities,
+            site: Some(SiteKind::Lms),
+            resource: Some("A".to_owned()),
+        },
+    );
+    assert!(
+        app.lms.activities.is_loading(),
+        "舊課程的失敗不得影響目前課程：{:?}",
+        app.lms.activities
+    );
+
+    // 目前課程（B）的失敗：照常標記。
+    apply_event(
+        &mut app,
+        Event::Failed {
+            what: "课程活动".to_owned(),
+            message: "连接失败".to_owned(),
+            target: FailedTarget::Activities,
+            site: Some(SiteKind::Lms),
+            resource: Some("B".to_owned()),
+        },
+    );
+    assert!(matches!(app.lms.activities, Page::Failed { .. }));
+}
+
+/// 活動詳情同理：遲到的舊活動失敗不得污染目前詳情。
+#[test]
+fn stale_activity_detail_failure_is_ignored() {
+    let mut app = app();
+    app.nav = NavItem::Lms;
+    app.lms.level = LmsLevel::Detail;
+    app.lms.detail_activity = Some("b".to_owned());
+    app.lms.detail.start_loading("正在加载活动详情…");
+
+    apply_event(
+        &mut app,
+        Event::Failed {
+            what: "活动详情".to_owned(),
+            message: "连接失败".to_owned(),
+            target: FailedTarget::ActivityDetail,
+            site: Some(SiteKind::Lms),
+            resource: Some("a".to_owned()),
+        },
+    );
+    assert!(app.lms.detail.is_loading(), "舊活動的失敗不得影響目前詳情");
+}
+
+/// 帳號驗證成功但憑證保存失敗：解除表單處理中並就地顯示錯誤（不再卡住）。
+#[test]
+fn credential_save_failure_clears_busy_settings_form() {
+    let mut app = app();
+    let mut form = FormState::change_account();
+    form.busy = true;
+    app.set_screen(Screen::SettingsForm(form));
+
+    apply_event(
+        &mut app,
+        Event::CredentialSaveFailed("登录成功，但凭据保存失败：磁盘只读".to_owned()),
+    );
+
+    let Screen::SettingsForm(form) = &app.screen else {
+        panic!("保存失敗應留在表單");
+    };
+    assert!(!form.busy, "保存失敗後必須解除處理中，否則連 Esc 都被忽略");
+    assert_eq!(
+        form.error.as_deref(),
+        Some("登录成功，但凭据保存失败：磁盘只读")
+    );
+}
+
+/// 「重新輸入帳密」覆蓋層的保存失敗：同樣解除處理中並顯示錯誤。
+#[test]
+fn credential_save_failure_clears_busy_login_form() {
+    let mut app = app();
+    app.set_screen(Screen::Main);
+    let mut form = FormState::login_retry(SiteKind::Attendance);
+    form.busy = true;
+    app.login = Some(Box::new(LoginScreen::Credentials {
+        site: SiteKind::Attendance,
+        form,
+        message: String::new(),
+    }));
+
+    apply_event(&mut app, Event::CredentialSaveFailed("保存失败".to_owned()));
+
+    let Some(LoginScreen::Credentials { form, .. }) = app.login.as_deref() else {
+        panic!("應留在重新輸入表單");
+    };
+    assert!(!form.busy);
+    assert_eq!(form.error.as_deref(), Some("保存失败"));
+}
+
 #[test]
 fn late_activities_response_is_dropped() {
     let mut app = app();
@@ -1038,4 +1213,77 @@ fn late_activity_detail_response_is_dropped() {
 
     apply_event(&mut app, Event::ActivityDetail(detail("2")));
     assert!(app.lms.detail.ready().is_some(), "目前活動的詳情應套用");
+}
+
+/// 遲到的舊資源失敗雖不標記目前頁面，仍必須收斂卡住的登入進度覆蓋層。
+///
+/// 重現：A 課查詢觸發自動重登，使用者已切到 B 課；重登的首次請求逾時，A 的
+/// 失敗被視為遲到，若連登入終態處理都被略過，「正在登入」會永遠留著。
+#[test]
+fn stale_resource_failure_still_settles_login_progress() {
+    let mut app = app();
+    app.nav = NavItem::Lms;
+    app.lms.level = LmsLevel::Activities;
+    app.lms.activities_course = Some("B".to_owned());
+    app.lms.activities.start_loading("正在加载课程活动…");
+    app.login = Some(Box::new(LoginScreen::Progress {
+        note: "正在登录考勤系统…".to_owned(),
+    }));
+
+    apply_event(
+        &mut app,
+        Event::Failed {
+            what: "课程活动".to_owned(),
+            message: "网络连接失败".to_owned(),
+            target: FailedTarget::Activities,
+            site: Some(SiteKind::Lms),
+            resource: Some("A".to_owned()),
+        },
+    );
+
+    assert!(
+        app.lms.activities.is_loading(),
+        "舊資源的失敗不得標記目前頁面"
+    );
+    assert!(
+        matches!(app.login.as_deref(), Some(LoginScreen::Failed { .. })),
+        "覆蓋層仍須離開「正在登入」：{:?}",
+        app.login
+    );
+}
+
+/// 保存失敗的通知必須在登入成功之後仍看得見。
+///
+/// 工作者先發 `LoginSucceeded`（主要結果）、再發 `CredentialSaveFailed`
+/// （附帶副作用）；介面訊息是後到者覆蓋先前的，故保存失敗不能被清掉。
+#[test]
+fn credential_save_failure_survives_login_success() {
+    let mut app = app();
+    app.set_screen(Screen::Main);
+    let mut form = FormState::login_retry(SiteKind::Attendance);
+    form.busy = true;
+    app.login = Some(Box::new(LoginScreen::Credentials {
+        site: SiteKind::Attendance,
+        form,
+        message: String::new(),
+    }));
+
+    apply_event(
+        &mut app,
+        Event::LoginSucceeded {
+            site: SiteKind::Attendance,
+            mode: Some(AccessMode::Direct),
+        },
+    );
+    assert!(app.login.is_none(), "登入成功應關閉覆蓋層");
+
+    apply_event(
+        &mut app,
+        Event::CredentialSaveFailed("登录成功，但凭据保存失败：磁盘只读".to_owned()),
+    );
+    assert_eq!(
+        app.message_text(),
+        Some("登录成功，但凭据保存失败：磁盘只读"),
+        "保存失敗的提醒不得被「登录成功」蓋掉"
+    );
 }

@@ -323,6 +323,11 @@ pub enum Event {
     OpenUrl(String),
     /// 帳號已更新。
     AccountUpdated,
+    /// 帳號已驗證成功，但憑證寫入保險庫失敗。
+    ///
+    /// 介面必須解除表單的「處理中」狀態並就地顯示錯誤；否則表單會卡在
+    /// 「正在处理」，且 busy 期間連 Esc 都被忽略。
+    CredentialSaveFailed(String),
     /// 加密口令已更新。
     PassphraseUpdated,
     /// 訪問策略已更新。
@@ -353,6 +358,11 @@ pub enum Event {
         target: FailedTarget,
         /// 失敗所屬的站點（登入類任務才有；供介面重試同一站點）。
         site: Option<SiteKind>,
+        /// 失敗所屬的資源識別碼（活動為課程識別碼、詳情為活動識別碼）。
+        ///
+        /// 供介面隔離遲到的舊資源失敗：切到別的課程／活動後，前一個資源的
+        /// 失敗不得把目前畫面標成失敗。非資源型任務為 `None`。
+        resource: Option<String>,
     },
 }
 
@@ -510,6 +520,11 @@ struct Worker {
     pending_data: VecDeque<Job>,
     /// 資料任務代際：帳號或訪問模式變更時遞增，進行中的任務自動中止。
     generation: u64,
+    /// 作業載入代際：使用者切換學期時遞增，進行中的作業載入自動中止。
+    ///
+    /// 學期變更不影響其他資料（課程清單不變，只有分區提示改變），因此不
+    /// 共用 `generation`——那會連課程／活動載入一起取消。
+    homework_epoch: u64,
     /// 本輪載入已嘗試的自動重新登入次數（全新的載入請求歸零）。
     relogin_attempts: u8,
     /// 思源學堂課程／活動快取。
@@ -739,6 +754,7 @@ pub fn spawn(config: Config, vault: Vault) -> AppResult<(Sender<Job>, Receiver<E
         captcha_path: None,
         pending_data: VecDeque::new(),
         generation: 0,
+        homework_epoch: 0,
         relogin_attempts: 0,
         cache: LmsCache::default(),
         known_term: None,
@@ -813,6 +829,7 @@ impl Worker {
         let what = job.label();
         let target = failed_target_of(&job);
         let site = self.login_site_of(&job);
+        let resource = resource_of(&job);
         // 帳號切換失敗時必須丟棄待存憑證：交由 [`Self::dispatch_control`] 統一
         // 處理（含互動驗證步驟），這裡只需要清掉暫存的驗證碼圖片。
         if let Err(err) = self.dispatch_control(job) {
@@ -832,6 +849,7 @@ impl Worker {
                     message: err.to_string(),
                     target,
                     site,
+                    resource,
                 });
             }
         }
@@ -865,6 +883,7 @@ impl Worker {
             message: err.to_string(),
             target: failed_target_of(job),
             site,
+            resource: resource_of(job),
         });
     }
 
@@ -1039,8 +1058,9 @@ impl Worker {
         // 已切到所選學期，回到思源學堂仍按舊學期分區（要手動刷新才會更新）。
         self.emit(Event::CoursesTerm(Some(term)));
         self.emit(Event::Notice(format!("已记住学期 {}", term.label())));
-        // 學期已變更：任何早於此開始的載入都基於舊學期，必須確保佇列中恰有
-        // 一筆強制重載（忽略執行中任務），切換才會立即生效。
+        // 學期已變更：使進行中的作業載入失效（它基於舊學期），並確保佇列中
+        // 恰有一筆強制重載（忽略執行中任務），切換才會立即生效。
+        self.homework_epoch += 1;
         self.merge_data_job(Job::LoadHomework { force: true }, None);
         Ok(())
     }
@@ -1367,13 +1387,16 @@ impl Worker {
                 "当前会话仍处于登录状态，无法验证新账号（已保留原有凭证）",
             ));
         }
-        // 登入成功後才更新保險庫，失敗的憑證不會覆蓋舊憑證。
-        self.commit_pending_vault();
         let mode = self
             .session
             .as_ref()
             .and_then(|session| session.access_mode(site));
+        // 先回報登入成功（主要結果），再處理憑證保存（附帶副作用）。介面的
+        // 訊息是「後到者覆蓋先前的」，因此保存失敗必須是最後一個事件，否則
+        // 會被緊接著的「登录成功」蓋掉，使用者就看不到失敗提醒。
         self.emit(Event::LoginSucceeded { site, mode });
+        // 登入成功後才更新保險庫，失敗的憑證不會覆蓋舊憑證。
+        self.commit_pending_vault();
         // 登入成功後續跑等待中的任務（可能是資料任務或控制任務）。
         if let Some(job) = retry.or(self.retry.take()) {
             if job.is_control() {
@@ -1395,7 +1418,7 @@ impl Worker {
         };
 
         if self.vault.load(&pending.passphrase).is_err() {
-            self.emit(Event::Notice(
+            self.emit(Event::CredentialSaveFailed(
                 "登录成功，但加密口令已变更，未保存新的账号凭据".to_owned(),
             ));
             return;
@@ -1403,7 +1426,9 @@ impl Worker {
 
         match self.vault.store(&pending.passphrase, &pending.credentials) {
             Ok(()) => self.emit(Event::AccountUpdated),
-            Err(err) => self.emit(Event::Notice(format!("登录成功，但凭据保存失败：{err}"))),
+            Err(err) => self.emit(Event::CredentialSaveFailed(format!(
+                "登录成功，但凭据保存失败：{err}"
+            ))),
         }
     }
 
@@ -1738,6 +1763,7 @@ impl Worker {
     /// 作業載入（步進執行：每門課程、每項作業之間先處理控制任務）。
     fn run_homework_job(&mut self, force: bool) {
         let generation = self.generation;
+        let epoch = self.homework_epoch;
         let job = Job::LoadHomework { force };
 
         let mut runner = match self.begin_homework(force) {
@@ -1757,6 +1783,14 @@ impl Worker {
                 self.emit(Event::Notice(
                     "账号或访问模式已变更，已取消进行中的作业加载".to_owned(),
                 ));
+                self.emit(Event::LoadingCancelled {
+                    target: FailedTarget::Homework,
+                });
+                return;
+            }
+            if epoch != self.homework_epoch {
+                // 學期已切換：本輪基於舊學期，停止並讓已排入的強制重載接手，
+                // 避免舊學期的進度與完成結果繼續回填畫面。
                 self.emit(Event::LoadingCancelled {
                     target: FailedTarget::Homework,
                 });
@@ -2284,6 +2318,17 @@ fn failed_target_of(job: &Job) -> FailedTarget {
         | Job::ChangeAccount { .. }
         | Job::ChangePassphrase { .. } => FailedTarget::Credentials,
         _ => FailedTarget::Settings,
+    }
+}
+
+/// 任務失敗時所屬的資源識別碼（供介面隔離遲到的舊資源失敗）。
+///
+/// 活動為課程識別碼、詳情為活動識別碼；其他任務沒有可資隔離的資源。
+fn resource_of(job: &Job) -> Option<String> {
+    match job {
+        Job::LoadActivities { course_id, .. } => Some(course_id.clone()),
+        Job::LoadActivityDetail { activity_id } => Some(activity_id.clone()),
+        _ => None,
     }
 }
 

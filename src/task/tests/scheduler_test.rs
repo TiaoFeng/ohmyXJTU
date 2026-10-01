@@ -86,6 +86,7 @@ impl ThreadWorker {
             captcha_path: None,
             pending_data: VecDeque::new(),
             generation: 0,
+            homework_epoch: 0,
             relogin_attempts: 0,
             cache: LmsCache::default(),
             known_term: None,
@@ -121,6 +122,15 @@ impl ThreadWorker {
             }
         }
         false
+    }
+
+    /// 收集目前為止已送出的所有事件（通道閒置即停止）。
+    fn drain_events(&self) -> Vec<Event> {
+        let mut collected = Vec::new();
+        while let Ok(event) = self.events.recv_timeout(Duration::from_millis(100)) {
+            collected.push(event);
+        }
+        collected
     }
 }
 
@@ -452,7 +462,86 @@ fn forced_refresh_upgrades_a_queued_non_forced_load() {
     );
     assert_eq!(count(&seen, "/api/my-courses"), 2, "最多一次重載");
 }
+/// 切換學期必須使進行中的作業載入失效，不得再回填舊學期的進度與結果。
+#[test]
+fn switching_term_cancels_the_running_load_without_old_results() {
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let (started_tx, started_rx) = std_channel::<()>();
+    let (release_tx, release_rx) = std_channel::<()>();
+    let started = Mutex::new(started_tx);
+    let release_rx = Mutex::new(release_rx);
+    let signalled = Mutex::new(false);
 
+    let site_seen = Arc::clone(&seen);
+    let worker = ThreadWorker::lms_only(move |request: &HttpRequest| {
+        let url = request.url.clone();
+        site_seen.lock().expect("lock").push(url.clone());
+
+        if url.ends_with("/api/my-courses") {
+            return courses_response();
+        }
+        if url.ends_with("/courses/1/activities") {
+            let mut signalled = signalled.lock().expect("lock");
+            if !*signalled {
+                *signalled = true;
+                started
+                    .lock()
+                    .expect("lock")
+                    .send(())
+                    .expect("发送开始信号");
+                release_rx.lock().expect("lock").recv().expect("等待释放");
+            }
+            return Ok(json(serde_json::json!({ "activities": [] })));
+        }
+        if url.ends_with("/courses/2/activities") {
+            return Ok(json(serde_json::json!({ "activities": [] })));
+        }
+        panic!("未预期的请求：{url}");
+    });
+
+    // 先選定學期甲：自動排入一次強制載入，並在第一門課程的活動查詢阻塞。
+    worker.send(Job::SetHomeworkTerm {
+        term: "2026-2027-1".to_owned(),
+    });
+    started_rx.recv_timeout(WAIT).expect("作业应开始查询");
+    // 載入進行中切換到學期乙。
+    worker.send(Job::SetHomeworkTerm {
+        term: "2025-2026-2".to_owned(),
+    });
+    release_tx.send(()).expect("释放请求");
+
+    assert!(
+        wait_settled(|| count(&seen, "/api/my-courses"), 2),
+        "切換學期後應再執行一次強制重載"
+    );
+
+    // 舊學期的載入必須在切換後立即中止：切換後不得再出現任何舊學期的進度
+    // 或完成結果（切換前已發出的初始進度不在此限）。
+    let events = worker.drain_events();
+    let old_label = TermCode::parse("2026-2027-1").expect("学期").label();
+    let new_term = TermCode::parse("2025-2026-2").expect("学期");
+    let new_label = new_term.label();
+    let switch_at = events
+        .iter()
+        .position(|event| matches!(event, Event::CoursesTerm(Some(term)) if *term == new_term))
+        .expect("應收到學期切換事件");
+    assert!(
+        !events[switch_at..].iter().any(|event| matches!(
+            event,
+            Event::Homework(update) if update.term_label.as_deref() == Some(old_label.as_str())
+        )),
+        "切換學期後不得再回填舊學期的進度或結果：{:?}",
+        &events[switch_at..]
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Homework(update) if update.progress.is_none()
+                && update.term_label.as_deref() == Some(new_label.as_str())
+        )),
+        "應得到新學期的完成結果：{events:?}"
+    );
+}
 /// 課程單步載入進行中收到強制刷新：排隊的下一筆必須是強制（不得被吞或降級）。
 #[test]
 fn forced_refresh_is_kept_behind_a_running_non_forced_course_load() {

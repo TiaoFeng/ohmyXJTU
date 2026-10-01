@@ -280,3 +280,49 @@ fn agreement_saving_blocks_confirm_and_failure_recovers() {
     assert_eq!(state.error.as_deref(), Some("写入配置文件失败"));
     assert!(state.can_confirm(), "失败后可重试确认");
 }
+
+// ── 課程清單導航（依畫面可見順序）─────────────────────
+
+/// 課程列（帶學期碼，供分區測試）。
+fn course_with_term(id: &str, code: &str) -> LmsCourse {
+    LmsCourse {
+        id: id.to_owned(),
+        name: format!("课程{id}"),
+        course_code: None,
+        instructors: Vec::new(),
+        semester: Some(crate::sites::lms::models::LmsSemester {
+            id: None,
+            code: Some(code.to_owned()),
+            name: None,
+            real_name: None,
+        }),
+        academic_year: None,
+    }
+}
+
+#[test]
+fn course_navigation_follows_the_displayed_partition_order() {
+    let mut app = App::new(AccessPolicy::Auto);
+    app.nav = NavItem::Lms;
+    app.lms.level = LmsLevel::Courses;
+    // 原始順序：歷史(索引 0) → 本學期(索引 1)；畫面會把本學期課程置頂。
+    app.lms.courses = Page::Ready(vec![
+        course_with_term("1", "2025-2"),
+        course_with_term("2", "2026-1"),
+    ]);
+    app.lms.courses_term = TermCode::parse("2026-2027-1");
+    // 畫面第一門＝本學期課程（真實索引 1）。
+    app.course_state.select(Some(1));
+
+    // 畫面上的下一門是歷史課程（真實索引 0），不是不存在的原始索引 2。
+    app.select_next();
+    assert_eq!(app.page_selection(), 0, "應依畫面順序移到歷史課程");
+
+    // 再下一門循環回本學期課程。
+    app.select_next();
+    assert_eq!(app.page_selection(), 1, "應循環回本學期課程");
+
+    // 反向：從本學期課程往前是歷史課程。
+    app.select_previous();
+    assert_eq!(app.page_selection(), 0);
+}

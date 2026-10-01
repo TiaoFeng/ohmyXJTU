@@ -423,6 +423,22 @@ fn apply_event(app: &mut App, event: Event, jobs: &Sender<Job>) {
             }
             app.set_message("账号已更新");
         }
+        Event::CredentialSaveFailed(message) => {
+            // 帳號已驗證成功，但憑證寫入保險庫失敗：解除表單的「處理中」
+            // 狀態並就地顯示錯誤，否則表單會卡住而連 Esc 都被忽略。
+            match &mut app.screen {
+                Screen::Setup(form) | Screen::Unlock(form) | Screen::SettingsForm(form) => {
+                    form.busy = false;
+                    form.error = Some(message.clone());
+                }
+                _ => {}
+            }
+            if let Some(LoginScreen::Credentials { form, .. }) = app.login.as_deref_mut() {
+                form.busy = false;
+                form.error = Some(message.clone());
+            }
+            app.set_message(message);
+        }
         Event::PassphraseUpdated => {
             // 修改口令成功：離開處理中狀態並回到設定選單。
             if matches!(
@@ -453,45 +469,55 @@ fn apply_event(app: &mut App, event: Event, jobs: &Sender<Job>) {
             message,
             target,
             site,
+            resource,
         } => {
-            // 錯誤只標記受影響的頁面；其他頁面保持原狀。
-            app.fail_target(target, &message);
-            let text = format!("{what}失败：{message}");
             let login_site = site.unwrap_or(SiteKind::Attendance);
-            match target {
-                FailedTarget::Login => set_login_error(app, login_site, text.clone()),
-                FailedTarget::Settings => {
-                    // 設定保存失敗：保留彈窗與草稿，僅解除「保存中」；
-                    // 設定表單失敗則就地顯示錯誤並恢復輸入。
-                    match &mut app.screen {
-                        Screen::Settings(state) => state.saving = false,
-                        Screen::SettingsForm(form) => {
-                            form.busy = false;
-                            form.error = Some(text.clone());
+            // 遲到的舊資源失敗：使用者已切到別的課程／活動，前一個資源的失敗
+            // 不得標記目前畫面（與成功回應的識別碼檢查一致）；但登入流程的
+            // 終態處理仍要執行（見下方），否則自動重登失敗後「正在登入」的
+            // 覆蓋層會永遠留著。
+            if !failed_resource_is_stale(app, target, resource.as_deref()) {
+                // 錯誤只標記受影響的頁面；其他頁面保持原狀。
+                app.fail_target(target, &message);
+                let text = format!("{what}失败：{message}");
+                match target {
+                    FailedTarget::Login => set_login_error(app, login_site, text.clone()),
+                    FailedTarget::Settings => {
+                        // 設定保存失敗：保留彈窗與草稿，僅解除「保存中」；
+                        // 設定表單失敗則就地顯示錯誤並恢復輸入。
+                        match &mut app.screen {
+                            Screen::Settings(state) => state.saving = false,
+                            Screen::SettingsForm(form) => {
+                                form.busy = false;
+                                form.error = Some(text.clone());
+                            }
+                            _ => {}
                         }
-                        _ => {}
                     }
-                }
-                FailedTarget::Credentials => {
-                    // 憑證操作失敗：留在可編輯表單就地顯示錯誤；敏感欄位清空、帳號保留。
-                    match &mut app.screen {
-                        Screen::Setup(form) | Screen::Unlock(form) | Screen::SettingsForm(form) => {
-                            form.busy = false;
-                            form.error = Some(text.clone());
-                            form.clear_secrets();
+                    FailedTarget::Credentials => {
+                        // 憑證操作失敗：留在可編輯表單就地顯示錯誤；敏感欄位清空、帳號保留。
+                        match &mut app.screen {
+                            Screen::Setup(form)
+                            | Screen::Unlock(form)
+                            | Screen::SettingsForm(form) => {
+                                form.busy = false;
+                                form.error = Some(text.clone());
+                                form.clear_secrets();
+                            }
+                            _ => {}
                         }
-                        _ => {}
+                    }
+                    FailedTarget::Agreement => {
+                        // 協議同意保存失敗：留在閱讀畫面就地顯示錯誤，可重試。
+                        if let Some(state) = app.agreement.as_mut() {
+                            state.fail(message.clone());
+                        }
+                    }
+                    _ => {
+                        // 資料任務失敗：只標記對應頁面，不影響根畫面。
                     }
                 }
-                FailedTarget::Agreement => {
-                    // 協議同意保存失敗：留在閱讀畫面就地顯示錯誤，可重試。
-                    if let Some(state) = app.agreement.as_mut() {
-                        state.fail(message.clone());
-                    }
-                }
-                _ => {
-                    // 資料任務失敗：只標記對應頁面，不影響根畫面。
-                }
+                app.set_message(text);
             }
             // 登入嘗試若以失敗收場（包含自動重登連開始都做不到，例如離線），
             // 覆蓋層必須離開「正在登入」：進度畫面只接受 q，否則使用者會被
@@ -502,7 +528,6 @@ fn apply_event(app: &mut App, event: Event, jobs: &Sender<Job>) {
                     message: format!("登录未完成：{message}"),
                 }));
             }
-            app.set_message(text);
         }
     }
 }
@@ -510,6 +535,21 @@ fn apply_event(app: &mut App, event: Event, jobs: &Sender<Job>) {
 /// 目前時鐘（顯示更新時間用）。
 fn now_clock() -> String {
     chrono::Local::now().format("%H:%M:%S").to_string()
+}
+
+/// 失敗事件是否屬於已經離開的資源（課程活動或活動詳情）。
+///
+/// 只有帶資源識別碼且與目前選取不符時才算遲到；其他頁面不受影響。
+fn failed_resource_is_stale(app: &App, target: FailedTarget, resource: Option<&str>) -> bool {
+    match target {
+        FailedTarget::Activities => {
+            resource.is_some_and(|id| app.lms.activities_course.as_deref() != Some(id))
+        }
+        FailedTarget::ActivityDetail => {
+            resource.is_some_and(|id| app.lms.detail_activity.as_deref() != Some(id))
+        }
+        _ => false,
+    }
 }
 
 /// 顯示登入錯誤：憑證表單就地顯示，其餘登入畫面回到失敗畫面。

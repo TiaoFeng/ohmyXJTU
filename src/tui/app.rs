@@ -9,6 +9,7 @@ use ratatui::widgets::ListState;
 
 use crate::config::AccessPolicy;
 use crate::domain::activity::{self, ActivityGroup};
+use crate::domain::course_list::{self, CourseRow};
 use crate::domain::homework::{HomeworkGroup, HomeworkItem};
 use crate::domain::semester::TermCode;
 use crate::session::{AccessMode, SiteKind};
@@ -951,23 +952,66 @@ impl App {
 
     /// 下一個項目（非空清單首尾循環）。
     pub fn select_next(&mut self) {
+        self.move_selection(1);
+    }
+
+    /// 上一個項目（非空清單首尾循環）。
+    pub fn select_previous(&mut self) {
+        self.move_selection(-1);
+    }
+
+    /// 移動選取（`delta` 為 +1／-1；非空清單首尾循環）。
+    ///
+    /// 思源學堂課程層的畫面順序（本學期置頂、其後歷史課程）與原始索引不同，
+    /// 必須依「可見順序」移動，否則上下鍵會跳過畫面上的下一門課。
+    fn move_selection(&mut self, delta: i32) {
+        if self.nav == NavItem::Lms
+            && self.lms.level == LmsLevel::Courses
+            && let Some(index) = self.course_neighbor(delta)
+        {
+            self.course_state.select(Some(index));
+            return;
+        }
         let len = self.page_len();
         if len == 0 {
             return;
         }
         // 先將可能過期的索引正規化，再取下一個（尾端回到開頭）。
         let current = self.page_selection().min(len - 1);
-        self.set_selection((current + 1) % len);
+        let next = if delta >= 0 {
+            (current + 1) % len
+        } else {
+            (current + len - 1) % len
+        };
+        self.set_selection(next);
     }
 
-    /// 上一個項目（非空清單首尾循環）。
-    pub fn select_previous(&mut self) {
-        let len = self.page_len();
-        if len == 0 {
-            return;
+    /// 依畫面可見順序找下一門課（跳過標題／空白列），回傳其真實課程索引。
+    ///
+    /// 無法取得課程清單時回 `None`，由呼叫端退回一般（原始索引）的移動。
+    fn course_neighbor(&self, delta: i32) -> Option<usize> {
+        let courses = self.lms.courses.ready()?;
+        let rows = course_list::course_rows(courses, self.lms.courses_term);
+        if rows.is_empty() {
+            return None;
         }
-        let current = self.page_selection().min(len - 1);
-        self.set_selection((current + len - 1) % len);
+        let mut position = self
+            .course_state
+            .selected()
+            .and_then(|index| course_list::visual_index(&rows, index))
+            .unwrap_or(0);
+        // 逐列前進直到命中課程列（標題與空白列不可選取）；最多走一輪。
+        for _ in 0..rows.len() {
+            position = if delta >= 0 {
+                (position + 1) % rows.len()
+            } else {
+                (position + rows.len() - 1) % rows.len()
+            };
+            if let CourseRow::Course { course_index, .. } = &rows[position] {
+                return Some(*course_index);
+            }
+        }
+        None
     }
 
     /// 記錄站點登入成功時的訪問方式。
@@ -1105,15 +1149,18 @@ impl App {
         self.screen = screen;
     }
 
-    /// 是否在主畫面（含設定彈窗）。
+    /// 是否在主畫面（含設定彈窗與學期選擇器）。
     pub fn is_main(&self) -> bool {
         matches!(
             self.screen,
-            Screen::Main | Screen::Settings(_) | Screen::SettingsForm(_)
+            Screen::Main | Screen::Settings(_) | Screen::SettingsForm(_) | Screen::TermPicker(_)
         )
     }
 
     /// 若尚未進入主畫面（例如仍在登入畫面），切換到主畫面。
+    ///
+    /// 學期選擇器屬於主畫面上的彈窗，不算「尚未進入主畫面」，因此不會被
+    /// 背景資料更新（例如作業進度）意外關閉。
     pub fn ensure_main(&mut self) {
         if !self.is_main() {
             self.screen = Screen::Main;

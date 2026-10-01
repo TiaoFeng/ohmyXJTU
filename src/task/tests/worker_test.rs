@@ -227,6 +227,7 @@ impl Harness {
                 captcha_path: None,
                 pending_data: VecDeque::new(),
                 generation: 0,
+                homework_epoch: 0,
                 relogin_attempts: 0,
                 cache: LmsCache::default(),
                 known_term: None,
@@ -270,6 +271,7 @@ impl Harness {
         let what = job.label();
         let target = failed_target_of(&job);
         let site = self.worker.login_site_of(&job);
+        let resource = resource_of(&job);
         match self.worker.dispatch(job) {
             Ok(()) => Ok(()),
             Err(err) => {
@@ -281,6 +283,7 @@ impl Harness {
                         message: err.to_string(),
                         target,
                         site,
+                        resource,
                     });
                 }
                 Err(err)
@@ -3756,4 +3759,58 @@ fn set_homework_term_notifies_the_course_partition_hint() {
         )),
         "應通知介面更新課程分區的學期提示"
     );
+}
+
+/// 帳號驗證成功但憑證寫入失敗：必須發出保存失敗事件（介面據此解除表單的
+/// 「處理中」），且原有憑證不得被覆蓋。
+#[cfg(unix)]
+#[test]
+fn credential_save_failure_reports_and_keeps_the_old_vault() {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let mut harness = harness(fake_flow(0));
+    // 讓資料目錄唯讀：`load` 仍能讀到既有憑證，但 `store` 建立暫存檔會失敗。
+    let dir = harness._dir.path().to_path_buf();
+    let original = fs::metadata(&dir).expect("读取目录权限").permissions();
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).expect("设目录唯读");
+
+    let result = harness.dispatch(Job::ChangeAccount {
+        passphrase: "secret123".into(),
+        credentials: Credentials::new("3120000002", "new-password"),
+    });
+
+    // 還原權限，讓暫存目錄能被清理。
+    fs::set_permissions(&dir, original).expect("还原目录权限");
+
+    assert!(result.is_ok(), "只有保存失敗，任務本身不應失敗");
+    let events = harness.drain_events();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::CredentialSaveFailed(message) if message.contains("凭据保存失败")
+        )),
+        "應發出憑證保存失敗事件：{events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::AccountUpdated)),
+        "保存失敗不得回報帳號已更新：{events:?}"
+    );
+    // 順序：登入成功（主要結果）在前、保存失敗（附帶副作用）在後；否則介面
+    // 的「登录成功」會蓋掉保存失敗的提醒。
+    let login_at = events
+        .iter()
+        .position(|event| matches!(event, Event::LoginSucceeded { .. }))
+        .expect("應先回報登入成功");
+    let save_at = events
+        .iter()
+        .position(|event| matches!(event, Event::CredentialSaveFailed(_)))
+        .expect("應回報保存失敗");
+    assert!(login_at < save_at, "保存失敗必須是最後通知：{events:?}");
+    // 保險庫仍是舊憑證（寫入失敗未覆蓋）。
+    let stored = harness.vault.load("secret123").expect("读取凭据");
+    assert_eq!(stored.username, "3120000001");
+    assert_eq!(stored.password, "old-password");
 }

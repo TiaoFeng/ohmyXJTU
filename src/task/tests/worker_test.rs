@@ -20,6 +20,7 @@ use crate::http::fake::{FakeClient, html, json};
 use crate::http::{HttpClient, HttpRequest, HttpResponse, Method};
 use crate::session::AccessMode;
 use crate::sites::{attendance, lms};
+use crate::task::protocol::DataKey;
 use crate::tui::app::{App, LoginScreen};
 use crate::tui::text::InputLine;
 

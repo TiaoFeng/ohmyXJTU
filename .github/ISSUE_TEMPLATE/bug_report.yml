@@ -1,0 +1,96 @@
+name: 反馈问题
+description: 使用程序时遇到了问题
+title: "[Bug]: "
+labels: ["bug"]
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## 烦请您阅读并检查下列事项，以便开发者能快速了解并解决您的问题：
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: 请您阅读并确认下列事项。
+      options:
+        - label: "我已仔细阅读了 [README](https://github.com/tiaofeng/ohmyXJTU/blob/main/README.md)"
+          required: true
+        - label: "我在 [issues](https://github.com/tiaofeng/ohmyXJTU/issues) 页面搜索过问题（包括已关闭的 issue），但未能找到解决方法"
+          required: true
+        - label: "我理解并明白，若不按照模板的指示规范填写，该 issue 可能不会得到及时处理"
+          required: true
+
+  - type: input
+    id: ohmyxjtu-version
+    attributes:
+      label: ohmyXJTU 版本号（或 Commit Id）
+      description: 请您提供您所使用的 ohmyXJTU 版本号，以便开发者定位问题。
+      placeholder: 例如 v1.0.0 / commit abc1234
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+      description: |
+        如何触发该问题？烦请您提供详细的操作步骤，以便开发者复现问题。
+      placeholder: |
+        1. 打开...
+        2. 点击...
+        3. 出现...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 本应如何（期望的结果是什么）？
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 现状如何（实际的结果是什么）？
+    validations:
+      required: true
+
+  - type: textarea
+    id: screenshot
+    attributes:
+      label: 截图（可选）
+      description: 您可提供问题截图或录屏。若您遇到了 UI 相关的问题，截图或录屏将会为开发者提供帮助。
+      placeholder: 您可粘贴或拖拽图片至此
+    validations:
+      required: false
+
+  - type: textarea
+    id: log
+    attributes:
+      label: 错误输出或错误提示
+      description: |
+        请复制终端中的错误信息（如 panic 信息），粘贴其内容到下方文本框中。若无错误输出，请填写“无”。
+      placeholder: 请复制粘贴错误信息
+      render: shell
+    validations:
+      required: true
+
+  - type: input
+    id: rust-version
+    attributes:
+      label: Rust 版本（可选）
+      description: 若您通过下载源代码运行应用，还请您标注所用的 Rust 版本号。
+      placeholder: 例如 1.89.0
+    validations:
+      required: false
+
+  - type: textarea
+    id: others
+    attributes:
+      label: 其它信息（可选）
+      description: |
+        若您有其它补充信息，在此处填写。
+    validations:
+      required: false

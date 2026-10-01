@@ -1344,7 +1344,7 @@ fn attendance_term_is_none_when_not_logged_in() {
 
 #[test]
 fn parse_date_reports_category_without_echoing_server_value() {
-    let err = super::parse_date("<html>2026/09/07</html>").expect_err("应拒绝非 YYYY-MM-DD");
+    let err = super::data::parse_date("<html>2026/09/07</html>").expect_err("应拒绝非 YYYY-MM-DD");
     let message = err.to_string();
     assert!(!message.contains("2026/09/07"), "不得夹带原始值：{message}");
     assert!(!message.contains("<html>"), "不得夹带原始值：{message}");

@@ -131,12 +131,12 @@ pub fn from_webvpn_url(url: &str) -> AppResult<String> {
     let parsed =
         Url::parse(url).map_err(|err| AppError::protocol(format!("无法解析 URL：{err}")))?;
     if parsed.host_str() != Some(WEBVPN_HOST) {
-        return Err(AppError::protocol("不是 WebVPN 網址"));
+        return Err(AppError::protocol("不是 WebVPN 网址"));
     }
 
     let segments: Vec<&str> = parsed.path().trim_start_matches('/').split('/').collect();
     if segments.len() < 3 {
-        return Err(AppError::protocol("WebVPN 網址格式不正确"));
+        return Err(AppError::protocol("WebVPN 网址格式不正确"));
     }
     let (scheme, port) = match segments[0].split_once('-') {
         Some((scheme, port)) => (scheme, Some(port)),
@@ -146,7 +146,7 @@ pub fn from_webvpn_url(url: &str) -> AppResult<String> {
     // 前綴長度檢查必須是 32 個字元（參考實作此處比對 16 個字元，永遠不成立）。
     let cipher = cipher
         .strip_prefix(PREFIX)
-        .ok_or_else(|| AppError::protocol("WebVPN 網址前缀不匹配"))?;
+        .ok_or_else(|| AppError::protocol("WebVPN 网址前缀不匹配"))?;
     let mut host = decrypt_host(cipher)?;
     if let Some(port) = port {
         host.push(':');

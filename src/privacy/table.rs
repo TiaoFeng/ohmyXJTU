@@ -92,11 +92,6 @@ impl Table {
         &self.rows
     }
 
-    /// 欄數。
-    pub fn columns(&self) -> usize {
-        self.columns
-    }
-
     /// 依可用寬度排版：排得下就對齊表格，否則改用卡片。
     pub fn layout(&self, width: usize) -> Vec<DocLine> {
         if width == 0 {

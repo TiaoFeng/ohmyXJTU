@@ -27,37 +27,15 @@ pub fn ensure_authenticated(response: &HttpResponse) -> AppResult<()> {
 }
 
 /// 解開 `{code, message, data}` 外殼，並把 `data` 解析為指定型別。
+///
+/// 外殼解碼規則（嚴格度）集中於 [`crate::json::split_envelope`]；缺 `code`
+/// 或型別不符一律視為協定格式錯誤，不可用假業務碼回報。
 pub fn unwrap_envelope<T: DeserializeOwned>(
     response: &HttpResponse,
     context: &str,
 ) -> AppResult<T> {
-    response.error_for_status()?;
-    let value: serde_json::Value = response.json()?;
-    // 外殼必須帶整數 `code`。缺欄位或型別不符（例如字串碼）一律視為協定格式
-    // 錯誤，不可用假業務碼（例如 -1）回報：否則真正的格式問題會被誤認為學校端
-    // 的業務錯誤，歸因錯誤也無法走「待核实」語意。
-    match value.get("code").and_then(serde_json::Value::as_i64) {
-        None => Err(AppError::protocol(format!(
-            "{context} 响应缺少整数 code 字段"
-        ))),
-        Some(0) => deserialize_value(
-            value
-                .get("data")
-                .cloned()
-                .unwrap_or(serde_json::Value::Null),
-            context,
-        ),
-        Some(code) => {
-            let message = value
-                .get("message")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("未知错误");
-            Err(AppError::Server {
-                code,
-                message: format!("{context}：{message}"),
-            })
-        }
-    }
+    let data = crate::json::split_envelope(response, context)?;
+    deserialize_value(data, context)
 }
 
 /// 解析純 JSON 回應（無外殼）。

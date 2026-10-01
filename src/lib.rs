@@ -7,6 +7,7 @@ pub mod domain;
 pub mod error;
 pub mod http;
 pub mod io;
+pub mod json;
 pub mod model;
 pub mod privacy;
 pub mod random;

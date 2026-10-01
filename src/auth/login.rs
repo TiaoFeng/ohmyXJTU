@@ -21,6 +21,7 @@ use url::Url;
 use crate::credentials::Credentials;
 use crate::error::{AppError, AppResult};
 use crate::http::{HttpClient, HttpRequest, HttpResponse};
+use crate::json::split_envelope;
 
 use super::html;
 use super::rsa;
@@ -229,7 +230,7 @@ impl LoginDriver {
         url.query_pairs_mut().append_pair("state", &state);
 
         let response = self.client.send(HttpRequest::get(url.to_string()))?;
-        let data = check_envelope(&response)?;
+        let data = split_envelope(&response, "手机号查询")?;
         let phone = data
             .get("securePhone")
             .and_then(serde_json::Value::as_str)
@@ -254,7 +255,7 @@ impl LoginDriver {
         let response = self
             .client
             .send(HttpRequest::post_json(MFA_SEND_URL, json!({ "gid": gid })))?;
-        check_envelope(&response)?;
+        split_envelope(&response, "发送短信验证码")?;
         Ok(phone)
     }
 
@@ -265,7 +266,7 @@ impl LoginDriver {
             MFA_VALID_URL,
             json!({ "gid": gid, "code": code }),
         ))?;
-        let data = check_envelope(&response)?;
+        let data = split_envelope(&response, "核验短信验证码")?;
         if let Some(status) = data.get("status").and_then(serde_json::Value::as_i64)
             && status != 2
         {
@@ -554,31 +555,6 @@ impl LoginDriver {
     }
 }
 
-/// 解開伺服器統一的 `{code, message, data}` 外殼，回傳 `data`。
-fn check_envelope(response: &HttpResponse) -> AppResult<serde_json::Value> {
-    response.error_for_status()?;
-    let value: serde_json::Value = response.json()?;
-    let code = value
-        .get("code")
-        .and_then(serde_json::Value::as_i64)
-        .unwrap_or(-1);
-    if code == 0 {
-        Ok(value
-            .get("data")
-            .cloned()
-            .unwrap_or(serde_json::Value::Null))
-    } else {
-        Err(AppError::Server {
-            code,
-            message: value
-                .get("message")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("未知错误")
-                .to_owned(),
-        })
-    }
-}
-
 /// 確認登入表單的提交目標位於學校網域且使用 https；否則回報錯誤
 /// （訊息只含主機名或簡短原因，不含完整 URL）。
 fn ensure_trusted_submit_target(url: &str) -> AppResult<()> {
@@ -595,11 +571,6 @@ fn ensure_trusted_submit_target(url: &str) -> AppResult<()> {
         return Err(AppError::protocol("登录提交目标必须使用 https"));
     }
     Ok(())
-}
-
-/// 供外部（會話層）判斷是否需要改寫為 WebVPN 網址。
-pub fn needs_webvpn_rewrite(url: &str) -> bool {
-    webvpn::should_rewrite(url)
 }
 
 #[cfg(test)]

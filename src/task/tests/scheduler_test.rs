@@ -15,6 +15,8 @@ use crate::config::{AccessPolicy, Config};
 use crate::http::fake::{FakeClient, json};
 use crate::http::{HttpClient, HttpRequest, HttpResponse};
 use crate::session::AccessMode;
+use crate::sites::attendance::AttendanceSite;
+use crate::sites::lms::LmsSite;
 
 use super::*;
 

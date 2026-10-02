@@ -783,6 +783,11 @@ pub struct App {
     pub screen: Screen,
     /// 登入互動覆蓋層（進度、驗證碼、簡訊、失敗與重新輸入憑證）。
     pub login: Option<Box<LoginScreen>>,
+    /// 使用者已關閉登入覆蓋層並要求取消（等待工作者回報取消完成）。
+    ///
+    /// 期間內遲到的登入事件（進度、驗證碼、簡訊）不得再打開覆蓋層：它們都
+    /// 屬於正在被取消的那次登入，工作者隨後就會丟棄該流程。
+    pub login_cancel_pending: bool,
     /// 用户协议閱讀門（首次啟動或協議改版後；開啟時獨占畫面與按鍵）。
     pub agreement: Option<Box<AgreementState>>,
     /// 目前頁面。
@@ -841,6 +846,7 @@ impl App {
         Self {
             screen: Screen::Unlock(FormState::unlock()),
             login: None,
+            login_cancel_pending: false,
             agreement: None,
             nav: NavItem::Schedule,
             schedule: Page::Idle,

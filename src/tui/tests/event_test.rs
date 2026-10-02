@@ -1289,3 +1289,100 @@ fn credential_save_failure_survives_login_success() {
         "保存失敗的提醒不得被「登录成功」蓋掉"
     );
 }
+
+/// esc 取消登入後（等待取消完成期間），遲到的登入事件不得重開覆蓋層；
+/// 收到取消完成後等待狀態清除，新的登入事件才能再開窗。
+#[test]
+fn dismissed_login_overlay_ignores_late_login_events_until_cancelled() {
+    let mut app = app();
+    app.set_screen(Screen::Main);
+    // 模擬使用者已按 esc：覆蓋層關閉、等待工作者回報取消完成。
+    app.login_cancel_pending = true;
+
+    apply_event(
+        &mut app,
+        Event::LoginNeedsMfa {
+            phone: Some("138****1234".to_owned()),
+            sent: false,
+        },
+    );
+    assert!(app.login.is_none(), "取消中的遲到簡訊事件不得重開覆蓋層");
+
+    apply_event(
+        &mut app,
+        Event::LoginProgress("正在登录考勤系统…".to_owned()),
+    );
+    assert!(app.login.is_none(), "取消中的遲到進度事件不得重開覆蓋層");
+
+    apply_event(
+        &mut app,
+        Event::LoginNeedsCaptcha(PathBuf::from("/tmp/captcha-late.png")),
+    );
+    assert!(app.login.is_none(), "取消中的遲到驗證碼事件不得重開覆蓋層");
+    assert!(app.captcha_path.is_none(), "被忽略的驗證碼不應殘留路徑");
+
+    // 取消完成：清除等待狀態。
+    apply_event(&mut app, Event::LoginCancelled);
+    assert!(!app.login_cancel_pending, "取消完成後應清除等待狀態");
+
+    // 之後的新登入事件照常開啟覆蓋層。
+    apply_event(
+        &mut app,
+        Event::LoginNeedsMfa {
+            phone: None,
+            sent: false,
+        },
+    );
+    assert!(
+        matches!(app.login.as_deref(), Some(LoginScreen::Mfa { .. })),
+        "取消完成後的登入事件應正常顯示：{:?}",
+        app.login
+    );
+}
+
+/// 取消完成必須關閉任何已出現的登入覆蓋層（例如遲到事件已把它重開）。
+#[test]
+fn login_cancelled_closes_the_overlay() {
+    let mut app = app();
+    app.set_screen(Screen::Main);
+    app.login = Some(Box::new(LoginScreen::Mfa {
+        phone: Some("138****1234".to_owned()),
+        sent: false,
+        input: InputLine::new(),
+        error: None,
+    }));
+    app.login_cancel_pending = true;
+
+    apply_event(&mut app, Event::LoginCancelled);
+
+    assert!(app.login.is_none(), "取消完成應關閉登入覆蓋層");
+    assert!(!app.login_cancel_pending, "取消完成應清除等待狀態");
+}
+
+/// 登入成功、憑證就緒與會話停用都會清除取消等待狀態，避免永久壓抑新事件。
+#[test]
+fn terminal_login_events_clear_the_cancel_pending_state() {
+    let mut app = app();
+    app.set_screen(Screen::Main);
+
+    app.login_cancel_pending = true;
+    apply_event(
+        &mut app,
+        Event::LoginSucceeded {
+            site: SiteKind::Attendance,
+            mode: Some(AccessMode::Direct),
+        },
+    );
+    assert!(!app.login_cancel_pending, "登入成功後應清除等待狀態");
+
+    app.login_cancel_pending = true;
+    apply_event(&mut app, Event::VaultReady);
+    assert!(!app.login_cancel_pending, "憑證就緒後應清除等待狀態");
+
+    app.login_cancel_pending = true;
+    apply_event(
+        &mut app,
+        Event::SessionDisabled("无法建立新的会话".to_owned()),
+    );
+    assert!(!app.login_cancel_pending, "會話停用後應清除等待狀態");
+}

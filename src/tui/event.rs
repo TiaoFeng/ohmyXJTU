@@ -27,11 +27,15 @@ pub(crate) fn apply_event(app: &mut App, event: Event, jobs: &Sender<Job>) {
         Event::VaultReady => apply_vault_ready(app, jobs),
         Event::LoginProgress(note) => {
             // 登入互動是覆蓋層：底層畫面保持不變，事件只更新彈窗內容。
-            app.login = Some(Box::new(LoginScreen::Progress { note }));
+            // 等待取消期間忽略：遲到的進度事件屬於正在被取消的那次登入。
+            if !app.login_cancel_pending {
+                app.login = Some(Box::new(LoginScreen::Progress { note }));
+            }
         }
         Event::LoginNeedsCaptcha(path) => apply_needs_captcha(app, path),
         Event::LoginNeedsMfa { phone, sent } => apply_needs_mfa(app, phone, sent),
         Event::LoginFailed { site, message } => set_login_error(app, site, message),
+        Event::LoginCancelled => apply_login_cancelled(app),
         Event::VerificationRetry { site, message } => apply_verification_retry(app, site, message),
         Event::LoginSucceeded { site, mode } => apply_login_succeeded(app, jobs, site, mode),
         Event::SessionsCleared { account_changed } => {
@@ -102,6 +106,7 @@ pub(crate) fn apply_event(app: &mut App, event: Event, jobs: &Sender<Job>) {
 ///（不預先登入任何站點），由目前頁面按需觸發惰性登入。
 fn apply_vault_ready(app: &mut App, jobs: &Sender<Job>) {
     app.login = None;
+    app.login_cancel_pending = false;
     if app.is_main() {
         // 修改帳號後回到主畫面：舊資料屬於舊帳號，強制刷新目前頁面。
         let nav = app.nav;
@@ -115,6 +120,11 @@ fn apply_vault_ready(app: &mut App, jobs: &Sender<Job>) {
 
 /// 需要圖片驗證碼：保留上一次的錯誤訊息，輸入框清空。
 fn apply_needs_captcha(app: &mut App, path: PathBuf) {
+    // 等待取消期間忽略：遲到的驗證碼事件屬於正在被取消的那次登入，
+    // 不得把它重新彈出來。
+    if app.login_cancel_pending {
+        return;
+    }
     app.captcha_path = Some(path.clone());
     let previous_error = match app.login.as_deref() {
         Some(LoginScreen::Captcha { error, .. }) => error.clone(),
@@ -129,6 +139,11 @@ fn apply_needs_captcha(app: &mut App, path: PathBuf) {
 
 /// 需要簡訊驗證碼：保留已輸入的驗證碼與錯誤訊息（重送簡訊時不應清空）。
 fn apply_needs_mfa(app: &mut App, phone: Option<String>, sent: bool) {
+    // 等待取消期間忽略：遲到的簡訊驗證事件屬於正在被取消的那次登入，
+    // 不得把它重新彈出來。
+    if app.login_cancel_pending {
+        return;
+    }
     let (input, error) = match app.login.as_deref() {
         Some(LoginScreen::Mfa { input, error, .. }) => (input.clone(), error.clone()),
         _ => (InputLine::new(), None),
@@ -154,6 +169,15 @@ fn apply_verification_retry(app: &mut App, site: SiteKind, message: String) {
     }
 }
 
+/// 登入取消完成：關閉覆蓋層並清除等待狀態。
+///
+/// 即使先前有遲到的登入事件重開過覆蓋層（例如簡訊驗證），也在這裡一併
+/// 關閉；之後的登入事件（新的登入流程）再正常開啟。
+fn apply_login_cancelled(app: &mut App) {
+    app.login = None;
+    app.login_cancel_pending = false;
+}
+
 /// 登入成功：關閉覆蓋層、記錄站點訪問方式並確保目前頁面已載入。
 fn apply_login_succeeded(
     app: &mut App,
@@ -162,6 +186,7 @@ fn apply_login_succeeded(
     mode: Option<AccessMode>,
 ) {
     app.login = None;
+    app.login_cancel_pending = false;
     match mode {
         Some(mode) => app.set_site_mode(site, mode),
         None => app.clear_site_mode(site),
@@ -178,6 +203,7 @@ fn apply_login_succeeded(
 /// 加密口令以建立一個全新的會話；此前不會再發出任何請求。
 fn apply_session_disabled(app: &mut App, message: String) {
     app.login = None;
+    app.login_cancel_pending = false;
     app.clear_site_modes();
     app.invalidate_data(true);
     let mut form = FormState::unlock();

@@ -522,6 +522,10 @@ fn failed_screen_esc_closes_overlay_so_refresh_works() {
     press(&mut app, &jobs, KeyCode::Esc);
     assert!(app.login.is_none(), "esc 應關閉登入覆蓋層");
     assert!(
+        app.login_cancel_pending,
+        "esc 後應進入等待取消狀態，直到工作者回報取消完成"
+    );
+    assert!(
         matches!(rx.try_recv(), Ok(Job::CancelLogin)),
         "關閉覆蓋層應一併取消工作者端的登入流程"
     );
@@ -606,6 +610,10 @@ fn login_progress_esc_dismisses_and_cancels_login() {
     press(&mut app, &jobs, KeyCode::Esc);
 
     assert!(app.login.is_none(), "esc 应关闭登录覆盖层");
+    assert!(
+        app.login_cancel_pending,
+        "esc 后应进入等待取消状态，直到工作者回报取消完成"
+    );
     assert!(
         matches!(rx.try_recv(), Ok(Job::CancelLogin)),
         "应送出取消登录任务"

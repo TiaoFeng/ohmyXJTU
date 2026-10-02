@@ -307,6 +307,9 @@ fn handle_login(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
         Some(LoginAction::EditAccount(site)) => open_credentials_form(app, site),
         Some(LoginAction::Dismiss) => {
             app.login = None;
+            // 等待工作者回報取消完成；期間遲到的登入事件不得重開覆蓋層
+            //（它們屬於這次被取消的登入）。
+            app.login_cancel_pending = true;
             // 底層若是送出中的表單（例如修改帳號失敗），一併解除處理中狀態，
             // 否則關閉覆蓋層後表單會卡在「正在處理」而無法再操作。
             if let Some(form) = app.form_mut() {

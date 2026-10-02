@@ -825,8 +825,15 @@ fn cancel_login_drops_pending_login_state() {
         Some(Credentials::new("3120000001", "old-password")),
         "工作階段的憑證也應還原"
     );
+    let events = harness.drain_events();
     assert!(
-        harness.saw(|event| matches!(event, Event::Notice(_))),
+        events
+            .iter()
+            .any(|event| matches!(event, Event::LoginCancelled)),
+        "應回報取消完成，介面才能清除等待狀態"
+    );
+    assert!(
+        events.iter().any(|event| matches!(event, Event::Notice(_))),
         "應提示已取消登入"
     );
 }
@@ -4359,6 +4366,12 @@ fn cancel_login_settles_a_page_when_the_flow_already_ended() {
             }
         )),
         "必須收斂等待重試的頁面，否則它會永遠停在「載入中」"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::LoginCancelled)),
+        "即使已經沒有進行中的登入，也必須回報取消完成，介面才能清除等待狀態"
     );
     assert!(
         !events.iter().any(|event| matches!(event, Event::Notice(_))),

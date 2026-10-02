@@ -16,7 +16,7 @@ use crate::config::{AccessPolicy, Config};
 use crate::http::fake::{FakeClient, json};
 use crate::http::{HttpClient, HttpRequest, HttpResponse};
 use crate::session::AccessMode;
-use crate::sites::attendance::AttendanceSite;
+use crate::sites::attendance::{self, AttendanceSite};
 use crate::sites::lms::{self, ActivityKind, LmsSite};
 
 use super::fixtures::{LMS_POST, login_page, login_page_with_mfa, public_key_pem};
@@ -999,5 +999,104 @@ fn interactive_open_pauses_homework_until_relogin_settles() {
             .iter()
             .any(|event| matches!(event, Event::Homework(update) if update.progress.is_none())),
         "重新排队的作业加载应完成：{events:?}"
+    );
+}
+
+/// 登入請求進行中按 esc 取消：遲到的開窗事件之後必須跟著取消完成，
+/// 且取消完成之後不得再出現任何開窗事件（介面已據此關閉覆蓋層）。
+#[test]
+fn cancelling_a_login_in_flight_reports_completion_after_late_events() {
+    // 預先產生測試公鑰（2048 位元金鑰產生延遲變異大）：放到時限之外。
+    let _ = public_key_pem();
+
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let (started_tx, started_rx) = std_channel::<()>();
+    let (release_tx, release_rx) = std_channel::<()>();
+    let started = Mutex::new(started_tx);
+    let release_rx = Mutex::new(release_rx);
+
+    let site_seen = Arc::clone(&seen);
+    let worker = ThreadWorker::lms_only(move |request: &HttpRequest| {
+        let url = request.url.clone();
+        site_seen.lock().expect("lock").push(url.clone());
+
+        if url == rsa::PUBLIC_KEY_URL {
+            return Ok(HttpResponse::new(
+                200,
+                rsa::PUBLIC_KEY_URL,
+                public_key_pem(),
+            ));
+        }
+        if url == attendance::LOGIN_URL {
+            return Ok(HttpResponse::new(
+                200,
+                attendance::LOGIN_URL,
+                login_page_with_mfa(),
+            ));
+        }
+        if url.contains("/mfa/detect") {
+            // MFA 偵測回應先阻塞，讓測試有機會在請求進行中送出取消。
+            started
+                .lock()
+                .expect("lock")
+                .send(())
+                .expect("发送开始信号");
+            release_rx.lock().expect("lock").recv().expect("等待释放");
+            return Ok(json(serde_json::json!({
+                "code": 0,
+                "data": { "state": "s-1", "need": true }
+            })));
+        }
+        if url.contains("/initByType/securephone") {
+            return Ok(json(serde_json::json!({
+                "code": 0,
+                "data": { "securePhone": "138****1234", "gid": "g-1" }
+            })));
+        }
+        panic!("未预期的请求：{url}");
+    });
+
+    worker.send(Job::RetryLogin {
+        site: SiteKind::Attendance,
+    });
+    started_rx.recv_timeout(WAIT).expect("应开始 MFA 检测");
+    // 請求仍在進行中：此時取消（介面按 esc 後送出的就是這個任務）。
+    worker.send(Job::CancelLogin);
+    release_tx.send(()).expect("释放请求");
+
+    // 收集事件直到取消完成。
+    let mut events = Vec::new();
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .expect("取消应在时限内完成");
+        let event = worker.events.recv_timeout(remaining).expect("等待事件");
+        let cancelled = matches!(&event, Event::LoginCancelled);
+        events.push(event);
+        if cancelled {
+            break;
+        }
+    }
+    events.extend(worker.drain_events());
+
+    let mfa_at = events
+        .iter()
+        .position(|event| matches!(event, Event::LoginNeedsMfa { .. }))
+        .expect("MFA 检测完成后应要求短信验证（迟到的开窗事件）");
+    let cancelled_at = events
+        .iter()
+        .position(|event| matches!(event, Event::LoginCancelled))
+        .expect("取消必须回报完成");
+    assert!(
+        mfa_at < cancelled_at,
+        "取消完成必须出现在迟到的登录事件之后：{events:?}"
+    );
+    assert!(
+        !events[cancelled_at + 1..].iter().any(|event| matches!(
+            event,
+            Event::LoginProgress(_) | Event::LoginNeedsCaptcha(_) | Event::LoginNeedsMfa { .. }
+        )),
+        "取消完成之后不得再出现开窗事件：{events:?}"
     );
 }

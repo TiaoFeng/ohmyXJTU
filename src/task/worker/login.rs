@@ -51,7 +51,8 @@ impl Worker {
     /// 丟棄登入驅動器、待存憑證、待重試任務與暫存的驗證碼圖片：登入互動期間
     /// 資料任務一律延後，若不取消，關閉覆蓋層後使用者按 `r` 送出的任務會永遠
     /// 排不到。登入流程即使已經結束（憑證被拒），等待重登的頁面仍會被收斂；
-    /// 這種情況下不覆蓋介面已顯示的提示。
+    /// 這種情況下不覆蓋介面已顯示的提示。結束時一律發送
+    /// [`Event::LoginCancelled`]，作為介面清除「等待取消」狀態的依據。
     pub(super) fn cancel_login(&mut self) -> AppResult<()> {
         // 即使登入流程本身已經結束，等待重登的資料任務仍可能留著：例如憑證
         // 被拒時流程與待存憑證都已丟棄（`flow`、`pending_vault` 皆為 `None`），
@@ -61,6 +62,9 @@ impl Worker {
         self.flow = None;
         self.discard_pending_vault();
         self.settle_pending_retry();
+        // 無論先前有無進行中的登入都必須回報取消完成：介面據此清除等待狀態，
+        // 否則它會永遠停在那裡，之後真正的新登入事件會被誤擋。
+        self.emit(Event::LoginCancelled);
         if had_login {
             self.clear_captcha();
             self.emit(Event::Notice("已取消登录流程，可重新刷新页面".to_owned()));

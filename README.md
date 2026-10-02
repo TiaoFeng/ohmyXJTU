@@ -13,7 +13,7 @@
 - **思源学堂**：浏览课程 → 活动（作业/资料/课程内容/直播）-> 活动详情与个人或小组提交记录。
 - **账户设置**（`Ctrl+P`）：修改账号、修改加密口令、切换访问模式。
 
-## 安裝
+## 安装
 
 下载预编译的最新版本：
 [![Latest Release](https://img.shields.io/github/v/release/TiaoFeng/ohmyXJTU)](https://github.com/TiaoFeng/ohmyXJTU/releases/latest)
@@ -64,12 +64,7 @@ cargo build --release
 
 ## 开发规范
 
-```bash
-just check   # fmt + clippy(-D warnings) + test + 覆盖率
-```
-
-- 单元测试超过 20 行者放在同级 `tests/` 目录，并以 `#[path = "..."]` 引入。
-- 测试全部使用脱敏的固定响应、假 HTTP 客户端与临时目录，不会访问真实服务，也不写入真实凭据。
+贡献流程见 [贡献指南](CONTRIBUTING.md)。
 
 ## 协议
 - 本项目使用 [BSD 3-Clause License](LICENSE) 开源。

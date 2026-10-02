@@ -91,6 +91,8 @@ impl Worker {
             lessons.push(LessonEntry {
                 date,
                 sections: format!("{}-{}", slot.start_section, slot.end_section),
+                start_section: slot.start_section,
+                end_section: slot.end_section,
                 course_name: slot.course_name.clone(),
                 classroom: slot.classroom.clone().unwrap_or_default(),
                 teacher: slot.teacher.clone().unwrap_or_default(),
@@ -98,9 +100,10 @@ impl Worker {
                 attendance: attendance_match::display_state(status, date, today),
             });
         }
-        lessons.sort_by(|left, right| {
-            (left.date, left.sections.clone()).cmp(&(right.date, right.sections.clone()))
-        });
+        // 同日課程按節次先後排序：以數值比較（`sections` 是顯示字串，字典序
+        // 會讓「11-12」排到「3-4」之前）；`sort_by_key` 穩定，同鍵維持
+        // `merge_courses` 的課名順序。
+        lessons.sort_by_key(|lesson| (lesson.date, lesson.start_section, lesson.end_section));
 
         let notice = truncated.then(|| {
             format!(

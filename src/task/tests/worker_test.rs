@@ -2135,6 +2135,114 @@ fn schedule_does_not_fall_back_to_week_22_after_teaching_weeks() {
     );
 }
 
+/// 同日課程的節次必須以數值排序：`sections` 是顯示字串，字典序會讓
+/// 「11-12」排到「3-4」之前；跨日仍以日期為先。
+#[test]
+fn schedule_sorts_lessons_by_numeric_sections() {
+    let today = chrono::Local::now().date_naive();
+    let start = (today - chrono::Duration::days(14)).to_string();
+    let end = (today + chrono::Duration::days(90)).to_string();
+    let mut harness = harness(move |request: &HttpRequest| {
+        let url = request.url.clone();
+        if url.ends_with("/timetable/semesters") {
+            return Ok(json(serde_json::json!({ "code": 0, "data": [{
+                "semesterId": "s-1",
+                "academicYear": "2026-2027",
+                "semesterName": "第一学期",
+                "startDate": start.clone(),
+                "endDate": end.clone(),
+            }]})));
+        }
+        if url.contains("/timetable/weekly") {
+            return Ok(json(serde_json::json!({ "code": 0, "data": { "courses": [
+                {
+                    "courseName": "晚课十一",
+                    "teacherName": "张老师",
+                    "classroomName": "主楼A101",
+                    "dayOfWeek": 1,
+                    "startSection": 11,
+                    "endSection": 12,
+                    "weekRanges": "1-30",
+                },
+                {
+                    "courseName": "早课一",
+                    "teacherName": "李老师",
+                    "classroomName": "主楼A102",
+                    "dayOfWeek": 1,
+                    "startSection": 1,
+                    "endSection": 2,
+                    "weekRanges": "1-30",
+                },
+                {
+                    "courseName": "下午课",
+                    "teacherName": "王老师",
+                    "classroomName": "主楼A103",
+                    "dayOfWeek": 1,
+                    "startSection": 3,
+                    "endSection": 4,
+                    "weekRanges": "1-30",
+                },
+                {
+                    "courseName": "晚课十",
+                    "teacherName": "赵老师",
+                    "classroomName": "主楼A104",
+                    "dayOfWeek": 2,
+                    "startSection": 10,
+                    "endSection": 11,
+                    "weekRanges": "1-30",
+                },
+                {
+                    "courseName": "早课二",
+                    "teacherName": "钱老师",
+                    "classroomName": "主楼A105",
+                    "dayOfWeek": 2,
+                    "startSection": 2,
+                    "endSection": 3,
+                    "weekRanges": "1-30",
+                },
+            ]}})));
+        }
+        if url.contains("attendance-records") {
+            return Ok(json(
+                serde_json::json!({ "code": 0, "data": { "rows": [], "total": 0 } }),
+            ));
+        }
+        panic!("未预期的请求：{url}");
+    });
+    harness.login_both_sites();
+
+    harness
+        .dispatch(Job::LoadSchedule)
+        .expect("课表加载应当成功");
+
+    let schedule = harness
+        .drain_events()
+        .into_iter()
+        .find_map(|event| match event {
+            Event::Schedule(data) => Some(*data),
+            _ => None,
+        })
+        .expect("应发出课表事件");
+
+    let sections: Vec<&str> = schedule
+        .lessons
+        .iter()
+        .map(|lesson| lesson.sections.as_str())
+        .collect();
+    assert_eq!(
+        sections,
+        ["1-2", "3-4", "11-12", "2-3", "10-11"],
+        "同日节次应按数值排序，跨日以日期为先后"
+    );
+    for lesson in &schedule.lessons {
+        assert_eq!(
+            lesson.sections,
+            format!("{}-{}", lesson.start_section, lesson.end_section),
+            "显示字符串应与数值节次一致"
+        );
+    }
+}
+
 #[test]
 fn activity_detail_for_material_skips_submission_request() {
     let site = Arc::new(FakeHomeworkSite {

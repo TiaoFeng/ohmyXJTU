@@ -1228,6 +1228,8 @@ fn lesson_entry(
     LessonEntry {
         date: chrono::NaiveDate::from_ymd_opt(2026, 9, 29).expect("日期"),
         sections: "1-2".to_owned(),
+        start_section: 1,
+        end_section: 2,
         course_name: course.to_owned(),
         classroom: classroom.to_owned(),
         teacher: teacher.to_owned(),

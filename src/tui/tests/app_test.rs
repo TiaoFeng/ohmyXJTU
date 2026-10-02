@@ -8,10 +8,12 @@ use crate::model::{FlowData, LessonEntry, ScheduleData};
 use crate::sites::attendance::{AttendanceStatus, FlowRecord};
 use crate::sites::lms::LmsCourse;
 
-fn lesson(sections: &str) -> LessonEntry {
+fn lesson(start_section: u32, end_section: u32) -> LessonEntry {
     LessonEntry {
         date: NaiveDate::from_ymd_opt(2026, 9, 14).expect("日期"),
-        sections: sections.to_owned(),
+        sections: format!("{start_section}-{end_section}"),
+        start_section,
+        end_section,
         course_name: "高等数学".to_owned(),
         classroom: "主楼A101".to_owned(),
         teacher: "张老师".to_owned(),
@@ -26,7 +28,7 @@ fn app_with_schedule(len: usize) -> App {
         semester: "2026-2027-1".to_owned(),
         week: 2,
         lessons: (0..len)
-            .map(|index| lesson(&format!("1-{}", index + 1)))
+            .map(|index| lesson(1, u32::try_from(index + 1).expect("节次")))
             .collect(),
         skipped: 0,
         notice: None,

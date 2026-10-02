@@ -15,8 +15,12 @@ use crate::sites::lms::{ActivityKind, LmsSubmission};
 pub struct LessonEntry {
     /// 上課日期。
     pub date: NaiveDate,
-    /// 節次，例如 `1-2`。
+    /// 節次，例如 `1-2`（顯示用；排序以 [`Self::start_section`] 為準）。
     pub sections: String,
+    /// 開始節次（數值，供排序）。
+    pub start_section: u32,
+    /// 結束節次（數值，供排序）。
+    pub end_section: u32,
     /// 課程名稱。
     pub course_name: String,
     /// 上課地點。

@@ -376,6 +376,75 @@ fn completes_sms_mfa_flow() {
     assert_eq!(json_field(&valid, "code").as_deref(), Some("123456"));
 }
 
+/// 以指定的 `securephone/valid` 回應內容驅動登入至可核對驗證碼的狀態。
+fn mfa_driver_with_valid_data(data: serde_json::Value) -> LoginDriver {
+    let client = Arc::new(FakeClient::with_responder(move |request| {
+        match request.url.as_str() {
+            LOGIN_URL => Ok(page(POST_URL, &login_page(true, "e5s1"))),
+            rsa::PUBLIC_KEY_URL => Ok(public_key_response()),
+            MFA_DETECT_URL => Ok(ok_json(
+                MFA_DETECT_URL,
+                serde_json::json!({ "code": 0, "data": { "state": "mfa-state-1", "need": true } }),
+            )),
+            MFA_SEND_URL => Ok(ok_json(MFA_SEND_URL, serde_json::json!({ "code": 0 }))),
+            MFA_VALID_URL => Ok(ok_json(
+                MFA_VALID_URL,
+                serde_json::json!({ "code": 0, "data": data.clone() }),
+            )),
+            _ if request.url.contains("/cas/mfa/initByType/securephone") => Ok(ok_json(
+                MFA_DETECT_URL,
+                serde_json::json!({
+                    "code": 0,
+                    "data": { "gid": "gid-1", "securePhone": "138****8888" }
+                }),
+            )),
+            _ => Ok(page(TARGET_URL, TARGET_PAGE)),
+        }
+    }));
+
+    let mut driver = driver(&client);
+    assert_eq!(
+        driver
+            .start(&credentials(), AccountType::Undergraduate)
+            .unwrap(),
+        LoginReply::NeedMfa
+    );
+    driver.mfa_phone().expect("读取绑定手机号");
+    driver
+}
+
+#[test]
+fn verify_mfa_code_accepts_success_codes_and_rejects_the_rest() {
+    // 成功：整數 2、字串 "2"、null 與缺少欄位（與參考實作的 status not in (2, "2") 一致）。
+    for data in [
+        serde_json::json!({ "status": 2 }),
+        serde_json::json!({ "status": "2" }),
+        serde_json::json!({ "status": null }),
+        serde_json::json!({}),
+    ] {
+        let mut driver = mfa_driver_with_valid_data(data.clone());
+        driver
+            .verify_mfa_code("123456")
+            .unwrap_or_else(|err| panic!("{data} 應視為通過：{err}"));
+    }
+
+    // 失敗：其他整數與字串（非整數的失敗狀態先前會被誤判為成功）。
+    for data in [
+        serde_json::json!({ "status": 3 }),
+        serde_json::json!({ "status": "3" }),
+        serde_json::json!({ "status": "error" }),
+    ] {
+        let mut driver = mfa_driver_with_valid_data(data.clone());
+        let Err(err) = driver.verify_mfa_code("123456") else {
+            panic!("{data} 應視為失敗");
+        };
+        assert!(
+            matches!(err, AppError::VerificationRetry(_)),
+            "{data} 應為可重試的驗證碼錯誤：{err}"
+        );
+    }
+}
+
 #[test]
 fn selects_undergraduate_account() {
     let choice_page = std::fs::read_to_string(format!(

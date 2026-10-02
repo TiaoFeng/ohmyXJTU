@@ -595,13 +595,17 @@ pub struct SettingsState {
 impl SettingsState {
     /// 設定項目數量。
     pub const COUNT: usize = 3;
+    /// 修改帳號項目的索引。
+    pub const ACCOUNT_INDEX: usize = 0;
+    /// 修改加密口令項目的索引。
+    pub const PASSPHRASE_INDEX: usize = 1;
     /// 訪問模式項目的索引。
     pub const POLICY_INDEX: usize = 2;
 
     /// 開啟設定彈窗。
     pub fn open(policy: AccessPolicy) -> Self {
         Self {
-            index: 0,
+            index: Self::ACCOUNT_INDEX,
             draft: Some(policy),
             saving: false,
         }
@@ -610,8 +614,8 @@ impl SettingsState {
     /// 項目標籤。
     pub fn label(index: usize) -> &'static str {
         match index % Self::COUNT {
-            0 => "修改账号",
-            1 => "修改加密口令",
+            Self::ACCOUNT_INDEX => "修改账号",
+            Self::PASSPHRASE_INDEX => "修改加密口令",
             _ => "访问模式",
         }
     }

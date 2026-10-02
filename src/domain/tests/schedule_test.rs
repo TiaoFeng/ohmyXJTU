@@ -36,7 +36,16 @@ fn parses_week_ranges() {
         parse_weeks("5-3").iter().copied().collect::<Vec<_>>(),
         vec![3, 4, 5]
     );
-    assert!(parse_weeks("1-1000").iter().all(|week| *week <= 60));
+    assert!(
+        parse_weeks("1-1000")
+            .iter()
+            .all(|week| *week <= MAX_PARSED_WEEK)
+    );
+    // 上限邊界：60 含在內，61 起被截掉。
+    assert_eq!(
+        parse_weeks("59-61").iter().copied().collect::<Vec<_>>(),
+        vec![59, 60]
+    );
 }
 
 #[test]

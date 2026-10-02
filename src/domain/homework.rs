@@ -15,6 +15,9 @@ use chrono::{DateTime, FixedOffset, NaiveDateTime, TimeZone as _};
 
 use crate::tone::Tone;
 
+/// 校園時區（中國標準時間，UTC+8）相對 UTC 的偏移秒數。
+const CAMPUS_UTC_OFFSET_SECS: i32 = 8 * 3600;
+
 /// 作業狀態。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HomeworkState {
@@ -223,7 +226,7 @@ pub fn parse_time(value: Option<&str>) -> Option<DateTime<FixedOffset>> {
     if value.is_empty() {
         return None;
     }
-    let offset = FixedOffset::east_opt(8 * 3600)?;
+    let offset = FixedOffset::east_opt(CAMPUS_UTC_OFFSET_SECS)?;
     if let Ok(time) = DateTime::parse_from_rfc3339(value) {
         return Some(time.with_timezone(&offset));
     }

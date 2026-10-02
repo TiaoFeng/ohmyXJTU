@@ -22,6 +22,9 @@ use super::{
     submission_time_label, title_suffix, too_narrow,
 };
 
+/// 詳情面板最多列出的提交記錄筆數（總數仍顯示於摘要行）。
+const DETAIL_SUBMISSION_LIMIT: usize = 5;
+
 /// 依目前資料繪製思源學堂頁（課程／活動／詳情三層）。
 pub(super) fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
     match app.lms.level {
@@ -312,7 +315,7 @@ fn detail_lines(detail: &ActivityDetailView) -> Vec<Line<'static>> {
                     (format!("提交记录：{effective} 条有效"), Tone::Success)
                 };
                 lines.push(Line::from(Span::styled(label, THEME.status_style(tone))));
-                for submission in submissions.iter().take(5) {
+                for submission in submissions.iter().take(DETAIL_SUBMISSION_LIMIT) {
                     let score = submission
                         .score
                         .as_ref()

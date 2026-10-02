@@ -20,7 +20,7 @@ pub fn draw(frame: &mut Frame, app: &App, state: SettingsState) {
     for index in 0..SettingsState::COUNT {
         let selected = index == state.index;
         let mut line = menu_item(selected, SettingsState::label(index));
-        if index == 2 {
+        if index == SettingsState::POLICY_INDEX {
             let policy = state.policy(app.access_policy);
             let value = if state.saving {
                 format!("  < {} > 保存中…", policy.label())

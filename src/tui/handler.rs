@@ -389,8 +389,12 @@ fn handle_settings(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
             }
         }
         KeyCode::Enter => match state.index {
-            0 => app.set_screen(Screen::SettingsForm(FormState::change_account())),
-            1 => app.set_screen(Screen::SettingsForm(FormState::change_passphrase())),
+            SettingsState::ACCOUNT_INDEX => {
+                app.set_screen(Screen::SettingsForm(FormState::change_account()));
+            }
+            SettingsState::PASSPHRASE_INDEX => {
+                app.set_screen(Screen::SettingsForm(FormState::change_passphrase()));
+            }
             // 訪問模式：enter 提交草稿；未變更或保存中則不送任務。
             _ => {
                 if !state.saving && state.policy_dirty(app.access_policy) {

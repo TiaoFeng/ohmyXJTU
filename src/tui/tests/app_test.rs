@@ -169,7 +169,10 @@ fn settings_menu_cycles() {
     assert_eq!(state.index, SettingsState::COUNT - 1);
     state.next();
     assert_eq!(state.index, 0);
-    assert_eq!(SettingsState::label(2), "访问模式");
+    assert_eq!(
+        SettingsState::label(SettingsState::POLICY_INDEX),
+        "访问模式"
+    );
 }
 
 #[test]

@@ -38,6 +38,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 /// 側邊欄載入指示燈的固定寬度（三個點＋一個空白）。
 const LOADING_DOTS_WIDTH: usize = 4;
 
+/// 載入指示的三點動畫相位：每幀前進一格並循環，空相位形成閃爍。
+const LOADING_DOTS_FRAMES: &[&str] = &["", ".", "..", "..."];
+
 fn draw_sidebar(frame: &mut Frame, area: Rect, app: &mut App) {
     let inner_width = usize::from(area.width.saturating_sub(2));
     // 文字欄起點：以最寬標籤為基準讓整欄置中，標籤之間保持左對齊。
@@ -87,12 +90,8 @@ fn nav_item(nav: NavItem, app: &App, text_start: usize) -> ListItem<'static> {
 
 /// 載入指示的三點動畫：每幀前進一格並循環，空相位形成閃爍。
 fn loading_dots(tick: u64) -> &'static str {
-    match tick % 4 {
-        0 => "",
-        1 => ".",
-        2 => "..",
-        _ => "...",
-    }
+    let phase = usize::try_from(tick % LOADING_DOTS_FRAMES.len() as u64).unwrap_or(0);
+    LOADING_DOTS_FRAMES[phase]
 }
 
 fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {

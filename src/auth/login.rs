@@ -42,6 +42,8 @@ const ACCOUNT_CHOICE_URL: &str = "https://login.xjtu.edu.cn/cas/login";
 
 /// 連續失敗達此次數後，伺服器會要求輸入圖片驗證碼。
 const CAPTCHA_THRESHOLD: u32 = 3;
+/// 核對簡訊驗證碼的成功狀態碼（伺服器可能以整數 `2` 或字串 `"2"` 傳送）。
+const MFA_SUCCESS_CODE: i64 = 2;
 
 /// 簡訊驗證上下文。
 #[derive(Debug, Clone)]
@@ -267,9 +269,17 @@ impl LoginDriver {
             json!({ "gid": gid, "code": code }),
         ))?;
         let data = split_envelope(&response, "核验短信验证码")?;
-        if let Some(status) = data.get("status").and_then(serde_json::Value::as_i64)
-            && status != 2
-        {
+        let passed = match data.get("status") {
+            // 缺少狀態欄位（或為 null）時視為通過——與參考實作一致。
+            None | Some(serde_json::Value::Null) => true,
+            // 其餘只接受成功碼：整數 2 或可解析為 2 的數值字串。
+            Some(status) => {
+                status.as_i64() == Some(MFA_SUCCESS_CODE)
+                    || status.as_str().and_then(|text| text.parse::<i64>().ok())
+                        == Some(MFA_SUCCESS_CODE)
+            }
+        };
+        if !passed {
             // 驗證碼填錯是可重試的：使用者重輸即可，不應作廢整次登入。
             return Err(AppError::VerificationRetry(
                 "短信验证码不正确，请重试".to_owned(),

@@ -105,6 +105,8 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
             }
         }
         LmsLevel::Detail => {
+            // 同作業頁：沒畫到詳情面板時不得沿用上一幀的視窗資訊。
+            app.lms.detail_scroll.clear();
             let title = app.lms.detail.ready().map_or_else(
                 || "活动详情".to_owned(),
                 |detail| format!("活动详情 · {}", detail.title),

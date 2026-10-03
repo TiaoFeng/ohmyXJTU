@@ -6,16 +6,19 @@
 //! 標籤）：`<br>` 與區塊元素產生換行、其餘標籤只保留文字、HTML 實體由解析
 //! 器解碼。
 //!
-//! 原始碼中的換行與縮排一律視為空白（不當作段落），因此相鄰段落之間恰好
-//! 一個換行。沒有可見文字時回傳 `None`（呼叫端據此隱藏整個描述區塊）。
+//! 原始碼中的換行與縮排一律視為空白（不當作段落，`<pre>` 內的排版也因此會被
+//! 壓平），因此相鄰段落之間恰好一個換行。表格以「列」為單位換行，同一列的各
+//! 儲存格之間補一個空白（否則會出現「第一题10」這種黏在一起的內容）。沒有可
+//! 見文字時回傳 `None`（呼叫端據此隱藏整個描述區塊）。
 
 use scraper::node::Node;
 use scraper::{ElementRef, Html};
 
 /// 純文字長度上限（字元）；超出時截斷並以「…」結尾。
 ///
-/// 這是防護上限：描述會隨作業清單一起快取並參與重繪，異常巨大的回應不應
-/// 拖垮記憶體或畫面。
+/// 這是呈現與快取的防護上限：說明會隨作業清單一起快取並參與重繪，過長的正文
+/// 也沒有閱讀價值。上限只約束轉換結果，走訪過程仍會看完整棵樹（佔用的記憶體
+/// 與回應本身同量級）。
 pub(super) const MAX_TEXT_CHARS: usize = 4096;
 
 /// 巢狀深度上限（與 [`super::js_object`] 的寬容解析器同慣例）。
@@ -56,6 +59,9 @@ const MEDIA_ELEMENTS: &[&str] = &[
     "audio", "canvas", "embed", "iframe", "img", "object", "svg", "video",
 ];
 
+/// 表格儲存格：同一列的各格之間補一個空白（不分行，保留列結構）。
+const CELL_ELEMENTS: &[&str] = &["td", "th"];
+
 /// 走訪單一子節點時採取的動作。
 #[derive(Clone, Copy)]
 enum Step {
@@ -67,8 +73,9 @@ enum Step {
     Skip,
     /// 圖片、影片等無法以文字呈現的元素。
     Media,
-    /// 遞迴進入子樹；`true` 代表是區塊元素（前後補換行）。
-    Nested(bool),
+    /// 遞迴進入子樹。`block` 代表區塊元素（前後補換行）；`cell` 代表表格儲存格
+    /// （只在前面補一個空白）。
+    Nested { block: bool, cell: bool },
 }
 
 /// HTML 轉換結果。
@@ -104,7 +111,8 @@ pub(super) fn convert(html: &str) -> Content {
     }
 }
 
-/// 走訪元素的子節點：文字原樣保留（空白折疊）、`<br>` 與區塊元素補換行。
+/// 走訪元素的子節點：文字原樣保留（空白折疊）、`<br>` 與區塊元素補換行、
+/// 表格儲存格之間補一個空白（保留同一列的欄位對應）。
 fn walk_element(element: ElementRef<'_>, out: &mut String, has_media: &mut bool, depth: usize) {
     for child in element.children() {
         let step = match child.value() {
@@ -118,7 +126,10 @@ fn walk_element(element: ElementRef<'_>, out: &mut String, has_media: &mut bool,
                 } else if MEDIA_ELEMENTS.contains(&name) {
                     Step::Media
                 } else {
-                    Step::Nested(BLOCK_ELEMENTS.contains(&name))
+                    Step::Nested {
+                        block: BLOCK_ELEMENTS.contains(&name),
+                        cell: CELL_ELEMENTS.contains(&name),
+                    }
                 }
             }
             _ => Step::Skip,
@@ -133,8 +144,10 @@ fn walk_element(element: ElementRef<'_>, out: &mut String, has_media: &mut bool,
             Step::Break => out.push('\n'),
             Step::Skip => {}
             Step::Media => *has_media = true,
-            Step::Nested(block) => {
-                if block {
+            Step::Nested { block, cell } => {
+                if cell {
+                    out.push(' ');
+                } else if block {
                     out.push('\n');
                 }
                 if depth < MAX_DEPTH

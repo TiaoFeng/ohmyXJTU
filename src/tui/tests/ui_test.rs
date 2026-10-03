@@ -2190,8 +2190,8 @@ fn homework_detail_marks_image_only_description() {
     assert!(text.contains("作业描述："), "應顯示描述區塊：\n{text}");
     assert!(text.contains("说明含图片"), "應標註說明含圖片：\n{text}");
     assert!(
-        text.contains("按 o 打开网页查看"),
-        "應提示開網頁查看：\n{text}"
+        text.contains("按 o 打开思源学堂查看"),
+        "應提示到思源學堂看原文：\n{text}"
     );
 }
 
@@ -2226,6 +2226,36 @@ fn footer_hints_scrolling_when_detail_is_scrollable() {
     assert!(
         text.contains("PgUp/PgDn 滚动"),
         "底欄應提示捲動鍵：\n{text}"
+    );
+}
+
+/// 沒畫到詳情面板時（空分組）不得沿用上一幀的捲動資訊，否則底欄會一直提示
+/// 捲動鍵卻沒有東西可捲。
+#[test]
+fn footer_hides_scroll_hint_when_the_panel_is_not_drawn() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00+08:00").expect("固定时间");
+    // 唯一一筆作業已提交（屬「已完成」分組），預設的「未完成」分組為空。
+    let items = aggregate(&[homework_input("已交作业", "2026-10-01 23:59:59", 1)], now);
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Homework;
+    app.homework = Page::Ready(homework_data(items, None));
+    app.homework_detail = true;
+    // 假裝上一幀的詳情很長（可捲動）。
+    app.homework_scroll.sync(5, 20);
+    assert!(app.homework_scroll.scrollable(), "前置條件：上一幀可捲動");
+
+    let terminal = draw(200, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(
+        text.contains("没有未完成的作业"),
+        "應顯示空分組提示：\n{text}"
+    );
+    assert!(
+        !text.contains("PgUp/PgDn 滚动"),
+        "沒有詳情面板時不應提示捲動：\n{text}"
     );
 }
 

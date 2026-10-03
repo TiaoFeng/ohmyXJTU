@@ -91,6 +91,10 @@ pub fn fit_display_start(text: &str, width: usize) -> String {
 /// 行首與行尾不留空白、連續空白視為一個空格；`width` 為 0 時回傳空 vec
 /// （沒有可顯示的欄位）。空字串回傳單一空行，讓呼叫端維持固定的列數。
 ///
+/// 只有 ASCII 空白會被折疊成斷行點：其他 Unicode 空白（全形空格 `\u{3000}`、
+/// 不斷行空格等）視為一般字元，依實際顯示寬度計算——中文排版常以它們做縮排與
+/// 對齊，折成半形會使版面走樣。
+///
 /// 這是預先排版用的工具：需要精確控制「內容佔幾列」（例如可捲動的詳情面板）
 /// 時，必須自行換行，不能依賴繪製端的 `Wrap`——後者無法回報實際列數。
 pub fn wrap_display(text: &str, width: usize) -> Vec<String> {
@@ -107,7 +111,10 @@ pub fn wrap_display(text: &str, width: usize) -> Vec<String> {
     let mut pending_space = false;
 
     for grapheme in text.graphemes(true) {
-        if grapheme.chars().all(char::is_whitespace) {
+        if grapheme
+            .chars()
+            .all(|character| character.is_ascii_whitespace())
+        {
             if !current.is_empty() {
                 break_index = Some(current.len());
                 pending_space = true;

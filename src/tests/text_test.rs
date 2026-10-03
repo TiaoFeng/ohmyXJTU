@@ -107,3 +107,24 @@ fn wrap_display_keeps_line_count_stable() {
     assert_eq!(wrap_display("abcd", 4), vec!["abcd"]);
     assert!(wrap_display("abcd", 0).is_empty());
 }
+
+/// 非 ASCII 空白（全形空格、不斷行空格）是排版用的可見字元，不得折成半形空白。
+///
+/// 中文排版常以全形空格做縮排與對齊；折成半形會讓「类型：作业\u{3000}截止：…」
+/// 這類由介面自行拼出的文字走樣。
+#[test]
+fn wrap_display_keeps_non_ascii_whitespace() {
+    assert_eq!(
+        wrap_display("类型：作业\u{3000}截止：2026-10-12 23:59", 60),
+        vec!["类型：作业\u{3000}截止：2026-10-12 23:59"]
+    );
+    assert_eq!(
+        wrap_display("\u{3000}\u{3000}第一章", 60),
+        vec!["\u{3000}\u{3000}第一章"]
+    );
+    // 不斷行空格也不得成為斷行點。
+    assert_eq!(wrap_display("分数\u{a0}10", 40), vec!["分数\u{a0}10"]);
+    // ASCII 空白照舊折疊與斷行。
+    assert_eq!(wrap_display("a \t b", 40), vec!["a b"]);
+    assert_eq!(wrap_display("alpha beta", 6), vec!["alpha", "beta"]);
+}

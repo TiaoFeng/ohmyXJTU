@@ -24,6 +24,9 @@ const DETAIL_MAX_HEIGHT: u16 = 14;
 
 /// 依目前資料繪製作業頁。
 pub(super) fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
+    // 本幀若沒畫到詳情面板（載入中、空分組、終端過窄…），不得沿用上一幀的視窗
+    // 資訊，否則底欄會一直提示「PgUp/PgDn 滚动」卻沒有東西可捲。
+    app.homework_scroll.clear();
     // 標題：學期與各組計數。
     let title = match app.homework.ready() {
         Some(data) => {

@@ -805,6 +805,14 @@ impl ScrollState {
         self.offset = 0;
     }
 
+    /// 本幀沒有繪製可捲動面板（載入中、空分組、終端過窄…）：清掉視窗資訊，
+    /// 讓底欄的捲動提示不再沿用上一幀的值；位移保留，下次繪製時由 [`Self::sync`]
+    /// 依新的內容重新夾取。
+    pub fn clear(&mut self) {
+        self.viewport = 0;
+        self.total = 0;
+    }
+
     /// 由繪製端回寫視窗高度與總列數，並夾取目前位移。
     pub fn sync(&mut self, viewport: u16, total: usize) {
         self.viewport = viewport;

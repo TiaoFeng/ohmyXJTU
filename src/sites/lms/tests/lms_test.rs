@@ -199,6 +199,24 @@ fn ignores_top_level_description_field() {
     assert_eq!(body_text(&activity), None);
 }
 
+/// `data` 不是物件時只視為「沒有正文」，不得讓整份活動解析失敗。
+///
+/// 詳情解析失敗會使該課程的作業全部退回「待核实」，代價遠大於少一段說明。
+#[test]
+fn tolerates_non_object_activity_data() {
+    for value in [
+        json!({"id": 9001, "type": "homework", "data": ""}),
+        json!({"id": 9001, "type": "homework", "data": "<p>整份是字串</p>"}),
+        json!({"id": 9001, "type": "homework", "data": []}),
+        json!({"id": 9001, "type": "homework", "data": 123}),
+        json!({"id": 9001, "type": "homework", "data": null}),
+    ] {
+        let activity: LmsActivity = crate::sites::deserialize_value(value.clone(), "查询活动详情")
+            .unwrap_or_else(|err| panic!("{value}: {err}"));
+        assert_eq!(body_text(&activity), None, "{value}");
+    }
+}
+
 /// 整份說明只有一張圖片：不得當成「沒有說明」，要讓介面能標註。
 #[test]
 fn reports_media_only_body() {

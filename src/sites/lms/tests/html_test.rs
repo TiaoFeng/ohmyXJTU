@@ -61,10 +61,26 @@ fn list_items_become_lines() {
 }
 
 #[test]
-fn tables_keep_their_cells() {
-    let text = plain("<table><tr><td>栏一</td><td>栏二</td></tr></table>").expect("有內容");
-    assert!(text.contains("栏一"), "{text}");
-    assert!(text.contains("栏二"), "{text}");
+fn tables_keep_rows_and_separate_cells() {
+    // 同一列的各格以空白分隔、不同列各自成行。
+    // 儲存格直接相鄰時會變成「第一题10」這種讀不出欄位的內容。
+    assert_eq!(
+        plain("<table><tr><td>栏一</td><td>栏二</td></tr></table>").as_deref(),
+        Some("栏一 栏二")
+    );
+    assert_eq!(
+        plain(
+            "<table><tbody><tr><td>题目</td><td>分值</td></tr>\
+             <tr><td>第一题</td><td>10</td></tr></tbody></table>"
+        )
+        .as_deref(),
+        Some("题目 分值\n第一题 10")
+    );
+    // 表頭（`th`）與資料格同等處理。
+    assert_eq!(
+        plain("<table><tr><th>标题</th><td>值</td></tr></table>").as_deref(),
+        Some("标题 值")
+    );
 }
 
 #[test]

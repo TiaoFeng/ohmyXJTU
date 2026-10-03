@@ -5,7 +5,7 @@
 
 use serde::Deserialize;
 
-use super::super::{optional_string_or_number, string_or_number};
+use super::super::{optional_object, optional_string_or_number, string_or_number};
 use super::html;
 
 /// 活動類型。
@@ -193,7 +193,10 @@ pub struct LmsActivity {
     #[serde(default, deserialize_with = "optional_string_or_number")]
     pub group_id: Option<String>,
     /// 活動正文區塊（只有詳情回應提供；列表項目為 `None`）。
-    #[serde(default)]
+    ///
+    /// 伺服器對此欄位的型別並不總是穩定；非物件一律視為「沒有正文」，避免為了
+    /// 一段說明就讓整份活動解析失敗（詳情失敗會使該課程的作業全部退回「待核实」）。
+    #[serde(default, deserialize_with = "optional_object")]
     pub data: Option<LmsActivityBody>,
     /// 伺服器記錄的提交次數。
     #[serde(default)]

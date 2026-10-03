@@ -220,6 +220,16 @@ pub struct ActivityContent {
 }
 
 impl ActivityContent {
+    /// 由 HTML 轉換結果組出內容（附件另外填入，見 [`LmsActivity::body`]）。
+    fn from_text(extract: html::TextExtract) -> Self {
+        Self {
+            text: extract.text,
+            has_media: extract.has_media,
+            has_links: extract.has_links,
+            attachments: Vec::new(),
+        }
+    }
+
     /// 有沒有任何可顯示的內容（正文、圖片、連結或附件）。
     pub fn is_empty(&self) -> bool {
         self.text.is_none() && !self.has_media && !self.has_links && self.attachments.is_empty()
@@ -303,7 +313,12 @@ impl LmsActivity {
     ///
     /// 正文取自 `data`、附件取自頂層 `uploads`（都只有詳情回應才有）。
     pub fn body(&self) -> Option<ActivityContent> {
-        let mut content = self.body_html().map(html::convert).unwrap_or_default();
+        // 沒有正文時仍可能有附件，因此兩者分開取再合併。
+        let mut content = self
+            .body_html()
+            .map(html::convert)
+            .map(ActivityContent::from_text)
+            .unwrap_or_default();
         content.attachments.clone_from(&self.uploads);
         (!content.is_empty()).then_some(content)
     }

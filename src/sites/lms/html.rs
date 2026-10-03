@@ -26,7 +26,20 @@
 use scraper::node::{Element, Node};
 use scraper::{ElementRef, Html};
 
-use super::models::ActivityContent;
+/// HTML 轉純文字的結果（只有正文部分）。
+///
+/// 刻意不直接回傳 `models::ActivityContent`：附件來自回應的另一個欄位（頂層
+/// `uploads`），由 [`super::models::LmsActivity::body`] 一起組裝。轉換器只依賴
+/// 自己的型別，`html` 與 `models` 因此維持單向引用。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct TextExtract {
+    /// 純文字內容（沒有可見文字時為 `None`）。
+    pub(super) text: Option<String>,
+    /// 是否含圖片、影片等無法以文字呈現的元素。
+    pub(super) has_media: bool,
+    /// 是否含指向實際目標的連結（`href` 不會出現在純文字裡）。
+    pub(super) has_links: bool,
+}
 
 /// 純文字長度上限（字元）；超出時截斷並以「…」結尾。
 ///
@@ -97,13 +110,13 @@ enum Step {
 
 /// 把 HTML 片段轉成純文字。
 ///
-/// 回傳 [`ActivityContent`]：純文字只能呈現正文的一部分（作業說明可能整份就是一張
+/// 回傳 [`TextExtract`]：純文字只能呈現正文的一部分（作業說明可能整份就是一張
 /// 圖片），`has_media`／`has_links` 讓上層能標註「說明含圖片或連結」，使用者才會
 /// 知道要開網頁看原本的內容；沒有可見文字時 `text` 為 `None`。
 ///
-/// 附件（`attachments`）不在正文 HTML 裡——那是活動詳情回應的頂層 `uploads`，
-/// 由 `LmsActivity::body` 填入，這裡一律留空。
-pub(super) fn convert(html: &str) -> ActivityContent {
+/// 附件不在正文 HTML 裡——那是活動詳情回應的頂層 `uploads`，由
+/// [`super::models::LmsActivity::body`] 填入，這裡不處理。
+pub(super) fn convert(html: &str) -> TextExtract {
     let document = Html::parse_fragment(html);
     let mut raw = String::new();
     let mut has_media = false;
@@ -120,11 +133,10 @@ pub(super) fn convert(html: &str) -> ActivityContent {
             push_text(&text.text, &mut raw);
         }
     }
-    ActivityContent {
+    TextExtract {
         text: normalize(&raw),
         has_media,
         has_links,
-        attachments: Vec::new(),
     }
 }
 

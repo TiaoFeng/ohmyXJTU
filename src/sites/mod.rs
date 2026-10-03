@@ -180,7 +180,7 @@ where
     match value {
         Some(value @ serde_json::Value::Object(_)) => serde_json::from_value(value)
             .map(Some)
-            .map_err(|_| serde::de::Error::custom("物件内容无法解析")),
+            .map_err(|_| serde::de::Error::custom("对象内容无法解析")),
         _ => Ok(None),
     }
 }

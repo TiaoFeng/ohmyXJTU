@@ -2166,7 +2166,7 @@ fn homework_detail_scrolls_long_description() {
     assert!(text.contains("第30行"), "滚到底应显示说明结尾：\n{text}");
     assert!(
         !text.contains("第1行"),
-        "滚到底后开头应已離开画面：\n{text}"
+        "滚到底后开头应已离开画面：\n{text}"
     );
 }
 
@@ -2336,6 +2336,72 @@ fn footer_hides_scroll_hint_when_the_panel_is_not_drawn() {
     );
 }
 
+/// 提示列依重要度取捨：畫面專屬的操作（尤其捲動）在小終端也看得到。
+///
+/// 回歸：提示列以往把畫面專屬的操作接在固定的長前綴之後，終端稍窄就會被裁掉
+/// （實測 100 欄時連「enter 收起详情」都只剩半個字），使用者因此看不到「這份
+/// 說明還能往下讀」。
+#[test]
+fn footer_keeps_page_hints_on_narrow_terminals() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00+08:00").expect("固定时间");
+    let description = (1..=30)
+        .map(|line| format!("第{line}行"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let items = aggregate(
+        &[HomeworkInput {
+            description: Some(ActivityContent {
+                text: Some(description),
+                has_media: false,
+                has_links: false,
+                attachments: Vec::new(),
+            }),
+            ..homework_input("长作业", "2026-10-01 23:59:59", 0)
+        }],
+        now,
+    );
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Homework;
+    app.homework = Page::Ready(homework_data(items, None));
+    app.homework_detail = true;
+
+    for width in [64, 80] {
+        let terminal = draw(width, HEIGHT, |frame| {
+            crate::tui::views::draw(frame, &mut app)
+        });
+        let footer = row_text(terminal.backend(), HEIGHT - 1);
+        assert!(
+            footer.contains("PgUp/PgDn 滚动"),
+            "{width} 栏应看得到滚动提示：{footer:?}"
+        );
+        assert!(
+            footer.contains("[ ] 分组"),
+            "{width} 栏应看得到页面操作：{footer:?}"
+        );
+    }
+
+    // 放不下的通用提示整段捨去（並標示還有未顯示的提示）。
+    let terminal = draw(64, HEIGHT, |frame| crate::tui::views::draw(frame, &mut app));
+    let footer = row_text(terminal.backend(), HEIGHT - 1);
+    assert!(
+        !footer.contains("^P 账户设置"),
+        "应舍去放不下的提示：{footer:?}"
+    );
+    assert!(footer.contains('…'), "应标注还有未显示的提示：{footer:?}");
+
+    // 寬終端仍列出完整提示。
+    let terminal = draw(200, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let footer = row_text(terminal.backend(), HEIGHT - 1);
+    assert!(
+        footer.contains("^P 账户设置"),
+        "宽终端应显示完整提示：{footer:?}"
+    );
+    assert!(!footer.contains('…'), "全部显示时不应有省略号：{footer:?}");
+}
+
 /// 思源學堂活動詳情顯示說明，且長說明可捲動。
 #[test]
 fn activity_detail_shows_description_and_scrolls() {
@@ -2379,7 +2445,7 @@ fn activity_detail_shows_description_and_scrolls() {
     assert!(text.contains("第30行"), "滚到底应显示说明结尾：\n{text}");
     assert!(
         !text.contains("第1行"),
-        "滚到底后开头应已離开画面：\n{text}"
+        "滚到底后开头应已离开画面：\n{text}"
     );
 }
 

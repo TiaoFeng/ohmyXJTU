@@ -2472,6 +2472,62 @@ fn homework_marks_image_only_description() {
     assert!(description.has_media, "應標記含圖片");
 }
 
+/// 說明欄位型別異常時只損失該段說明，不得連帶把提交狀態打成「待核实」。
+///
+/// 回歸：詳情子物件内部欄位型別不符曾讓整份活動詳情解析失敗，作業因此全部退回
+/// 「待核实」（即使伺服器已給出提交次數）。
+#[test]
+fn malformed_description_does_not_break_submission_status() {
+    let site = Arc::new(FakeHomeworkSite {
+        seen: Arc::new(Mutex::new(Vec::new())),
+        courses: serde_json::json!({ "courses": [
+            { "id": "1", "name": "编译原理", "semester": { "code": "2026-1" } },
+        ]}),
+        activities: vec![(
+            "1",
+            serde_json::json!({ "activities": [
+                { "id": "11", "type": "homework", "title": "作业A",
+                  "end_time": "2099-12-31 23:59:59" },
+            ]}),
+        )],
+        details: vec![(
+            "11",
+            serde_json::json!({ "id": "11", "type": "homework", "title": "作业A",
+                "end_time": "2099-12-31 23:59:59",
+                "submit_by_group": false, "user_submit_count": 0,
+                "data": { "description": 12345 } }),
+        )],
+        expire_first_submission: false,
+        submissions: AtomicUsize::new(0),
+        attendance_term: Some(("2026-2027", "第一学期")),
+    });
+
+    let system = Arc::clone(&site);
+    let mut harness = harness(move |request| system.handle(request));
+    harness.login_both_sites();
+
+    harness
+        .dispatch(Job::LoadHomework { force: false })
+        .expect("作业加载应当成功");
+    let updates = homework_updates(&mut harness);
+    let last = updates.last().expect("最终更新");
+    assert_eq!(last.items.len(), 1);
+    assert!(
+        last.items[0].description.is_none(),
+        "型別異常的說明應被忽略"
+    );
+    assert_eq!(
+        last.items[0].state,
+        HomeworkState::Pending,
+        "提交狀態不得因說明欄位型別異常而退回「待核实」"
+    );
+    assert!(
+        last.issues.is_empty(),
+        "不應產生待核实彙總：{:?}",
+        last.issues
+    );
+}
+
 #[test]
 fn opening_lesson_activity_uses_server_player_url() {
     let site = Arc::new(FakeHomeworkSite {

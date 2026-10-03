@@ -2074,6 +2074,7 @@ fn homework_detail_shows_activity_description() {
             description: Some(ActivityText {
                 text: Some("第一章习题\n交到邮箱".to_owned()),
                 has_media: false,
+                has_links: false,
             }),
             ..homework_input("第一章作业", "2026-10-01 23:59:59", 0)
         }],
@@ -2132,6 +2133,7 @@ fn homework_detail_scrolls_long_description() {
             description: Some(ActivityText {
                 text: Some(description),
                 has_media: false,
+                has_links: false,
             }),
             ..homework_input("长作业", "2026-10-01 23:59:59", 0)
         }],
@@ -2172,6 +2174,7 @@ fn homework_detail_marks_image_only_description() {
             description: Some(ActivityText {
                 text: None,
                 has_media: true,
+                has_links: false,
             }),
             ..homework_input("图片作业", "2026-10-01 23:59:59", 0)
         }],
@@ -2195,6 +2198,70 @@ fn homework_detail_marks_image_only_description() {
     );
 }
 
+/// 說明含連結（`href` 目標不在純文字裡）：應標註並提示開網頁。
+#[test]
+fn homework_detail_marks_link_only_description() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00+08:00").expect("固定时间");
+    let items = aggregate(
+        &[HomeworkInput {
+            description: Some(ActivityText {
+                text: Some("下载附件".to_owned()),
+                has_media: false,
+                has_links: true,
+            }),
+            ..homework_input("链接作业", "2026-10-01 23:59:59", 0)
+        }],
+        now,
+    );
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Homework;
+    app.homework = Page::Ready(homework_data(items, None));
+    app.homework_detail = true;
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(text.contains("下载附件"), "應顯示錨文字：\n{text}");
+    assert!(text.contains("说明含链接"), "應標註含連結：\n{text}");
+    assert!(
+        text.contains("按 o 打开思源学堂查看"),
+        "應提示到思源學堂看原文：\n{text}"
+    );
+}
+
+/// 圖片與連結並存：提示合併為一句。
+#[test]
+fn homework_detail_combines_media_and_link_hint() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00+08:00").expect("固定时间");
+    let items = aggregate(
+        &[HomeworkInput {
+            description: Some(ActivityText {
+                text: None,
+                has_media: true,
+                has_links: true,
+            }),
+            ..homework_input("图文作业", "2026-10-01 23:59:59", 0)
+        }],
+        now,
+    );
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Homework;
+    app.homework = Page::Ready(homework_data(items, None));
+    app.homework_detail = true;
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(
+        text.contains("说明含图片与链接"),
+        "圖片與連結並存時應合併提示：\n{text}"
+    );
+}
+
 /// 底欄在詳情可捲動時提示捲動鍵（終端夠寬時才看得見完整提示）。
 #[test]
 fn footer_hints_scrolling_when_detail_is_scrollable() {
@@ -2208,6 +2275,7 @@ fn footer_hints_scrolling_when_detail_is_scrollable() {
             description: Some(ActivityText {
                 text: Some(description),
                 has_media: false,
+                has_links: false,
             }),
             ..homework_input("长作业", "2026-10-01 23:59:59", 0)
         }],
@@ -2277,6 +2345,7 @@ fn activity_detail_shows_description_and_scrolls() {
         description: Some(ActivityText {
             text: Some(description),
             has_media: false,
+            has_links: false,
         }),
         end_time: None,
         submit_by_group: Some(false),
@@ -2318,6 +2387,7 @@ fn activity_detail_labels_description_by_kind() {
         description: Some(ActivityText {
             text: Some("课程介绍".to_owned()),
             has_media: true,
+            has_links: false,
         }),
         end_time: None,
         submit_by_group: None,

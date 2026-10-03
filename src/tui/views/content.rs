@@ -11,7 +11,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::domain::homework::parse_time;
-use crate::sites::lms::ActivityKind;
+use crate::sites::lms::{ActivityKind, ActivityText};
 use crate::text::{fit_display, wrap_display};
 use crate::tui::app::{App, NavItem, ScrollState};
 use crate::tui::theme::THEME;
@@ -43,11 +43,27 @@ const ROW_CHROME_WIDTH: u16 = 3;
 const DETAIL_HEIGHT: u16 = 7;
 
 /// 說明含圖片等無法以文字呈現的內容時的提示。
-///
-/// 純圖片說明沒有任何文字可顯示，若不標註，使用者會以為這項作業沒有說明。
-/// 用詞刻意只寫「打开思源学堂」：`o` 對資料等活動只會開啟思源學堂首頁
-/// （見 `Worker::open_activity_url`），並非該活動的頁面。
 const MEDIA_HINT: &str = "（说明含图片，按 o 打开思源学堂查看）";
+
+/// 說明含連結（`href` 目標不會出現在純文字裡）時的提示。
+const LINK_HINT: &str = "（说明含链接，按 o 打开思源学堂查看）";
+
+/// 說明同時含圖片與連結時的提示。
+const MEDIA_LINK_HINT: &str = "（说明含图片与链接，按 o 打开思源学堂查看）";
+
+/// 說明含無法以文字呈現的內容（圖片、連結）時的提示。
+///
+/// 純圖片說明沒有任何文字可顯示；連結的文字雖保留，`href` 目標卻會遺失。兩者都
+/// 建議使用者按 `o` 開網頁查看原文。用詞刻意只寫「打开思源学堂」：`o` 對資料等
+/// 活動只會開啟思源學堂首頁（見 `Worker::open_activity_url`），並非該活動的頁面。
+pub(super) fn description_hint(text: &ActivityText) -> Option<&'static str> {
+    match (text.has_media, text.has_links) {
+        (true, true) => Some(MEDIA_LINK_HINT),
+        (true, false) => Some(MEDIA_HINT),
+        (false, true) => Some(LINK_HINT),
+        (false, false) => None,
+    }
+}
 
 /// 說明區塊的標題：作業為「作业描述」，其他活動為「内容」。
 ///

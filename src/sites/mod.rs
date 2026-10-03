@@ -150,6 +150,22 @@ where
     }
 }
 
+/// 缺欄位或型別不符時回傳 `None` 的可選字串。
+///
+/// 只接受字串：非字串（數字、物件、陣列…）一律視為「沒有這段內容」。用於純展示
+/// 用的文字欄位（例如活動說明）：這些欄位型別異常時只應損失該段說明，不應讓整份
+/// 回應解析失敗——詳情解析失敗會使該課程的作業全部退回「待核实」。
+pub(crate) fn optional_string_lenient<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    match value {
+        Some(serde_json::Value::String(text)) => Ok(Some(text)),
+        _ => Ok(None),
+    }
+}
+
 /// 缺欄位或內容不是物件時回傳 `None` 的可選物件欄位。
 ///
 /// 伺服器對同一欄位的型別並不總是穩定（例如活動正文的 `data`）：把非物件的內容

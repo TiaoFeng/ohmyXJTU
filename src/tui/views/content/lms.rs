@@ -18,7 +18,7 @@ use crate::tui::ui::render_list;
 
 use super::columns::{GROUP_WIDTH, RowColumns, RowNeeds, activity_columns, activity_min_row_width};
 use super::{
-    MEDIA_HINT, deadline_cell, deadline_label, deadline_list_label, description_label, empty,
+    deadline_cell, deadline_label, deadline_list_label, description_hint, description_label, empty,
     empty_note, group_label, panel_width, push_multiline, push_wrapped, row_width, scrolled_panel,
     submission_time_label, title_suffix, too_narrow,
 };
@@ -295,9 +295,9 @@ fn detail_lines(detail: &ActivityDetailView, width: usize) -> Vec<Line<'static>>
         if let Some(text) = &description.text {
             push_multiline(&mut lines, text, Style::default().fg(THEME.text), width);
         }
-        // 說明可能就是一張圖片：文字轉換後什麼都不剩，必須明講。
-        if description.has_media {
-            push_wrapped(&mut lines, MEDIA_HINT, THEME.muted_style(), width);
+        // 圖片沒有任何文字、連結的目標也不在文字裡：必須明講，使用者才知道要開網頁。
+        if let Some(hint) = description_hint(description) {
+            push_wrapped(&mut lines, hint, THEME.muted_style(), width);
         }
     }
 

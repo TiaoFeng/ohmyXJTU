@@ -218,3 +218,34 @@ fn markup_inside_script_is_not_counted_as_media() {
     let content = convert("<p>图片见附件</p>");
     assert!(!content.has_media, "純文字說明不得標記含圖片");
 }
+
+/// 連結（`<a href>`）：錨文字保留，另以 `has_links` 標記目標（`href` 不會出現在
+/// 純文字裡）。
+#[test]
+fn links_keep_their_text_and_are_flagged() {
+    let content = convert(r#"<p>见<a href="https://lms.xjtu.edu.cn/a.pdf">下载附件</a></p>"#);
+    assert_eq!(content.text.as_deref(), Some("见下载附件"));
+    assert!(content.has_links, "應標記含連結");
+    assert!(!content.has_media, "連結不是多媒體內容");
+}
+
+/// 沒有實際目標的錨點（無 `href`、純 `#` 頁內錨點）不算連結。
+#[test]
+fn anchors_without_a_target_are_not_flagged() {
+    for html in [
+        "<p><a>没有链接</a></p>",
+        r#"<p><a href="">空的</a></p>"#,
+        r##"<p><a href="#section">页内锚点</a></p>"##,
+        r#"<p><a name="top">命名锚点</a></p>"#,
+    ] {
+        let content = convert(html);
+        assert!(!content.has_links, "{html} 不應標記為含連結");
+    }
+    // 頁內錨點的文字仍要保留。
+    assert_eq!(
+        convert(r##"<p><a href="#section">跳到结论</a></p>"##)
+            .text
+            .as_deref(),
+        Some("跳到结论")
+    );
+}

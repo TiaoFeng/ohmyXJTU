@@ -5,7 +5,9 @@
 
 use serde::Deserialize;
 
-use super::super::{optional_object, optional_string_or_number, string_or_number};
+use super::super::{
+    optional_object, optional_string_lenient, optional_string_or_number, string_or_number,
+};
 use super::html;
 
 /// 活動類型。
@@ -143,26 +145,33 @@ impl LmsCourse {
 ///
 /// 作業與資料的說明放在 `description`，頁面型活動（課程簡介、教學進度…）
 /// 的正文放在 `content`；兩者都是 HTML。列表項目不含這個區塊。
+///
+/// 兩個欄位都只容忍字串：型別異常（數字、物件…）時視為「沒有這段內容」，只損失
+/// 該段說明，不讓整份活動詳情解析失敗——詳情失敗會使該課程的作業全部退回
+/// 「待核实」。
 #[derive(Debug, Clone, Deserialize)]
 pub struct LmsActivityBody {
-    /// 作業／資料說明（HTML）。
-    #[serde(default)]
+    /// 作業／資料說明（HTML）；型別不符時視為沒有這段說明。
+    #[serde(default, deserialize_with = "optional_string_lenient")]
     pub description: Option<String>,
-    /// 頁面型活動正文（HTML）。
-    #[serde(default)]
+    /// 頁面型活動正文（HTML）；型別不符時視為沒有這段正文。
+    #[serde(default, deserialize_with = "optional_string_lenient")]
     pub content: Option<String>,
 }
 
-/// 活動正文（純文字與是否含圖片等內容）。
+/// 活動正文（純文字與是否含圖片、連結等內容）。
 ///
-/// 純文字不足以呈現整份正文（作業說明可能就是一張圖片），因此額外回報
-/// `has_media`，讓介面能提示使用者「說明含圖片，請開網頁查看」。
+/// 純文字不足以呈現整份正文：作業說明可能就是一張圖片，或含有 `href` 目標的
+/// 連結。因此額外回報 `has_media` 與 `has_links`，讓介面能提示使用者「說明含
+/// 圖片或連結，請開網頁查看」。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ActivityText {
     /// 純文字內容（沒有可見文字時為 `None`）。
     pub text: Option<String>,
     /// 是否含圖片、影片等無法以文字呈現的元素。
     pub has_media: bool,
+    /// 是否含指向實際目標的連結（`href` 不會出現在純文字裡）。
+    pub has_links: bool,
 }
 
 /// 活動（作業、資料、課程內容…）。
@@ -232,11 +241,11 @@ impl LmsActivity {
             .find(|html| !html.trim().is_empty())
     }
 
-    /// 活動正文（純文字＋是否含圖片等內容）；沒有正文時回 `None`。
+    /// 活動正文（純文字＋是否含圖片、連結等內容）；沒有正文時回 `None`。
     pub fn body(&self) -> Option<ActivityText> {
         let body = html::convert(self.body_html()?);
-        // 整份說明只有一張圖片時沒有可見文字，但仍要讓介面能標註「含圖片」。
-        (body.text.is_some() || body.has_media).then_some(body)
+        // 說明可能整份只有一張圖片或一個連結，沒有可見文字，但仍要讓介面能標註。
+        (body.text.is_some() || body.has_media || body.has_links).then_some(body)
     }
 }
 

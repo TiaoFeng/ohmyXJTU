@@ -217,6 +217,34 @@ fn tolerates_non_object_activity_data() {
     }
 }
 
+/// 正文子物件「內部」欄位型別異常時只忽略該欄位，不得讓整份活動解析失敗。
+///
+/// 詳情解析失敗會使該課程的作業全部退回「待核实」（提交狀態也一起失去），代價
+/// 遠大於少一段說明。
+#[test]
+fn tolerates_non_string_activity_body_fields() {
+    for value in [
+        json!({"id": 9001, "type": "homework", "data": {"description": 123}}),
+        json!({"id": 9001, "type": "homework", "data": {"description": {"a": 1}}}),
+        json!({"id": 9001, "type": "homework", "data": {"description": ["x"]}}),
+        json!({"id": 9001, "type": "homework", "data": {"description": null}}),
+        json!({"id": 9001, "type": "homework", "data": {"content": 42}}),
+    ] {
+        let activity: LmsActivity = crate::sites::deserialize_value(value.clone(), "查询活动详情")
+            .unwrap_or_else(|err| panic!("{value}: {err}"));
+        assert_eq!(body_text(&activity), None, "{value}");
+    }
+
+    // 一個欄位型別異常不得影響另一個正常欄位（頁面型活動的正文在 content）。
+    let value = json!({
+        "id": 9002,
+        "type": "material",
+        "data": {"description": 999, "content": "<div>课程介绍</div>"}
+    });
+    let activity: LmsActivity = crate::sites::deserialize_value(value, "查询活动详情").unwrap();
+    assert_eq!(body_text(&activity).as_deref(), Some("课程介绍"));
+}
+
 /// 整份說明只有一張圖片：不得當成「沒有說明」，要讓介面能標註。
 #[test]
 fn reports_media_only_body() {

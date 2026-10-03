@@ -13,10 +13,13 @@
 //!
 //! 表格以「列」為單位換行，同一列的各儲存格之間補一個空白（否則會出現
 //! 「第一题10」這種黏在一起的內容）；儲存格內的區塊元素同樣降級成空白（所見即
-//! 所得的編輯器會把儲存格內容包在 `<p>` 裡，換行會讓同一列的欄位散開）。沒有
-//! 可見文字時回傳空的 `text`（呼叫端據此隱藏整個描述區塊）。
+//! 所得的編輯器會把儲存格內容包在 `<p>` 裡，換行會讓同一列的欄位散開）。
+//!
+//! 連結（`<a href>`）只保留錨文字：`href` 目標在純文字裡無處可放，因此另外以
+//! `has_links` 標記，讓介面提示使用者開網頁查看。沒有可見文字時回傳空的 `text`
+//! （呼叫端據此隱藏整個描述區塊）。
 
-use scraper::node::Node;
+use scraper::node::{Element, Node};
 use scraper::{ElementRef, Html};
 
 use super::models::ActivityText;
@@ -97,11 +100,12 @@ pub(super) fn convert(html: &str) -> ActivityText {
     let document = Html::parse_fragment(html);
     let mut raw = String::new();
     let mut has_media = false;
+    let mut has_links = false;
     // 片段根不是元素（`Node::Fragment`），直接走訪其子節點。
     for child in document.tree.root().children() {
         if child.value().is_element() {
             if let Some(element) = ElementRef::wrap(child) {
-                walk_element(element, &mut raw, &mut has_media, 0, false);
+                walk_element(element, &mut raw, &mut has_media, &mut has_links, 0, false);
             }
         } else if let Node::Text(text) = child.value() {
             push_text(&text.text, &mut raw);
@@ -110,6 +114,7 @@ pub(super) fn convert(html: &str) -> ActivityText {
     ActivityText {
         text: normalize(&raw),
         has_media,
+        has_links,
     }
 }
 
@@ -122,6 +127,7 @@ fn walk_element(
     element: ElementRef<'_>,
     out: &mut String,
     has_media: &mut bool,
+    has_links: &mut bool,
     depth: usize,
     in_cell: bool,
 ) {
@@ -137,6 +143,9 @@ fn walk_element(
                 } else if MEDIA_ELEMENTS.contains(&name) {
                     Step::Media
                 } else {
+                    if name == "a" && anchor_has_target(node) {
+                        *has_links = true;
+                    }
                     Step::Nested {
                         block: BLOCK_ELEMENTS.contains(&name),
                         cell: CELL_ELEMENTS.contains(&name),
@@ -164,7 +173,14 @@ fn walk_element(
                 if depth < MAX_DEPTH
                     && let Some(nested) = ElementRef::wrap(child)
                 {
-                    walk_element(nested, out, has_media, depth + 1, in_cell || cell);
+                    walk_element(
+                        nested,
+                        out,
+                        has_media,
+                        has_links,
+                        depth + 1,
+                        in_cell || cell,
+                    );
                 }
                 if block && !in_cell {
                     out.push('\n');
@@ -179,6 +195,17 @@ fn push_separator(out: &mut String) {
     if !out.ends_with(|character: char| character.is_whitespace()) {
         out.push(' ');
     }
+}
+
+/// 連結（`<a>`）是否指向實際目標。
+///
+/// 只認帶 `href` 且非頁內錨點（`#foo`）的連結：純文字轉換會丟掉 `href`，使用者
+/// 看到「下载附件」卻拿不到網址，因此需要標記讓他知道要開網頁。
+fn anchor_has_target(element: &Element) -> bool {
+    element
+        .attr("href")
+        .map(str::trim)
+        .is_some_and(|href| !href.is_empty() && !href.starts_with('#'))
 }
 
 /// 寫入文字節點內容：連續的 **ASCII** 空白（原始碼換行與縮排）折成單一空格。

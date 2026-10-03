@@ -124,3 +124,35 @@ fn optional_object_tolerates_non_object_values() {
     assert!(message.contains("数据类型不符"), "{message}");
     assert!(!message.contains("42"), "不应包含欄位值：{message}");
 }
+
+/// 可選字串欄位：只接受字串，其餘型別一律視為「沒有這段內容」。
+///
+/// 用於純展示用的文字欄位（活動說明）：型別異常時只應損失該段說明，不應讓整份
+/// 回應解析失敗。
+#[test]
+fn optional_string_lenient_ignores_non_string_values() {
+    #[derive(serde::Deserialize, Debug)]
+    struct Target {
+        #[serde(default, deserialize_with = "optional_string_lenient")]
+        text: Option<String>,
+    }
+
+    // 字串正常解析。
+    let target: Target =
+        deserialize_value(serde_json::json!({ "text": "正文" }), "活动详情").expect("字串应解析");
+    assert_eq!(target.text.as_deref(), Some("正文"));
+
+    // 缺欄位或非字串（含 null）一律回 None，且不得報錯。
+    for value in [
+        serde_json::json!({}),
+        serde_json::json!({ "text": null }),
+        serde_json::json!({ "text": 42 }),
+        serde_json::json!({ "text": true }),
+        serde_json::json!({ "text": [1, 2] }),
+        serde_json::json!({ "text": { "a": 1 } }),
+    ] {
+        let target: Target = deserialize_value(value.clone(), "活动详情")
+            .unwrap_or_else(|err| panic!("{value}: {err}"));
+        assert!(target.text.is_none(), "{value}");
+    }
+}

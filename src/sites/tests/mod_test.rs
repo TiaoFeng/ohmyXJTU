@@ -15,7 +15,7 @@ fn envelope_without_integer_code_is_a_protocol_error() {
     // 字串碼（學校可能以字串序列化）同樣是協定不符，不可假裝成業務錯誤。
     let stringy = HttpResponse::new(200, "https://example", r#"{"code":"0","data":{}}"#);
     let err =
-        unwrap_envelope::<serde_json::Value>(&stringy, "查询学期").expect_err("字串 code 应失败");
+        unwrap_envelope::<serde_json::Value>(&stringy, "查询学期").expect_err("字符串 code 应失败");
     assert!(matches!(err, AppError::Protocol(_)), "应为协定错误：{err}");
 }
 
@@ -89,7 +89,7 @@ fn optional_string_lenient_ignores_non_string_values() {
 
     // 字串正常解析。
     let target: Target =
-        deserialize_value(serde_json::json!({ "text": "正文" }), "活动详情").expect("字串应解析");
+        deserialize_value(serde_json::json!({ "text": "正文" }), "活动详情").expect("字符串应解析");
     assert_eq!(target.text.as_deref(), Some("正文"));
 
     // 缺欄位或非字串（含 null）一律回 None，且不得報錯。

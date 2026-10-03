@@ -149,7 +149,7 @@ fn reset_session_rebuilds_both_backends_and_clears_state() {
     let mut manager =
         SessionManager::with_client_factories(&config, direct_factory, webvpn_factory)
             .expect("建立会话管理器");
-    assert_eq!(built.load(Ordering::SeqCst), 2, "建立時兩個後端各建一次");
+    assert_eq!(built.load(Ordering::SeqCst), 2, "建立时两个后端各建一次");
 
     manager.register(Box::new(TestLmsSite));
     manager.mark_logged_in(SiteKind::Lms, AccessMode::Direct, Vec::new());
@@ -160,11 +160,11 @@ fn reset_session_rebuilds_both_backends_and_clears_state() {
     assert_eq!(
         built.load(Ordering::SeqCst),
         4,
-        "重建時兩個後端都必須換成新實例（新的 cookie jar）"
+        "重建时两个后端都必须换成新实例（新的 cookie jar）"
     );
     assert!(
         !manager.is_logged_in(SiteKind::Lms),
-        "重建後不得殘留舊的站點登入態"
+        "重建后不得残留旧的站点登录态"
     );
     assert!(manager.access_mode(SiteKind::Lms).is_none());
     assert!(manager.resolved_access_mode(SiteKind::Lms).is_none());
@@ -175,7 +175,7 @@ fn reset_session_rebuilds_both_backends_and_clears_state() {
         .expect("取得登录步骤");
     assert!(
         matches!(stage, LoginStage::Drive(_)),
-        "重建後應重新驅動登入流程"
+        "重建后应重新驱动登录流程"
     );
 }
 
@@ -235,14 +235,14 @@ fn webvpn_policy_logs_into_backend_before_site() {
     let (mut manager, _, webvpn) = manager_with(AccessPolicy::WebVpn, |_| ok_response());
 
     let LoginStage::Drive(driver) = manager.next_login_step(SiteKind::Attendance).unwrap() else {
-        panic!("尚未登入时应有下一步");
+        panic!("尚未登录时应有下一步");
     };
     let requests = webvpn.requests();
     assert!(
         requests
             .iter()
             .any(|request| request.url.starts_with("https://webvpn.xjtu.edu.cn/login")),
-        "第一步應先登入 WebVPN 後端，实际请求：{:?}",
+        "第一步应先登录 WebVPN 后端，实际请求：{:?}",
         requests
             .iter()
             .map(|request| &request.url)
@@ -252,7 +252,7 @@ fn webvpn_policy_logs_into_backend_before_site() {
     // 完成 WebVPN 後端登入後，下一步是站點登入，且網址已改寫。
     let next = manager
         .complete_login_step(SiteKind::Attendance, &driver)
-        .expect("完成后端登入");
+        .expect("完成后端登录");
     assert!(matches!(next, LoginStage::Drive(_)));
     assert!(
         webvpn
@@ -321,7 +321,7 @@ fn send_reports_expired_session_when_login_page_is_returned() {
         )
         .unwrap_err();
     assert!(matches!(err, AppError::SessionExpired), "实际错误：{err}");
-    assert!(!manager.is_logged_in(SiteKind::Lms), "失效後应重置登入态");
+    assert!(!manager.is_logged_in(SiteKind::Lms), "失效后应重置登录态");
 }
 
 #[test]
@@ -376,7 +376,7 @@ fn fallback_to_webvpn_switches_once_under_auto() {
     assert_eq!(
         manager.resolve_access_mode(SiteKind::Attendance).unwrap(),
         AccessMode::Direct,
-        "校內探測成功時先走直連"
+        "校内探测成功时先走直连"
     );
     manager.mark_logged_in(SiteKind::Attendance, AccessMode::Direct, Vec::new());
 
@@ -386,12 +386,12 @@ fn fallback_to_webvpn_switches_once_under_auto() {
     );
     assert!(
         manager.access_mode(SiteKind::Attendance).is_none(),
-        "回退後旧的直连登入态必须失效，重新登入"
+        "回退后旧的直连登录态必须失效，重新登录"
     );
     assert_eq!(
         manager.resolve_access_mode(SiteKind::Attendance).unwrap(),
         AccessMode::WebVpn,
-        "回退後该站应解析为 WebVPN"
+        "回退后该站应解析为 WebVPN"
     );
     assert!(
         !manager.fallback_to_webvpn(SiteKind::Attendance),
@@ -441,7 +441,7 @@ fn send_wraps_network_errors_with_site_and_mode() {
         .unwrap_err();
 
     let text = err.to_string();
-    assert!(text.contains("考勤系统"), "訊息：{text}");
-    assert!(text.contains("直连"), "訊息：{text}");
-    assert!(text.contains("connection refused"), "訊息：{text}");
+    assert!(text.contains("考勤系统"), "信息：{text}");
+    assert!(text.contains("直连"), "信息：{text}");
+    assert!(text.contains("connection refused"), "信息：{text}");
 }

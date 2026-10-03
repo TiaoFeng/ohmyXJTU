@@ -325,7 +325,7 @@ fn job_debug_never_leaks_credentials() {
     let debug = format!("{unlock:?}");
     assert!(
         !debug.contains("super-secret-passphrase"),
-        "Debug 不得洩漏口令：{debug}"
+        "Debug 不得泄漏口令：{debug}"
     );
 
     let create = Job::CreateVault {
@@ -449,7 +449,7 @@ fn change_account_saves_new_credentials_only_after_login_succeeds() {
                 account_changed: true
             }
         )),
-        "换账号应清除旧账号的资料与快取"
+        "换账号应清除旧账号的资料与缓存"
     );
 }
 
@@ -683,7 +683,7 @@ fn offline_relogin_failure_settles_page_and_reports_login_failure() {
     // 考勤站點尚未登入：資料任務先回報工作階段失效，再嘗試自動重登。
     harness
         .dispatch(Job::LoadSchedule)
-        .expect("資料任務失敗不應冒泡為任務錯誤");
+        .expect("数据任务失败不应冒泡为任务错误");
 
     let events = harness.drain_events();
     assert!(
@@ -693,13 +693,13 @@ fn offline_relogin_failure_settles_page_and_reports_login_failure() {
                 site: SiteKind::Attendance
             }
         )),
-        "應先回報工作階段失效：{events:?}"
+        "应先回报工作阶段失效：{events:?}"
     );
     assert!(
         !events
             .iter()
             .any(|event| matches!(event, Event::LoginProgress(_))),
-        "登入流程連開始都做不到時，不得顯示「正在登入」：{events:?}"
+        "登录流程连开始都做不到时，不得显示「正在登录」：{events:?}"
     );
     assert!(
         events.iter().any(|event| matches!(
@@ -709,7 +709,7 @@ fn offline_relogin_failure_settles_page_and_reports_login_failure() {
                 ..
             }
         )),
-        "原頁面必須收斂為失敗，而不是停在載入中：{events:?}"
+        "原页面必须收敛为失败，而不是停在加载中：{events:?}"
     );
     assert!(
         !events.iter().any(|event| matches!(
@@ -719,11 +719,11 @@ fn offline_relogin_failure_settles_page_and_reports_login_failure() {
                 ..
             }
         )),
-        "單純的連線失敗不應彈出登入框：{events:?}"
+        "单纯的连接失败不应弹出登录框：{events:?}"
     );
     assert!(
         harness.worker.retry.is_none(),
-        "重登失敗後不應保留待重試任務"
+        "重登失败后不应保留待重试任务"
     );
 }
 
@@ -754,14 +754,14 @@ fn relogin_progress_is_followed_by_a_page_failure_when_the_login_breaks() {
 
     harness
         .dispatch(Job::LoadSchedule)
-        .expect("資料任務失敗不應冒泡為任務錯誤");
+        .expect("数据任务失败不应冒泡为任务错误");
 
     let events = harness.drain_events();
     assert!(
         events
             .iter()
             .any(|event| matches!(event, Event::LoginProgress(_))),
-        "登入流程確實開始時應顯示進度：{events:?}"
+        "登录流程确实开始时应显示进度：{events:?}"
     );
     assert!(
         events.iter().any(|event| matches!(
@@ -771,7 +771,7 @@ fn relogin_progress_is_followed_by_a_page_failure_when_the_login_breaks() {
                 ..
             }
         )),
-        "進度之後必須跟著原頁面的失敗事件，介面才能收斂覆蓋層：{events:?}"
+        "进度之后必须跟着原页面的失败事件，界面才能收敛覆盖层：{events:?}"
     );
     assert!(harness.worker.retry.is_none());
 }
@@ -807,15 +807,15 @@ fn cancel_login_drops_pending_login_state() {
 
     harness
         .dispatch(Job::CancelLogin)
-        .expect("取消登入应当成功");
+        .expect("取消登录应当成功");
 
-    assert!(harness.worker.flow.is_none(), "應丟棄登入流程");
-    assert!(harness.worker.pending_vault.is_none(), "應丟棄待存憑證");
-    assert!(harness.worker.retry.is_none(), "應丟棄待重試任務");
+    assert!(harness.worker.flow.is_none(), "应丢弃登录流程");
+    assert!(harness.worker.pending_vault.is_none(), "应丢弃待存凭证");
+    assert!(harness.worker.retry.is_none(), "应丢弃待重试任务");
     assert_eq!(
         harness.worker.credentials,
         Some(Credentials::new("3120000001", "old-password")),
-        "取消後記憶體中的憑證應還原為保險庫保存的舊憑證"
+        "取消后内存中的凭证应还原为保险库保存的旧凭证"
     );
     assert_eq!(
         harness
@@ -824,18 +824,18 @@ fn cancel_login_drops_pending_login_state() {
             .as_ref()
             .and_then(|session| session.credentials().cloned()),
         Some(Credentials::new("3120000001", "old-password")),
-        "工作階段的憑證也應還原"
+        "工作阶段的凭证也应还原"
     );
     let events = harness.drain_events();
     assert!(
         events
             .iter()
             .any(|event| matches!(event, Event::LoginCancelled)),
-        "應回報取消完成，介面才能清除等待狀態"
+        "应回报取消完成，界面才能清除等待状态"
     );
     assert!(
         events.iter().any(|event| matches!(event, Event::Notice(_))),
-        "應提示已取消登入"
+        "应提示已取消登录"
     );
 }
 
@@ -877,7 +877,7 @@ fn cancel_login_settles_the_waiting_page() {
 
 #[test]
 fn merge_upgrades_queued_non_forced_job_in_place() {
-    let mut harness = harness(|_request: &HttpRequest| panic!("合併不应触发网络请求"));
+    let mut harness = harness(|_request: &HttpRequest| panic!("合并不应触发网络请求"));
     harness.worker.pending_data.push_back(Job::LoadSchedule);
     harness
         .worker
@@ -899,7 +899,7 @@ fn merge_upgrades_queued_non_forced_job_in_place() {
 
 #[test]
 fn merge_never_downgrades_forced_job() {
-    let mut harness = harness(|_request: &HttpRequest| panic!("合併不应触发网络请求"));
+    let mut harness = harness(|_request: &HttpRequest| panic!("合并不应触发网络请求"));
     harness
         .worker
         .pending_data
@@ -921,7 +921,7 @@ fn merge_never_downgrades_forced_job() {
 
 #[test]
 fn merge_drops_duplicates_of_unforced_jobs() {
-    let mut harness = harness(|_request: &HttpRequest| panic!("合併不应触发网络请求"));
+    let mut harness = harness(|_request: &HttpRequest| panic!("合并不应触发网络请求"));
     harness.worker.pending_data.push_back(Job::LoadSchedule);
     harness
         .worker
@@ -955,7 +955,7 @@ fn merge_drops_duplicates_of_unforced_jobs() {
 
 #[test]
 fn merge_keeps_one_forced_job_behind_a_running_unforced_job() {
-    let mut harness = harness(|_request: &HttpRequest| panic!("合併不应触发网络请求"));
+    let mut harness = harness(|_request: &HttpRequest| panic!("合并不应触发网络请求"));
     let running = Job::LoadCourses { force: false };
 
     harness
@@ -972,7 +972,7 @@ fn merge_keeps_one_forced_job_behind_a_running_unforced_job() {
 
 #[test]
 fn merge_drops_same_key_requests_while_a_forced_job_runs() {
-    let mut harness = harness(|_request: &HttpRequest| panic!("合併不应触发网络请求"));
+    let mut harness = harness(|_request: &HttpRequest| panic!("合并不应触发网络请求"));
     let running = Job::LoadHomework { force: true };
 
     harness
@@ -1081,7 +1081,7 @@ fn set_access_policy_saves_without_login_and_keeps_old_value_on_failure() {
         "应回报访问策略已更新"
     );
     let saved = std::fs::read_to_string(harness.config_path()).expect("读取配置文件");
-    assert!(saved.contains("webvpn"), "设定应写入磁盘：{saved}");
+    assert!(saved.contains("webvpn"), "设置应写入磁盘：{saved}");
 
     // 将存档路径指向目录，迫使写入失败。
     harness.worker.config.save_path = Some(harness._dir.path().to_path_buf());
@@ -1116,7 +1116,7 @@ fn accept_agreement_saves_version_and_emits_event() {
     assert_eq!(
         harness.worker.config.privacy_version.as_deref(),
         Some(crate::privacy::VERSION),
-        "内存中的设定应记录已同意版本"
+        "内存中的设置应记录已同意版本"
     );
     let saved = std::fs::read_to_string(harness.config_path()).expect("读取配置文件");
     assert!(
@@ -1208,7 +1208,7 @@ impl FakeHomeworkSite {
         }
         if url.ends_with("/timetable/semesters") {
             let Some((year, name)) = self.attendance_term else {
-                panic!("考勤未登入时不应查询学期：{url}");
+                panic!("考勤未登录时不应查询学期：{url}");
             };
             return Ok(json(serde_json::json!({
                 "code": 0,
@@ -1456,7 +1456,7 @@ fn homework_uses_remembered_term_without_touching_attendance() {
             .urls()
             .iter()
             .any(|url| url.contains("timetable/semesters")),
-        "考勤未登入时不得查询其学期"
+        "考勤未登录时不得查询其学期"
     );
 }
 
@@ -1640,11 +1640,11 @@ fn homework_reuses_cache_until_forced() {
     harness
         .dispatch(Job::LoadHomework { force: false })
         .expect("再次加载");
-    assert_eq!(count(&site, "/api/my-courses"), 1, "第二次应命中课程快取");
+    assert_eq!(count(&site, "/api/my-courses"), 1, "第二次应命中课程缓存");
     assert_eq!(
         count(&site, "/courses/1/activities"),
         1,
-        "第二次应命中活动快取"
+        "第二次应命中活动缓存"
     );
 
     harness
@@ -2150,7 +2150,7 @@ fn schedule_does_not_fall_back_to_week_22_after_teaching_weeks() {
         .expect("应发出课表事件");
     assert_eq!(
         schedule.week, 23,
-        "第 23 週必须以真实週次呈现（不再夹取为 22）"
+        "第 23 周必须以真实周次呈现（不再夹取为 22）"
     );
     assert!(schedule.notice.is_none(), "学期内不应有提示");
     let names: Vec<&str> = schedule
@@ -2160,11 +2160,11 @@ fn schedule_does_not_fall_back_to_week_22_after_teaching_weeks() {
         .collect();
     assert!(
         !names.contains(&"已结课课程"),
-        "第 22 週后不得回退显示已结课课程：{names:?}"
+        "第 22 周后不得回退显示已结课课程：{names:?}"
     );
     assert!(
         names.contains(&"贯穿课程"),
-        "跨越第 23 週的课程仍应显示：{names:?}"
+        "跨越第 23 周的课程仍应显示：{names:?}"
     );
 }
 
@@ -2301,16 +2301,16 @@ fn activity_detail_for_material_skips_submission_request() {
         .dispatch(Job::LoadActivityDetail {
             activity_id: "77".to_owned(),
         })
-        .expect("載入詳情");
+        .expect("加载详情");
 
     let seen = site.urls();
     assert!(
         seen.iter().any(|url| url.ends_with("/api/activities/77")),
-        "應請求活動詳情：{seen:?}"
+        "应请求活动详情：{seen:?}"
     );
     assert!(
         !seen.iter().any(|url| url.contains("/submission_list")),
-        "非作業不得查詢提交記錄：{seen:?}"
+        "非作业不得查询提交记录：{seen:?}"
     );
     // `saw` 會取出事件，因此一次取完再逐項斷言。
     let detail = harness
@@ -2356,13 +2356,13 @@ fn activity_detail_for_homework_queries_submission_list() {
         .dispatch(Job::LoadActivityDetail {
             activity_id: "11".to_owned(),
         })
-        .expect("載入詳情");
+        .expect("加载详情");
 
     let seen = site.urls();
     assert!(
         seen.iter()
             .any(|url| url.contains("/students/42/submission_list")),
-        "作業詳情應查詢個人提交記錄：{seen:?}"
+        "作业详情应查询个人提交记录：{seen:?}"
     );
     // `saw` 會取出事件，因此一次取完再逐項斷言。
     let detail = harness
@@ -2441,20 +2441,20 @@ fn homework_carries_activity_description_without_extra_requests() {
     let before = api_calls(&site);
     harness
         .dispatch(Job::LoadHomework { force: false })
-        .expect("第二次载入应当成功");
+        .expect("第二次加载应当成功");
     let updates = homework_updates(&mut harness);
     let last = updates.last().expect("第二次最终更新");
     assert_eq!(
         description_text(&last.items[0].description),
         Some("第一章习题\n交到邮箱"),
-        "快取命中时说明不得遗失"
+        "缓存命中时说明不得遗失"
     );
     assert_eq!(
         attachment_names(&last.items[0].description),
         ["题目.pdf"],
-        "快取命中时附件不得遗失"
+        "缓存命中时附件不得遗失"
     );
-    assert_eq!(api_calls(&site), before, "快取命中不应重新查询 LMS 资料");
+    assert_eq!(api_calls(&site), before, "缓存命中不应重新查询 LMS 资料");
 }
 
 /// 整份说明只有一张图片：不得当成「没有说明」，要保留「含图片」的标记。
@@ -2582,7 +2582,7 @@ fn non_object_activity_data_keeps_the_status_and_reports_the_reason() {
             serde_json::json!({ "id": "11", "type": "homework", "title": "作业A",
                 "end_time": "2099-12-31 23:59:59",
                 "submit_by_group": false, "user_submit_count": 0,
-                "data": "<p>整份是字串</p>" }),
+                "data": "<p>整份是字符串</p>" }),
         )],
         expire_first_submission: false,
         submissions: AtomicUsize::new(0),
@@ -2602,7 +2602,7 @@ fn non_object_activity_data_keeps_the_status_and_reports_the_reason() {
     assert_eq!(
         last.items[0].state,
         HomeworkState::Pending,
-        "提交状态不得因正文栏位型别异常而退回「待核实」"
+        "提交状态不得因正文字段型别异常而退回「待核实」"
     );
     let description = last.items[0]
         .description
@@ -2640,14 +2640,14 @@ fn opening_lesson_activity_uses_server_player_url() {
     assert!(
         seen.iter()
             .any(|url| url.contains("/api/lessons/23/player-url")),
-        "課程內容應查詢播放器接口：{seen:?}"
+        "课程内容应查询播放器接口：{seen:?}"
     );
     assert!(
         harness.saw(|event| matches!(
             event,
             Event::OpenUrl(url) if url == "https://lms.xjtu.edu.cn/lesson/player?token=abc"
         )),
-        "應回報伺服器提供的播放地址"
+        "应回报服务器提供的播放地址"
     );
 }
 
@@ -2678,14 +2678,14 @@ fn opening_homework_activity_opens_course_homework_page() {
     let seen = site.urls();
     assert!(
         !seen.iter().any(|url| url.contains("/player-url")),
-        "作業不得查詢播放器接口：{seen:?}"
+        "作业不得查询播放器接口：{seen:?}"
     );
     assert!(
         harness.saw(|event| matches!(
             event,
             Event::OpenUrl(url) if url == "https://lms.xjtu.edu.cn/course/42/homework"
         )),
-        "作業應開啟所屬課程的作業列表（且不得附帶 hash 片段）"
+        "作业应开启所属课程的作业列表（且不得附带 hash 片段）"
     );
 }
 
@@ -2732,21 +2732,21 @@ fn opening_homework_activity_without_usable_course_falls_back_to_home() {
             ))
             .count(),
         2,
-        "兩種無效識別碼都應告知使用者：{events:?}"
+        "两种无效识别码都应告知用户：{events:?}"
     );
     assert!(
         events.iter().all(|event| !matches!(
             event,
             Event::OpenUrl(url) if url.contains("/course/")
         )),
-        "無效識別碼不得拼出課程網址：{events:?}"
+        "无效识别码不得拼出课程网址：{events:?}"
     );
     assert!(
         events.iter().any(|event| matches!(
             event,
             Event::OpenUrl(url) if url == "https://lms.xjtu.edu.cn"
         )),
-        "應回退到思源學堂首頁"
+        "应回退到思源学堂首页"
     );
 }
 
@@ -2784,7 +2784,7 @@ fn opening_lesson_in_webvpn_mode_rewrites_url() {
             event,
             Event::OpenUrl(url) if url.starts_with("https://webvpn.xjtu.edu.cn/")
         )),
-        "WebVPN 模式下應回報改寫後的網址"
+        "WebVPN 模式下应回报改写后的网址"
     );
 }
 
@@ -2813,14 +2813,14 @@ fn opening_lesson_without_player_url_falls_back_to_home() {
             event,
             Event::Notice(message) if message.contains("无法获取播放地址")
         )),
-        "取不到播放地址时应告知使用者"
+        "取不到播放地址时应告知用户"
     );
     assert!(
         events.iter().any(|event| matches!(
             event,
             Event::OpenUrl(url) if url == "https://lms.xjtu.edu.cn"
         )),
-        "應回退到思源學堂首頁"
+        "应回退到思源学堂首页"
     );
 }
 
@@ -2831,10 +2831,10 @@ fn only_open_activity_is_interactive() {
         course_id: None,
         kind: lms::ActivityKind::Homework,
     };
-    assert!(open.is_interactive(), "開啟活動是互動式資料任務");
+    assert!(open.is_interactive(), "开启活动是互动式数据任务");
     assert!(
         !open.is_control(),
-        "互動式任務維持資料任務語意（去重與統一重新登入重試）"
+        "互动式任务维持数据任务语意（去重与统一重新登录重试）"
     );
 
     for job in [
@@ -2855,14 +2855,14 @@ fn only_open_activity_is_interactive() {
         Job::CancelLogin,
         Job::Shutdown,
     ] {
-        assert!(!job.is_interactive(), "{job:?} 不是互動式任務");
+        assert!(!job.is_interactive(), "{job:?} 不是互动式任务");
     }
 }
 
 #[test]
 fn flush_interactive_runs_the_queued_open_and_keeps_other_jobs() {
     let mut harness = harness(|request: &HttpRequest| -> AppResult<HttpResponse> {
-        panic!("開啟作業網頁不需任何請求：{}", request.url);
+        panic!("开启作业网页不需任何请求：{}", request.url);
     });
     harness.login_lms_only();
     harness.worker.pending_data.push_back(Job::LoadSchedule);
@@ -2874,7 +2874,7 @@ fn flush_interactive_runs_the_queued_open_and_keeps_other_jobs() {
 
     assert!(
         !harness.worker.flush_interactive(),
-        "没有登入流程时不应暂停"
+        "没有登录流程时不应暂停"
     );
     assert!(
         harness.saw(|event| matches!(
@@ -3013,7 +3013,7 @@ fn account_switch_during_interactive_open_does_not_backfill_stale_homework() {
     );
     assert!(
         harness.worker.pending_data.is_empty(),
-        "被取消的载入不得重新排队"
+        "被取消的加载不得重新排队"
     );
 }
 
@@ -3085,14 +3085,14 @@ fn interactive_open_gets_its_own_relogin_budget() {
     // 獨立保存，新的開啟操作應重新取得自己的額度。
     assert!(
         harness.worker.relogin.try_consume(&DataKey::Homework),
-        "前置：額度應可用"
+        "前置：额度应可用"
     );
     assert!(
         harness
             .worker
             .relogin
             .try_consume(&DataKey::OpenActivity("7".to_owned())),
-        "前置：額度應可用"
+        "前置：额度应可用"
     );
     harness.worker.pending_data.push_back(Job::OpenActivity {
         activity_id: "7".to_owned(),
@@ -3111,14 +3111,14 @@ fn interactive_open_gets_its_own_relogin_budget() {
             event,
             Event::OpenUrl(url) if url == "https://lms.xjtu.edu.cn/lesson/player?token=abc"
         )),
-        "開啟操作應獨立取得額度並在重登後重試成功：{events:?}"
+        "开启操作应独立取得额度并在重登后重试成功：{events:?}"
     );
     assert!(
         !events.iter().any(|event| matches!(
             event,
             Event::Failed { message, .. } if message.contains("自动重新登录")
         )),
-        "不得誤報自動重登失敗：{events:?}"
+        "不得误报自动重登失败：{events:?}"
     );
 }
 
@@ -3162,7 +3162,7 @@ fn interactive_open_relogin_stays_bounded() {
     assert!(!harness.worker.flush_interactive());
 
     let events = harness.drain_events();
-    assert_eq!(logins.load(Ordering::SeqCst), 1, "開啟操作至多自動重登一次");
+    assert_eq!(logins.load(Ordering::SeqCst), 1, "开启操作至多自动重登一次");
     assert!(
         events.iter().any(|event| matches!(
             event,
@@ -3172,9 +3172,9 @@ fn interactive_open_relogin_stays_bounded() {
                 ..
             } if message.contains("自动重新登录")
         )),
-        "重登後仍失效應回報自動重登失敗：{events:?}"
+        "重登后仍失效应回报自动重登失败：{events:?}"
     );
-    assert!(harness.worker.retry.is_none(), "放棄後不得保留待重試任務");
+    assert!(harness.worker.retry.is_none(), "放弃后不得保留待重试任务");
 }
 
 /// 反向情境：開啟操作先重登成功後，作業載入的第一次失效仍應取得自己的
@@ -3246,27 +3246,27 @@ fn interactive_open_relogin_does_not_consume_the_homework_budget() {
     assert_eq!(
         logins.load(Ordering::SeqCst),
         2,
-        "開啟與載入應各自取得一次自動重登：{events:?}"
+        "开启与加载应各自取得一次自动重登：{events:?}"
     );
     assert!(
         events.iter().any(|event| matches!(
             event,
             Event::OpenUrl(url) if url == "https://lms.xjtu.edu.cn/lesson/player?token=abc"
         )),
-        "開啟操作應在重登後完成：{events:?}"
+        "开启操作应在重登后完成：{events:?}"
     );
     assert!(
         events
             .iter()
             .any(|event| matches!(event, Event::Homework(update) if update.progress.is_none())),
-        "作業載入應在重登後完成，而不是被誤判為自動重登失敗：{events:?}"
+        "作业加载应在重登后完成，而不是被误判为自动重登失败：{events:?}"
     );
     assert!(
         !events.iter().any(|event| matches!(
             event,
             Event::Failed { message, .. } if message.contains("自动重新登录")
         )),
-        "不得誤報自動重登失敗：{events:?}"
+        "不得误报自动重登失败：{events:?}"
     );
 }
 
@@ -3314,11 +3314,11 @@ fn homework_second_load_reuses_detail_and_summary_caches() {
         .expect("第二次加载");
 
     let second = site.urls();
-    assert_eq!(second.len(), first, "第二次載入應全面命中快取：{second:?}");
+    assert_eq!(second.len(), first, "第二次加载应全面命中缓存：{second:?}");
 
     let updates = homework_updates(&mut harness);
     let last = updates.last().expect("最终更新");
-    assert_eq!(last.requests, 0, "命中快取時不應再送請求");
+    assert_eq!(last.requests, 0, "命中缓存时不应再送请求");
     assert_eq!(last.items.len(), 1);
     assert_eq!(last.items[0].state, HomeworkState::Completed);
 }
@@ -3344,12 +3344,12 @@ fn homework_forced_refresh_refetches_details() {
             .filter(|url| url.ends_with("/api/activities/11"))
             .count(),
         2,
-        "強制刷新應重新取得活動詳情：{seen:?}"
+        "强制刷新应重新取得活动详情：{seen:?}"
     );
 
     let updates = homework_updates(&mut harness);
     let last = updates.last().expect("最终更新");
-    assert!(last.requests >= 3, "強制刷新應重取課程／活動／詳情");
+    assert!(last.requests >= 3, "强制刷新应重取课程／活动／详情");
 }
 
 #[test]
@@ -3368,10 +3368,10 @@ fn homework_reports_requests_and_elapsed() {
 
     let updates = homework_updates(&mut harness);
     let last = updates.last().expect("最终更新");
-    assert_eq!(last.requests, after - before, "統計請求數應與實際相符");
+    assert_eq!(last.requests, after - before, "统计请求数应与实际相符");
     assert!(
         last.elapsed <= Duration::from_secs(60),
-        "耗時統計應為合理值"
+        "耗时统计应为合理值"
     );
 }
 
@@ -3481,7 +3481,7 @@ fn courses_event_carries_current_term_hint() {
     assert_eq!(
         second.current_term,
         TermCode::parse("2026-2027-1"),
-        "应复用使用者记忆的学期"
+        "应复用用户记忆的学期"
     );
 }
 
@@ -3497,8 +3497,8 @@ fn clears_captcha_file_after_successful_login() {
         .finish_login(SiteKind::Attendance, None)
         .expect("完成登录");
 
-    assert!(!path.exists(), "登入成功後應刪除驗證碼檔案");
-    assert!(harness.worker.captcha_path.is_none(), "應清除路徑記錄");
+    assert!(!path.exists(), "登录成功后应删除验证码文件");
+    assert!(harness.worker.captcha_path.is_none(), "应清除路径记录");
 }
 
 #[test]
@@ -3515,8 +3515,8 @@ fn clears_captcha_file_when_credentials_are_rejected() {
         })
         .expect("处理失败回复");
 
-    assert!(!path.exists(), "憑證被拒後應刪除驗證碼檔案");
-    assert!(harness.worker.captcha_path.is_none(), "應清除路徑記錄");
+    assert!(!path.exists(), "凭证被拒后应删除验证码文件");
+    assert!(harness.worker.captcha_path.is_none(), "应清除路径记录");
 }
 
 #[test]
@@ -3531,7 +3531,7 @@ fn clears_captcha_file_when_login_job_fails() {
         .worker
         .handle_control(Job::SubmitCaptcha("1234".into()));
 
-    assert!(!path.exists(), "登入任務失敗後應刪除驗證碼檔案");
+    assert!(!path.exists(), "登录任务失败后应删除验证码文件");
     let events = harness.drain_events();
     assert!(
         events.iter().any(|event| matches!(
@@ -3541,7 +3541,7 @@ fn clears_captcha_file_when_login_job_fails() {
                 ..
             }
         )),
-        "应回报登入失败事件：{events:?}"
+        "应回报登录失败事件：{events:?}"
     );
 }
 
@@ -3604,20 +3604,20 @@ fn rollback_after_a_failed_switch_rebuilds_the_session() {
         harness_built,
     );
     harness.seed_vault("secret123", &Credentials::new("3120000001", "old-password"));
-    assert_eq!(built.load(Ordering::SeqCst), 2, "建立時兩個後端各建一次");
+    assert_eq!(built.load(Ordering::SeqCst), 2, "建立时两个后端各建一次");
 
     let result = harness.dispatch(Job::ChangeAccount {
         passphrase: "secret123".into(),
         credentials: Credentials::new("3120000002", "new-password"),
     });
 
-    assert!(result.is_err(), "收尾失敗的換帳號必須失敗");
+    assert!(result.is_err(), "收尾失败的换账号必须失败");
     assert_eq!(
         built.load(Ordering::SeqCst),
         6,
-        "換帳號重建一次、回復舊帳號又重建一次：新帳號的 cookie 不得沿用"
+        "换账号重建一次、恢复旧账号又重建一次：新账号的 cookie 不得沿用"
     );
-    assert!(harness.worker.flow.is_none(), "進行中的登入流程應一併作廢");
+    assert!(harness.worker.flow.is_none(), "进行中的登录流程应一并作废");
     assert_eq!(
         harness
             .worker
@@ -3625,12 +3625,12 @@ fn rollback_after_a_failed_switch_rebuilds_the_session() {
             .as_ref()
             .map(|credentials| credentials.username.clone()),
         Some("3120000001".to_owned()),
-        "記憶體中的憑證應還原為舊帳號"
+        "内存中的凭证应还原为旧账号"
     );
     let stored = harness.vault.load("secret123").expect("读取凭据");
     assert_eq!(
         stored.username, "3120000001",
-        "保險庫不得被未驗證的憑證覆蓋"
+        "保险库不得被未验证的凭证覆盖"
     );
 }
 
@@ -3651,7 +3651,7 @@ fn retry_with_account_targets_the_site_that_failed() {
             lms::LOGIN_URL => Ok(HttpResponse::new(200, LMS_POST, login_page())),
             LMS_POST => Ok(HttpResponse::new(200, LMS_HOME, TARGET_BODY)),
             LMS_HOME => Ok(HttpResponse::new(200, LMS_HOME, TARGET_BODY)),
-            other => panic!("思源学堂重試不應连到其他站点：{other}"),
+            other => panic!("思源学堂重试不应连到其他站点：{other}"),
         }
     });
 
@@ -3661,24 +3661,24 @@ fn retry_with_account_targets_the_site_that_failed() {
             credentials: Credentials::new("3120000002", "new-password"),
             passphrase: "secret123".into(),
         })
-        .expect("思源学堂的重新登入应当成功");
+        .expect("思源学堂的重新登录应当成功");
 
     let urls = seen.lock().expect("lock").clone();
     assert!(
         urls.iter().any(|url| url == LMS_POST),
-        "登入必須送到思源学堂：{urls:?}"
+        "登录必须送到思源学堂：{urls:?}"
     );
     assert!(
         !urls.iter().any(|url| url.contains("bk-kq.xjtu.edu.cn")),
-        "不得因為重試而改走考勤系统：{urls:?}"
+        "不得因为重试而改走考勤系统：{urls:?}"
     );
     assert_eq!(
         harness.worker.login_site,
         Some(SiteKind::Lms),
-        "重試站點應記為思源学堂"
+        "重试站点应记为思源学堂"
     );
     let stored = harness.vault.load("secret123").expect("读取凭据");
-    assert_eq!(stored.username, "3120000002", "驗證成功後應寫回新憑證");
+    assert_eq!(stored.username, "3120000002", "验证成功后应写回新凭证");
 }
 
 /// 上一次切換尚未結束（例如驗證碼填錯後又改輸另一組帳密）時，失敗的還原目標
@@ -3707,15 +3707,15 @@ fn rollback_uses_the_vault_credentials_not_an_unverified_pending_account() {
             credentials: Credentials::new("3120000003", "third-password"),
             passphrase: "secret123".into(),
         })
-        .expect_err("離線時重新登入必定失敗");
+        .expect_err("离线时重新登录必定失败");
 
     assert!(
         err.to_string().contains("连接失败"),
-        "應回報連線失敗：{err}"
+        "应回报连接失败：{err}"
     );
     assert!(
         harness.worker.pending_vault.is_none(),
-        "失敗後應丟棄整條待存憑證鏈"
+        "失败后应丢弃整条待存凭证链"
     );
     assert_eq!(
         harness
@@ -3724,10 +3724,10 @@ fn rollback_uses_the_vault_credentials_not_an_unverified_pending_account() {
             .as_ref()
             .map(|credentials| credentials.username.clone()),
         Some("3120000001".to_owned()),
-        "應還原為保險庫中的 A，而不是上一次未驗證的 B"
+        "应还原为保险库中的 A，而不是上一次未验证的 B"
     );
     let stored = harness.vault.load("secret123").expect("读取凭据");
-    assert_eq!(stored.username, "3120000001", "保險庫內容不得被更動");
+    assert_eq!(stored.username, "3120000001", "保险库内容不得被更动");
 }
 
 /// 設定表單重複輸入**同一帳號**的錯誤密碼時，失敗計數必須累積。
@@ -3771,13 +3771,13 @@ fn change_account_keeps_failure_count_for_the_same_account() {
     };
 
     for _ in 0..3 {
-        attempt(&mut harness).expect("帳密被拒屬於預期結果");
+        attempt(&mut harness).expect("账密被拒属于预期结果");
     }
 
     assert_eq!(
         seen.lock().expect("lock").as_slice(),
         ["0", "1", "2"],
-        "同帳號重複失敗必須累積（修復前每次都被清零）"
+        "同账号重复失败必须累积（修复前每次都被清零）"
     );
     assert_eq!(
         harness
@@ -3787,15 +3787,15 @@ fn change_account_keeps_failure_count_for_the_same_account() {
             .copied()
             .collect::<Vec<_>>(),
         vec![3],
-        "失敗計數必須保留"
+        "失败计数必须保留"
     );
 
     // 第四次：已達門檻，不再提交帳密，改為要求圖片驗證碼。
-    assert!(attempt(&mut harness).is_err(), "達到門檻後不應再提交帳密");
+    assert!(attempt(&mut harness).is_err(), "达到门槛后不应再提交账密");
     assert_eq!(
         seen.lock().expect("lock").len(),
         3,
-        "第四次嘗試不得再送出帳密"
+        "第四次尝试不得再送出账密"
     );
 }
 
@@ -3870,23 +3870,23 @@ fn failed_switch_after_mfa_rolls_back_the_new_account() {
             passphrase: "secret123".into(),
             credentials: Credentials::new("3120000002", "new-password"),
         })
-        .expect("換帳號應停在簡訊驗證");
+        .expect("换账号应停在短信验证");
     assert!(
         harness.saw(|event| matches!(event, Event::LoginNeedsMfa { .. })),
-        "換帳號應進入簡訊驗證"
+        "换账号应进入短信验证"
     );
     harness
         .dispatch(Job::SendMfaCode)
-        .expect("發送驗證碼应当成功");
+        .expect("发送验证码应当成功");
 
     let result = harness.dispatch(Job::VerifyMfaCode(Secret::from("123456")));
-    assert!(result.is_err(), "收尾失敗必須回報錯誤");
+    assert!(result.is_err(), "收尾失败必须回报错误");
 
     assert!(
         harness.worker.pending_vault.is_none(),
-        "互動驗證之後才失敗的切換同樣必須丟棄待存憑證"
+        "互动验证之后才失败的切换同样必须丢弃待存凭证"
     );
-    assert!(harness.worker.flow.is_none(), "失敗的登入流程應一併作廢");
+    assert!(harness.worker.flow.is_none(), "失败的登录流程应一并作废");
     assert_eq!(
         harness
             .worker
@@ -3894,7 +3894,7 @@ fn failed_switch_after_mfa_rolls_back_the_new_account() {
             .as_ref()
             .map(|credentials| credentials.username.clone()),
         Some("3120000001".to_owned()),
-        "記憶體中的憑證應還原為舊帳號"
+        "内存中的凭证应还原为旧账号"
     );
 
     // 之後思源學堂登入成功：不得把失敗切換的憑證寫進保險庫。
@@ -3902,9 +3902,9 @@ fn failed_switch_after_mfa_rolls_back_the_new_account() {
         .dispatch(Job::RetryLogin {
             site: SiteKind::Lms,
         })
-        .expect("思源学堂登入应当成功");
+        .expect("思源学堂登录应当成功");
     let stored = harness.vault.load("secret123").expect("读取凭据");
-    assert_eq!(stored.username, "3120000001", "保險庫不得寫入 B 的憑證");
+    assert_eq!(stored.username, "3120000001", "保险库不得写入 B 的凭证");
     assert_eq!(stored.password, "old-password");
 }
 
@@ -3973,22 +3973,22 @@ fn wrong_mfa_code_keeps_the_pending_switch() {
             passphrase: "secret123".into(),
             credentials: Credentials::new("3120000002", "new-password"),
         })
-        .expect("換帳號應停在簡訊驗證");
+        .expect("换账号应停在短信验证");
     harness
         .dispatch(Job::SendMfaCode)
-        .expect("發送驗證碼应当成功");
+        .expect("发送验证码应当成功");
 
     let err = harness
         .dispatch(Job::VerifyMfaCode(Secret::from("000000")))
-        .expect_err("驗證碼錯誤應回報錯誤");
+        .expect_err("验证码错误应回报错误");
     assert!(err.to_string().contains("短信验证码不正确"), "{err}");
     assert!(
         harness.worker.pending_vault.is_some(),
-        "驗證碼填錯時應保留待存憑證，讓使用者重輸後繼續同一次切換"
+        "验证码填错时应保留待存凭证，让用户重输后继续同一次切换"
     );
     assert!(
         harness.worker.flow.is_some(),
-        "登入流程應保留以便重輸驗證碼"
+        "登录流程应保留以便重输验证码"
     );
     assert_eq!(
         harness
@@ -3997,7 +3997,7 @@ fn wrong_mfa_code_keeps_the_pending_switch() {
             .as_ref()
             .map(|credentials| credentials.username.clone()),
         Some("3120000002".to_owned()),
-        "重輸驗證碼仍應以新帳號進行"
+        "重输验证码仍应以新账号进行"
     );
     // 介面必須收到「可重輸」的訊號（而不是一般失敗畫面），否則輸入框會被蓋掉。
     let events = harness.drain_events();
@@ -4007,25 +4007,25 @@ fn wrong_mfa_code_keeps_the_pending_switch() {
             Event::VerificationRetry { site: SiteKind::Attendance, message }
                 if message.contains("短信验证码不正确")
         )),
-        "應回報可重試的驗證錯誤：{events:?}"
+        "应回报可重试的验证错误：{events:?}"
     );
     assert!(
         !events
             .iter()
             .any(|event| matches!(event, Event::Failed { .. })),
-        "驗證碼填錯不應彈出一般失敗：{events:?}"
+        "验证码填错不应弹出一般失败：{events:?}"
     );
 
     // 重輸正確的驗證碼即可續用同一次切換（同一個驅動器、同一個 gid）。
     let resumed = harness.dispatch(Job::VerifyMfaCode(Secret::from("123456")));
-    assert!(resumed.is_ok(), "正確的驗證碼應能繼續登入：{resumed:?}");
+    assert!(resumed.is_ok(), "正确的验证码应能继续登录：{resumed:?}");
 }
 
 /// 圖片驗證碼填錯同樣是可重試的：不得作廢整次帳號切換。
 #[test]
 fn captcha_mistake_keeps_the_pending_switch() {
     // 直接以 `handle_reply` 驗證善後規則：不經網路，也不會寫入驗證碼圖片。
-    let mut harness = harness(|_request: &HttpRequest| panic!("本測試不應發出請求"));
+    let mut harness = harness(|_request: &HttpRequest| panic!("本测试不应发出请求"));
 
     let client: Arc<dyn HttpClient> =
         Arc::new(FakeClient::with_responder(|request: &HttpRequest| {
@@ -4043,7 +4043,7 @@ fn captcha_mistake_keeps_the_pending_switch() {
             Ok(HttpResponse::new(401, ATTENDANCE_POST, "<html></html>"))
         }));
     let mut driver =
-        LoginDriver::new(client, attendance::LOGIN_URL, &"0".repeat(32)).expect("建立登入驅動器");
+        LoginDriver::new(client, attendance::LOGIN_URL, &"0".repeat(32)).expect("建立登录驱动器");
     // 已達門檻：直接進入驗證碼流程（不需先失敗三次）。
     driver.set_fail_count(3);
     assert_eq!(
@@ -4052,14 +4052,14 @@ fn captcha_mistake_keeps_the_pending_switch() {
                 &Credentials::new("3120000002", "new-password"),
                 AccountType::Undergraduate
             )
-            .expect("啟動登入"),
+            .expect("启动登录"),
         LoginReply::NeedCaptcha
     );
-    let reply = driver.submit_captcha("bad-code").expect("提交驗證碼");
+    let reply = driver.submit_captcha("bad-code").expect("提交验证码");
     assert!(matches!(reply, LoginReply::Fail { .. }), "{reply:?}");
     assert!(
         driver.last_attempt_submitted_captcha(),
-        "測試前提：這次提交帶了驗證碼"
+        "测试前提：这次提交带了验证码"
     );
 
     // 模擬「換帳號進行中」的狀態。
@@ -4078,15 +4078,15 @@ fn captcha_mistake_keeps_the_pending_switch() {
     harness
         .worker
         .handle_reply(reply)
-        .expect("處理登入回覆不應出錯");
+        .expect("处理登录回复不应出错");
 
     assert!(
         harness.worker.pending_vault.is_some(),
-        "驗證碼填錯時應保留待存憑證，讓使用者重輸後繼續同一次切換"
+        "验证码填错时应保留待存凭证，让用户重输后继续同一次切换"
     );
     assert!(
         harness.worker.flow.is_some(),
-        "登入流程應保留以便重輸驗證碼"
+        "登录流程应保留以便重输验证码"
     );
     let events = harness.drain_events();
     assert!(
@@ -4095,13 +4095,13 @@ fn captcha_mistake_keeps_the_pending_switch() {
             Event::VerificationRetry { site: SiteKind::Attendance, message }
                 if !message.is_empty()
         )),
-        "驗證碼填錯應回報可重試事件（讓介面留在輸入畫面）：{events:?}"
+        "验证码填错应回报可重试事件（让界面留在输入画面）：{events:?}"
     );
     assert!(
         !events
             .iter()
             .any(|event| matches!(event, Event::LoginFailed { .. } | Event::Failed { .. })),
-        "驗證碼填錯不應彈出一般失敗畫面：{events:?}"
+        "验证码填错不应弹出一般失败画面：{events:?}"
     );
 }
 
@@ -4109,7 +4109,7 @@ fn captcha_mistake_keeps_the_pending_switch() {
 #[test]
 fn wrong_captcha_keeps_the_captcha_input_screen() {
     // 白箱：以假驅動器把流程帶到「已送出錯誤驗證碼」，不必寫入真實的驗證碼圖片。
-    let mut harness = harness(|_request: &HttpRequest| panic!("本測試不應發出請求"));
+    let mut harness = harness(|_request: &HttpRequest| panic!("本测试不应发出请求"));
 
     let client: Arc<dyn HttpClient> =
         Arc::new(FakeClient::with_responder(|request: &HttpRequest| {
@@ -4127,7 +4127,7 @@ fn wrong_captcha_keeps_the_captcha_input_screen() {
             Ok(HttpResponse::new(401, ATTENDANCE_POST, "<html></html>"))
         }));
     let mut driver =
-        LoginDriver::new(client, attendance::LOGIN_URL, &"0".repeat(32)).expect("建立登入驅動器");
+        LoginDriver::new(client, attendance::LOGIN_URL, &"0".repeat(32)).expect("建立登录驱动器");
     driver.set_fail_count(3);
     assert_eq!(
         driver
@@ -4135,10 +4135,10 @@ fn wrong_captcha_keeps_the_captcha_input_screen() {
                 &Credentials::new("3120000002", "new-password"),
                 AccountType::Undergraduate
             )
-            .expect("啟動登入"),
+            .expect("启动登录"),
         LoginReply::NeedCaptcha
     );
-    let reply = driver.submit_captcha("bad-code").expect("提交驗證碼");
+    let reply = driver.submit_captcha("bad-code").expect("提交验证码");
     assert!(matches!(reply, LoginReply::Fail { .. }), "{reply:?}");
 
     // 目前的驗證碼圖片（換新圖失敗時必須保留給使用者重輸）。
@@ -4169,19 +4169,19 @@ fn wrong_captcha_keeps_the_captcha_input_screen() {
     harness
         .worker
         .handle_reply(reply)
-        .expect("處理登入回覆不應出錯");
+        .expect("处理登录回复不应出错");
     let events = harness.drain_events();
     assert!(
         events
             .iter()
             .any(|event| matches!(event, Event::VerificationRetry { .. })),
-        "應回報可重試的驗證錯誤：{events:?}"
+        "应回报可重试的验证错误：{events:?}"
     );
     assert!(
         !events
             .iter()
             .any(|event| matches!(event, Event::LoginFailed { .. })),
-        "不得發出一般登入失敗（會把輸入畫面換掉）：{events:?}"
+        "不得发出一般登录失败（会把输入画面换掉）：{events:?}"
     );
 
     // 依序套用工作者發出的事件：畫面必須仍是驗證碼輸入框。
@@ -4190,22 +4190,19 @@ fn wrong_captcha_keeps_the_captcha_input_screen() {
     }
     match app.login.as_deref() {
         Some(LoginScreen::Captcha { input, error, path }) => {
-            assert!(input.is_empty(), "重輸前應清空驗證碼：{:?}", input.value());
+            assert!(input.is_empty(), "重输前应清空验证码：{:?}", input.value());
             assert!(
                 error.as_deref().is_some_and(|text| !text.is_empty()),
-                "輸入畫面應就地顯示錯誤：{error:?}"
+                "输入画面应就地显示错误：{error:?}"
             );
-            assert_eq!(path, &image, "換不到新圖時應沿用舊圖");
+            assert_eq!(path, &image, "换不到新图时应沿用旧图");
         }
-        other => panic!("應留在驗證碼輸入畫面，實際為 {other:?}"),
+        other => panic!("应留在验证码输入画面，实际为 {other:?}"),
     }
-    assert!(
-        image.exists(),
-        "換新圖失敗時不得刪掉使用者正在看的驗證碼圖片"
-    );
+    assert!(image.exists(), "换新图失败时不得删掉用户正在看的验证码图片");
     assert!(
         harness.worker.flow.is_some() && harness.worker.pending_vault.is_some(),
-        "同一次帳號切換必須保留，讓重輸的驗證碼沿用同一個登入流程"
+        "同一次账号切换必须保留，让重输的验证码沿用同一个登录流程"
     );
 }
 
@@ -4230,7 +4227,7 @@ fn rollback_without_a_clean_session_disables_the_session() {
                 "<html>维护</html>",
             )),
             // 會話若沒被停用，後續任何請求都會走到這裡（測試即失敗）。
-            other => panic!("會話停用後不得再發出請求：{other}"),
+            other => panic!("会话停用后不得再发出请求：{other}"),
         },
         Arc::clone(&calls),
         4,
@@ -4241,15 +4238,15 @@ fn rollback_without_a_clean_session_disables_the_session() {
         passphrase: "secret123".into(),
         credentials: Credentials::new("3120000002", "new-password"),
     });
-    assert!(result.is_err(), "收尾失敗的換帳號必須失敗");
+    assert!(result.is_err(), "收尾失败的换账号必须失败");
 
     assert!(
         harness.worker.session.is_none(),
-        "無法建立乾淨的會話時必須停用會話（不得繼續帶新帳號的 cookie）"
+        "无法建立干净的会话时必须停用会话（不得继续带新账号的 cookie）"
     );
     assert!(
         harness.saw(|event| matches!(event, Event::SessionDisabled(_))),
-        "應回報會話已停用，讓介面回到解鎖畫面"
+        "应回报会话已停用，让界面回到解锁画面"
     );
     assert_eq!(
         harness
@@ -4258,13 +4255,13 @@ fn rollback_without_a_clean_session_disables_the_session() {
             .as_ref()
             .map(|credentials| credentials.username.clone()),
         Some("3120000001".to_owned()),
-        "憑證仍應還原為舊帳號"
+        "凭证仍应还原为旧账号"
     );
 
     // 後續資料任務不得發出任何請求（responder 會 panic）。
     harness
         .dispatch(Job::LoadCourses { force: false })
-        .expect("資料任務失敗不應冒泡為任務錯誤");
+        .expect("数据任务失败不应冒泡为任务错误");
     assert!(
         harness.saw(|event| matches!(
             event,
@@ -4273,7 +4270,7 @@ fn rollback_without_a_clean_session_disables_the_session() {
                 ..
             }
         )),
-        "資料任務應回報失敗（會話尚未建立）"
+        "数据任务应回报失败（会话尚未建立）"
     );
 }
 
@@ -4308,7 +4305,7 @@ fn offline_account_switch_discards_pending_credentials() {
     assert!(result.is_err(), "离线的换账号操作应当失败");
     assert!(
         harness.worker.pending_vault.is_none(),
-        "失敗後不得留下待存憑證，否則之後任何一次登入成功都會把它寫回"
+        "失败后不得留下待存凭证，否则之后任何一次登录成功都会把它写回"
     );
     assert_eq!(
         harness
@@ -4317,7 +4314,7 @@ fn offline_account_switch_discards_pending_credentials() {
             .as_ref()
             .map(|credentials| credentials.username.clone()),
         Some("3120000001".to_owned()),
-        "記憶體中的憑證應還原為舊帳號"
+        "内存中的凭证应还原为旧账号"
     );
     let stored = harness.vault.load("secret123").expect("读取凭据");
     assert_eq!(
@@ -4425,13 +4422,13 @@ fn account_switch_is_refused_when_login_skips_credentials() {
             passphrase: "secret123".into(),
             credentials: Credentials::new("3120000002", "new-password"),
         })
-        .expect_err("未提交帳密的「登入」不得視為驗證成功");
+        .expect_err("未提交账密的「登录」不得视为验证成功");
 
     assert!(
         err.to_string().contains("无法验证新账号"),
-        "訊息應說明無法驗證新帳號：{err}"
+        "信息应说明无法验证新账号：{err}"
     );
-    assert!(harness.worker.pending_vault.is_none(), "應丟棄待存憑證");
+    assert!(harness.worker.pending_vault.is_none(), "应丢弃待存凭证");
     assert_eq!(
         harness
             .worker
@@ -4439,10 +4436,10 @@ fn account_switch_is_refused_when_login_skips_credentials() {
             .as_ref()
             .map(|credentials| credentials.username.clone()),
         Some("3120000001".to_owned()),
-        "記憶體中的憑證應還原"
+        "内存中的凭证应还原"
     );
     let stored = harness.vault.load("secret123").expect("读取凭据");
-    assert_eq!(stored.username, "3120000001", "未驗證的憑證不得寫回");
+    assert_eq!(stored.username, "3120000001", "未验证的凭证不得写回");
     assert_eq!(stored.password, "old-password");
 }
 
@@ -4479,7 +4476,7 @@ fn homework_load_attributes_attendance_term_failure_to_attendance() {
 
     harness
         .dispatch(Job::LoadHomework { force: false })
-        .expect("資料任務失敗不應冒泡為任務錯誤");
+        .expect("数据任务失败不应冒泡为任务错误");
 
     assert!(
         harness.saw(|event| matches!(
@@ -4488,7 +4485,7 @@ fn homework_load_attributes_attendance_term_failure_to_attendance() {
                 site: SiteKind::Attendance
             }
         )),
-        "考勤學期查詢失敗必須歸給考勤系統，重登才會打到對的站點"
+        "考勤学期查询失败必须归给考勤系统，重登才会打到对的站点"
     );
 }
 
@@ -4509,7 +4506,7 @@ fn login_failure_reports_the_site_that_failed() {
 
     harness
         .dispatch(Job::LoadCourses { force: false })
-        .expect("資料任務失敗不應冒泡為任務錯誤");
+        .expect("数据任务失败不应冒泡为任务错误");
 
     let events = harness.drain_events();
     assert!(
@@ -4520,12 +4517,12 @@ fn login_failure_reports_the_site_that_failed() {
                 ..
             }
         )),
-        "登入失敗事件必須指出思源學堂：{events:?}"
+        "登录失败事件必须指出思源学堂：{events:?}"
     );
     assert_eq!(
         harness.worker.login_site,
         Some(SiteKind::Lms),
-        "重試站點應記為思源學堂"
+        "重试站点应记为思源学堂"
     );
 }
 
@@ -4564,13 +4561,13 @@ fn login_failure_count_survives_driver_rebuilds() {
             .dispatch(Job::RetryLogin {
                 site: SiteKind::Attendance,
             })
-            .expect("帳密被拒屬於預期結果");
+            .expect("账密被拒属于预期结果");
     }
 
     assert_eq!(
         seen.lock().expect("lock").as_slice(),
         ["0", "1", "2"],
-        "每次提交的 failN 應累積（修復前恆為 0）"
+        "每次提交的 failN 应累积（修复前恒为 0）"
     );
     assert_eq!(
         harness
@@ -4580,7 +4577,7 @@ fn login_failure_count_survives_driver_rebuilds() {
             .copied()
             .collect::<Vec<_>>(),
         vec![3],
-        "失敗次數必須跨驅動器保存"
+        "失败次数必须跨驱动器保存"
     );
 
     // 第四次：已達門檻，不再提交帳密，改為要求圖片驗證碼（圖片端點在此失敗）。
@@ -4590,18 +4587,18 @@ fn login_failure_count_survives_driver_rebuilds() {
                 site: SiteKind::Attendance,
             })
             .is_err(),
-        "達到門檻後不應再提交帳密"
+        "达到门槛后不应再提交账密"
     );
     assert_eq!(
         seen.lock().expect("lock").len(),
         3,
-        "第四次嘗試不得再送出帳密"
+        "第四次尝试不得再送出账密"
     );
 
     // 取消登入彈窗不得清除計數：伺服器端的門檻是跨嘗試累計的。
     harness
         .dispatch(Job::CancelLogin)
-        .expect("取消登入不應失敗");
+        .expect("取消登录不应失败");
     assert_eq!(
         harness
             .worker
@@ -4630,7 +4627,7 @@ fn cancel_login_settles_a_page_when_the_flow_already_ended() {
         .dispatch(Job::CancelLogin)
         .expect("取消登录应当成功");
 
-    assert!(harness.worker.retry.is_none(), "應丟棄待重試任務");
+    assert!(harness.worker.retry.is_none(), "应丢弃待重试任务");
     let events = harness.drain_events();
     assert!(
         events.iter().any(|event| matches!(
@@ -4639,17 +4636,17 @@ fn cancel_login_settles_a_page_when_the_flow_already_ended() {
                 target: FailedTarget::Schedule
             }
         )),
-        "必須收斂等待重試的頁面，否則它會永遠停在「載入中」"
+        "必须收敛等待重试的页面，否则它会永远停在「加载中」"
     );
     assert!(
         events
             .iter()
             .any(|event| matches!(event, Event::LoginCancelled)),
-        "即使已經沒有進行中的登入，也必須回報取消完成，介面才能清除等待狀態"
+        "即使已经没有进行中的登录，也必须回报取消完成，界面才能清除等待状态"
     );
     assert!(
         !events.iter().any(|event| matches!(event, Event::Notice(_))),
-        "沒有進行中的登入時不應覆蓋介面既有的提示"
+        "没有进行中的登录时不应覆盖界面既有的提示"
     );
 }
 
@@ -4685,7 +4682,7 @@ fn chosen_term_overrides_the_attendance_term_within_the_session() {
     assert_eq!(
         harness.worker.chosen_term,
         TermCode::parse("2025-2026-2"),
-        "本次選擇應記入工作階段"
+        "本次选择应记入工作阶段"
     );
     let queued = harness
         .worker
@@ -4700,20 +4697,20 @@ fn chosen_term_overrides_the_attendance_term_within_the_session() {
     assert_eq!(
         last.term_source,
         Some(TermSource::Chosen),
-        "來源應為本次选择，而不是考勤"
+        "来源应为本次选择，而不是考勤"
     );
     assert!(
         !site
             .urls()
             .iter()
             .any(|url| url.contains("/courses/1/activities")),
-        "未選中的學期課程不應被查詢"
+        "未选中的学期课程不应被查询"
     );
     assert!(
         site.urls()
             .iter()
             .any(|url| url.contains("/courses/9/activities")),
-        "應查詢所選學期的課程"
+        "应查询所选学期的课程"
     );
 }
 
@@ -4754,7 +4751,7 @@ fn homework_continues_with_the_remembered_term_when_attendance_times_out() {
 
     harness
         .dispatch(Job::LoadHomework { force: false })
-        .expect("考勤逾时不应让作业加载失败");
+        .expect("考勤超时不应让作业加载失败");
 
     // `saw` 會取出事件，因此一次收齊後再斷言。
     let events = harness.drain_events();
@@ -4763,13 +4760,13 @@ fn homework_continues_with_the_remembered_term_when_attendance_times_out() {
             event,
             Event::Notice(text) if text.contains("考勤系统暂时不可用")
         )),
-        "應提示考勤故障與學期來源"
+        "应提示考勤故障与学期来源"
     );
     assert!(
         !events
             .iter()
             .any(|event| matches!(event, Event::Failed { .. })),
-        "不得回報為失敗"
+        "不得回报为失败"
     );
     let updates: Vec<HomeworkUpdate> = events
         .into_iter()
@@ -4780,8 +4777,8 @@ fn homework_continues_with_the_remembered_term_when_attendance_times_out() {
         .collect();
     let last = updates.last().expect("最终更新");
     assert_eq!(last.term_label.as_deref(), Some("2025-2026 学年 第 2 学期"));
-    assert_eq!(last.courses_included, 1, "所選學期的課程仍應納入");
-    assert_eq!(last.items.len(), 1, "作業仍應載入");
+    assert_eq!(last.courses_included, 1, "所选学期的课程仍应纳入");
+    assert_eq!(last.items.len(), 1, "作业仍应加载");
 }
 
 /// 考勤逾時且完全沒有可用學期時，退回學期選擇器而不是整批失敗。
@@ -4813,13 +4810,13 @@ fn homework_asks_for_a_term_when_attendance_times_out_without_a_fallback() {
         events
             .iter()
             .any(|event| matches!(event, Event::HomeworkNeedsTerm { .. })),
-        "沒有可用學期時應顯示選擇器"
+        "没有可用学期时应显示选择器"
     );
     assert!(
         !events
             .iter()
             .any(|event| matches!(event, Event::Failed { .. })),
-        "不得回報為失敗"
+        "不得回报为失败"
     );
 }
 
@@ -4847,14 +4844,14 @@ fn chosen_term_loads_homework_without_consulting_attendance() {
 
     harness
         .dispatch(Job::LoadHomework { force: false })
-        .expect("明確選擇的學期不應受考勤影響");
+        .expect("明确选择的学期不应受考勤影响");
 
     let updates = homework_updates(&mut harness);
     let last = updates.last().expect("最终更新");
     assert_eq!(
         last.term_source,
         Some(TermSource::Chosen),
-        "來源應為本次选择"
+        "来源应为本次选择"
     );
     assert_eq!(last.term_label.as_deref(), Some("2025-2026 学年 第 2 学期"));
     assert_eq!(last.courses_included, 1);
@@ -4878,7 +4875,7 @@ fn set_homework_term_notifies_the_course_partition_hint() {
             event,
             Event::CoursesTerm(Some(term)) if *term == expected
         )),
-        "應通知介面更新課程分區的學期提示"
+        "应通知界面更新课程分区的学期提示"
     );
 }
 
@@ -4904,32 +4901,32 @@ fn credential_save_failure_reports_and_keeps_the_old_vault() {
     // 還原權限，讓暫存目錄能被清理。
     fs::set_permissions(&dir, original).expect("还原目录权限");
 
-    assert!(result.is_ok(), "只有保存失敗，任務本身不應失敗");
+    assert!(result.is_ok(), "只有保存失败，任务本身不应失败");
     let events = harness.drain_events();
     assert!(
         events.iter().any(|event| matches!(
             event,
             Event::CredentialSaveFailed(message) if message.contains("凭据保存失败")
         )),
-        "應發出憑證保存失敗事件：{events:?}"
+        "应发出凭证保存失败事件：{events:?}"
     );
     assert!(
         !events
             .iter()
             .any(|event| matches!(event, Event::AccountUpdated)),
-        "保存失敗不得回報帳號已更新：{events:?}"
+        "保存失败不得回报账号已更新：{events:?}"
     );
     // 順序：登入成功（主要結果）在前、保存失敗（附帶副作用）在後；否則介面
     // 的「登录成功」會蓋掉保存失敗的提醒。
     let login_at = events
         .iter()
         .position(|event| matches!(event, Event::LoginSucceeded { .. }))
-        .expect("應先回報登入成功");
+        .expect("应先回报登录成功");
     let save_at = events
         .iter()
         .position(|event| matches!(event, Event::CredentialSaveFailed(_)))
-        .expect("應回報保存失敗");
-    assert!(login_at < save_at, "保存失敗必須是最後通知：{events:?}");
+        .expect("应回报保存失败");
+    assert!(login_at < save_at, "保存失败必须是最后通知：{events:?}");
     // 保險庫仍是舊憑證（寫入失敗未覆蓋）。
     let stored = harness.vault.load("secret123").expect("读取凭据");
     assert_eq!(stored.username, "3120000001");
@@ -4944,14 +4941,14 @@ fn relogin_budget_is_kept_per_task() {
     let open = DataKey::OpenActivity("7".to_owned());
     let homework = DataKey::Homework;
 
-    assert!(budget.try_consume(&open), "首次應可消耗額度");
-    assert!(!budget.try_consume(&open), "同一任務的額度用盡後不得再消耗");
+    assert!(budget.try_consume(&open), "首次应可消耗额度");
+    assert!(!budget.try_consume(&open), "同一任务的额度用尽后不得再消耗");
     assert!(
         budget.try_consume(&homework),
-        "其他任務的額度互不影響（不得被對方的消耗拖累）"
+        "其他任务的额度互不影响（不得被对方的消耗拖累）"
     );
     budget.reset(&open);
-    assert!(budget.try_consume(&open), "重置後應重新取得額度");
+    assert!(budget.try_consume(&open), "重置后应重新取得额度");
     budget.clear();
-    assert!(budget.try_consume(&homework), "清空後所有任務重新取得額度");
+    assert!(budget.try_consume(&homework), "清空后所有任务重新取得额度");
 }

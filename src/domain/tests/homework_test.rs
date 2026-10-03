@@ -68,7 +68,7 @@ fn judges_overdue_by_instant_across_time_offsets() {
     assert_eq!(
         judge(Some(0), Some("2026-09-28T04:00:00Z"), now()),
         HomeworkState::Pending,
-        "與 now 同一瞬間（12:00+08:00）不算逾期"
+        "与 now 同一瞬间（12:00+08:00）不算逾期"
     );
 }
 

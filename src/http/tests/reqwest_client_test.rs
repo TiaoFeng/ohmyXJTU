@@ -123,11 +123,11 @@ fn follows_redirect_with_obsolete_multiline_headers() {
 
     let response = insecure_client()
         .send(HttpRequest::get(format!("{base}/portal")))
-        .expect("多行標頭的 302 應可解析並跟隨");
+        .expect("多行标头的 302 应可解析并跟随");
 
     assert_eq!(response.status, 200);
     assert!(response.final_url.ends_with("/ok"));
-    assert_eq!(hits.load(Ordering::SeqCst), 2, "應跟隨一次重定向");
+    assert_eq!(hits.load(Ordering::SeqCst), 2, "应跟随一次重定向");
 }
 
 /// `no_redirect` 分支：不跟隨，但仍能讀到 302、Location 與多行 CSP。
@@ -139,7 +139,7 @@ fn reads_multiline_headers_without_following_redirect() {
 
     let response = client()
         .send(HttpRequest::get(format!("{base}/portal")).no_redirect())
-        .expect("多行標頭的 302 應可解析");
+        .expect("多行标头的 302 应可解析");
 
     assert_eq!(response.status, 302);
     assert_eq!(
@@ -148,9 +148,9 @@ fn reads_multiline_headers_without_following_redirect() {
     );
     let csp = response
         .header("Content-Security-Policy")
-        .expect("應保留 CSP 標頭");
-    assert!(csp.contains("default-src"), "CSP 內容：{csp}");
-    assert!(csp.contains("img-src"), "CSP 內容：{csp}");
+        .expect("应保留 CSP 标头");
+    assert!(csp.contains("default-src"), "CSP 内容：{csp}");
+    assert!(csp.contains("img-src"), "CSP 内容：{csp}");
 }
 
 /// 一般（無多行標頭）的回應不受影響。
@@ -160,7 +160,7 @@ fn normal_responses_are_unaffected() {
 
     let response = client()
         .send(HttpRequest::get(format!("{base}/api")))
-        .expect("一般回應應可解析");
+        .expect("一般响应应可解析");
 
     assert_eq!(response.status, 200);
     let value: serde_json::Value = response.json().expect("解析 JSON");
@@ -178,17 +178,17 @@ fn classifies_malformed_header_response() {
 
     let err = client()
         .send(HttpRequest::get(format!("{base}/api")))
-        .expect_err("無效標頭應回報錯誤");
+        .expect_err("无效标头应回报错误");
 
     match &err {
         AppError::Network { kind, detail } => {
-            assert_eq!(*kind, NetworkKind::HttpParse, "錯誤鏈：{detail}");
-            assert!(!detail.contains("://"), "摘要不應含網址：{detail}");
+            assert_eq!(*kind, NetworkKind::HttpParse, "错误链：{detail}");
+            assert!(!detail.contains("://"), "摘要不应含网址：{detail}");
         }
-        other => panic!("應為網路錯誤，實際：{other:?}"),
+        other => panic!("应为网络错误，实际：{other:?}"),
     }
-    assert!(err.to_string().contains("响应头解析失败"), "訊息：{err}");
-    assert!(!err.to_string().contains("://"), "訊息不應含網址：{err}");
+    assert!(err.to_string().contains("响应头解析失败"), "信息：{err}");
+    assert!(!err.to_string().contains("://"), "信息不应含网址：{err}");
 }
 
 /// 逾時仍歸類為 `Timeout`。
@@ -201,11 +201,11 @@ fn classifies_timeout() {
 
     let err = client()
         .send(HttpRequest::get(format!("{base}/slow")).timeout(Duration::from_millis(150)))
-        .expect_err("應回報逾時");
+        .expect_err("应回报超时");
 
     match &err {
         AppError::Network { kind, .. } => assert_eq!(*kind, NetworkKind::Timeout),
-        other => panic!("應為網路錯誤，實際：{other:?}"),
+        other => panic!("应为网络错误，实际：{other:?}"),
     }
     assert!(err.to_string().contains("请求超时"));
 }
@@ -271,7 +271,7 @@ fn classifies_real_world_error_chains() {
 fn reports_unresolvable_host_as_network_error() {
     let err = client()
         .send(HttpRequest::get("http://ohmyxjtu-no-such-host.invalid/"))
-        .expect_err("無法解析的域名應回報錯誤");
+        .expect_err("无法解析的域名应回报错误");
 
     match &err {
         AppError::Network { kind, detail } => {
@@ -280,12 +280,12 @@ fn reports_unresolvable_host_as_network_error() {
                     kind,
                     NetworkKind::Timeout | NetworkKind::HttpParse | NetworkKind::Redirect
                 ),
-                "類別：{kind:?}｜錯誤鏈：{detail}"
+                "类别：{kind:?}｜错误链：{detail}"
             );
         }
-        other => panic!("應為網路錯誤，實際：{other:?}"),
+        other => panic!("应为网络错误，实际：{other:?}"),
     }
-    assert!(!err.to_string().contains("://"), "訊息不應含網址：{err}");
+    assert!(!err.to_string().contains("://"), "信息不应含网址：{err}");
 }
 
 /// 連線被拒歸類為 `Connect`。
@@ -298,11 +298,11 @@ fn classifies_connection_refused() {
 
     let err = client()
         .send(HttpRequest::get(format!("http://{addr}/")))
-        .expect_err("連線被拒應回報錯誤");
+        .expect_err("连接被拒应回报错误");
 
     match &err {
         AppError::Network { kind, .. } => assert_eq!(*kind, NetworkKind::Connect),
-        other => panic!("應為網路錯誤，實際：{other:?}"),
+        other => panic!("应为网络错误，实际：{other:?}"),
     }
 }
 
@@ -319,7 +319,7 @@ fn same_origin_redirect_keeps_custom_headers() {
 
     insecure_client()
         .send(HttpRequest::get(format!("{base}/portal")).header("X-Business-Token", "token-1"))
-        .expect("同源重定向應可跟隨");
+        .expect("同源重定向应可跟随");
 
     assert_eq!(hits.load(Ordering::SeqCst), 2);
     let requests = requests.lock().expect("请求记录锁");
@@ -327,7 +327,7 @@ fn same_origin_redirect_keeps_custom_headers() {
         requests[1]
             .to_ascii_lowercase()
             .contains("x-business-token"),
-        "同源應保留憑證：{}",
+        "同源应保留凭证：{}",
         requests[1]
     );
 }
@@ -356,7 +356,7 @@ fn cross_origin_redirect_drops_custom_headers() {
                 .header("X-Business-Token", "token-1")
                 .header("Referer", "https://lms.xjtu.edu.cn/"),
         )
-        .expect("跨主機重定向應可跟隨");
+        .expect("跨主机重定向应可跟随");
 
     assert_eq!(response.status, 200);
     assert_eq!(hits.load(Ordering::SeqCst), 2);
@@ -365,15 +365,15 @@ fn cross_origin_redirect_drops_custom_headers() {
     let second = requests[1].to_ascii_lowercase();
     assert!(
         first.contains("x-business-token"),
-        "首跳應帶憑證（測試前提）：{first}"
+        "首跳应带凭证（测试前提）：{first}"
     );
     assert!(
         !second.contains("x-business-token"),
-        "跨主機不得重送憑證：{second}"
+        "跨主机不得重送凭证：{second}"
     );
     assert!(
         !second.contains("referer"),
-        "跨主機不得重送來源標頭：{second}"
+        "跨主机不得重送来源标头：{second}"
     );
 }
 
@@ -393,11 +393,11 @@ fn cross_origin_307_is_rejected_without_resending_the_body() {
             format!("{base}/submit"),
             [("password", "__RSA__secret")],
         ))
-        .expect_err("跨來源 307 應被拒絕");
+        .expect_err("跨来源 307 应被拒绝");
 
     match &err {
         AppError::Network { kind, .. } => assert_eq!(*kind, NetworkKind::Redirect),
-        other => panic!("應為重定向錯誤，實際：{other:?}"),
+        other => panic!("应为重定向错误，实际：{other:?}"),
     }
     assert!(
         err.to_string().contains("拒绝把请求主体重送到其他来源"),
@@ -406,7 +406,7 @@ fn cross_origin_307_is_rejected_without_resending_the_body() {
     assert_eq!(
         hits.load(Ordering::SeqCst),
         1,
-        "被拒絕時不得再送出第二個請求"
+        "被拒绝时不得再送出第二个请求"
     );
 }
 
@@ -426,14 +426,14 @@ fn same_origin_307_resends_the_body() {
             format!("{base}/submit"),
             [("password", "__RSA__secret")],
         ))
-        .expect("同源 307 應重送主體");
+        .expect("同源 307 应重送主体");
 
     assert_eq!(response.status, 200);
     assert_eq!(hits.load(Ordering::SeqCst), 2);
     let requests = requests.lock().expect("请求记录锁");
     assert!(
         requests[1].contains("__RSA__secret"),
-        "同源 307 應保留請求主體：{}",
+        "同源 307 应保留请求主体：{}",
         requests[1]
     );
 }
@@ -455,9 +455,9 @@ fn plan_redirect_keeps_headers_only_for_same_origin() {
         1,
         is_trusted_redirect_host,
     )
-    .expect("同源應可跟隨");
+    .expect("同源应可跟随");
     assert_eq!(plan.url, "https://lms.xjtu.edu.cn/api/y");
-    assert!(plan.keep_headers, "同源應保留自訂標頭");
+    assert!(plan.keep_headers, "同源应保留自订标头");
 
     // 校內跨主機：跟隨但丟棄自訂標頭。
     let plan = plan_redirect(
@@ -469,8 +469,8 @@ fn plan_redirect_keeps_headers_only_for_same_origin() {
         1,
         is_trusted_redirect_host,
     )
-    .expect("校內跨主機應可跟隨");
-    assert!(!plan.keep_headers, "跨主機不得保留自訂標頭");
+    .expect("校内跨主机应可跟随");
+    assert!(!plan.keep_headers, "跨主机不得保留自订标头");
 
     // 非學校網域：拒絕。
     let err = plan_redirect(
@@ -482,7 +482,7 @@ fn plan_redirect_keeps_headers_only_for_same_origin() {
         1,
         is_trusted_redirect_host,
     )
-    .expect_err("校外主機應被拒絕");
+    .expect_err("校外主机应被拒绝");
     assert!(
         matches!(
             err,
@@ -505,7 +505,7 @@ fn plan_redirect_keeps_headers_only_for_same_origin() {
         1,
         is_trusted_redirect_host,
     )
-    .expect_err("降級應被拒絕");
+    .expect_err("降级应被拒绝");
     assert!(err.to_string().contains("降级"), "{err}");
 
     // 跳數超限：拒絕。
@@ -518,7 +518,7 @@ fn plan_redirect_keeps_headers_only_for_same_origin() {
         MAX_REDIRECTS + 1,
         is_trusted_redirect_host,
     )
-    .expect_err("跳數超限應被拒絕");
+    .expect_err("跳数超限应被拒绝");
     assert!(err.to_string().contains("次数过多"), "{err}");
 }
 
@@ -539,7 +539,7 @@ fn plan_redirect_rules_for_request_bodies() {
         1,
         is_trusted_redirect_host,
     )
-    .expect("302 應可跟隨");
+    .expect("302 应可跟随");
     assert_eq!(plan.method, crate::http::Method::Get);
     assert!(!plan.keep_body);
 
@@ -553,7 +553,7 @@ fn plan_redirect_rules_for_request_bodies() {
         1,
         is_trusted_redirect_host,
     )
-    .expect("同源 307 應可跟隨");
+    .expect("同源 307 应可跟随");
     assert_eq!(plan.method, crate::http::Method::Post);
     assert!(plan.keep_body);
 
@@ -567,7 +567,7 @@ fn plan_redirect_rules_for_request_bodies() {
         1,
         is_trusted_redirect_host,
     )
-    .expect_err("跨來源 307 應被拒絕");
+    .expect_err("跨来源 307 应被拒绝");
     assert!(
         err.to_string().contains("拒绝把请求主体重送到其他来源"),
         "{err}"
@@ -584,16 +584,16 @@ fn plan_redirect_validates_the_webvpn_proxy_target() {
     use crate::http::Method;
 
     let previous =
-        Url::parse(&webvpn::to_webvpn_url("https://bk-kq.xjtu.edu.cn/sa/current").expect("改寫"))
+        Url::parse(&webvpn::to_webvpn_url("https://bk-kq.xjtu.edu.cn/sa/current").expect("改写"))
             .expect("解析");
     assert_eq!(
         previous.host_str(),
         Some(webvpn::WEBVPN_HOST),
-        "測試前提：外層主機是閘道"
+        "测试前提：外层主机是闸道"
     );
 
     // 代理到校內主機（HTTPS）：允許，且同一代理目標算同源。
-    let allowed = webvpn::to_webvpn_url("https://bk-kq.xjtu.edu.cn/sa/next").expect("改寫");
+    let allowed = webvpn::to_webvpn_url("https://bk-kq.xjtu.edu.cn/sa/next").expect("改写");
     let plan = plan_redirect(
         &previous,
         &allowed,
@@ -603,11 +603,11 @@ fn plan_redirect_validates_the_webvpn_proxy_target() {
         1,
         is_trusted_redirect_host,
     )
-    .expect("代理校內主機應可跟隨");
-    assert!(plan.keep_headers, "同一代理目標應保留自訂標頭");
+    .expect("代理校内主机应可跟随");
+    assert!(plan.keep_headers, "同一代理目标应保留自订标头");
 
     // 代理到校外主機：拒絕。
-    let foreign = webvpn::to_webvpn_url("https://evil.example/steal").expect("改寫");
+    let foreign = webvpn::to_webvpn_url("https://evil.example/steal").expect("改写");
     let err = plan_redirect(
         &previous,
         &foreign,
@@ -617,14 +617,14 @@ fn plan_redirect_validates_the_webvpn_proxy_target() {
         1,
         is_trusted_redirect_host,
     )
-    .expect_err("代理目標在校外時應拒絕");
+    .expect_err("代理目标在校外时应拒绝");
     assert!(
         err.to_string().contains("代理目标位于学校网域之外"),
         "{err}"
     );
 
     // 代理到 http（內層降級）：拒絕。
-    let insecure = webvpn::to_webvpn_url("http://bk-kq.xjtu.edu.cn/sa").expect("改寫");
+    let insecure = webvpn::to_webvpn_url("http://bk-kq.xjtu.edu.cn/sa").expect("改写");
     let err = plan_redirect(
         &previous,
         &insecure,
@@ -634,7 +634,7 @@ fn plan_redirect_validates_the_webvpn_proxy_target() {
         1,
         is_trusted_redirect_host,
     )
-    .expect_err("代理目標非 HTTPS 時應拒絕");
+    .expect_err("代理目标非 HTTPS 时应拒绝");
     assert!(err.to_string().contains("代理目标不是 HTTPS"), "{err}");
 
     // 代理目標解不開：身分無法確認，拒絕。
@@ -648,7 +648,7 @@ fn plan_redirect_validates_the_webvpn_proxy_target() {
         1,
         is_trusted_redirect_host,
     )
-    .expect_err("無法解析的代理目標應拒絕");
+    .expect_err("无法解析的代理目标应拒绝");
     assert!(err.to_string().contains("代理目标无法解析"), "{err}");
 }
 
@@ -670,9 +670,9 @@ fn trusted_redirect_hosts() {
 fn webvpn_proxy_targets_define_the_origin() {
     use super::same_origin;
 
-    let first = webvpn::to_webvpn_url("https://bk-kq.xjtu.edu.cn/sa").expect("改寫");
-    let same_target = webvpn::to_webvpn_url("https://bk-kq.xjtu.edu.cn/sa/next").expect("改寫");
-    let other_target = webvpn::to_webvpn_url("https://lms.xjtu.edu.cn/sa").expect("改寫");
+    let first = webvpn::to_webvpn_url("https://bk-kq.xjtu.edu.cn/sa").expect("改写");
+    let same_target = webvpn::to_webvpn_url("https://bk-kq.xjtu.edu.cn/sa/next").expect("改写");
+    let other_target = webvpn::to_webvpn_url("https://lms.xjtu.edu.cn/sa").expect("改写");
 
     let first = Url::parse(&first).expect("解析");
     let same_target = Url::parse(&same_target).expect("解析");
@@ -681,12 +681,12 @@ fn webvpn_proxy_targets_define_the_origin() {
     assert_eq!(
         first.host_str(),
         other_target.host_str(),
-        "外層主機相同（測試前提）"
+        "外层主机相同（测试前提）"
     );
-    assert!(same_origin(&first, &same_target), "同一代理目標應視為同源");
-    assert!(!same_origin(&first, &other_target), "代理目標不同即為跨源");
+    assert!(same_origin(&first, &same_target), "同一代理目标应视为同源");
+    assert!(!same_origin(&first, &other_target), "代理目标不同即为跨源");
 
     // 代理目標解不開：保守視為跨源。
     let broken = Url::parse("https://webvpn.xjtu.edu.cn/https/zzzz/broken").expect("解析");
-    assert!(!same_origin(&broken, &broken), "無法判定時應視為跨源");
+    assert!(!same_origin(&broken, &broken), "无法判定时应视为跨源");
 }

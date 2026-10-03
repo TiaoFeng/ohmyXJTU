@@ -52,15 +52,15 @@ fn parses_every_line_layout() {
     let body = pem_body(&pem);
     let escaped = pem_with(SPKI_LABEL, &body, 64, "\n").replace('\n', "\\n");
     let variants = [
-        ("裸 PEM（64 欄）", pem.clone()),
-        ("單行", pem_with(SPKI_LABEL, &body, 0, "\n")),
-        ("76 欄", pem_with(SPKI_LABEL, &body, 76, "\n")),
+        ("裸 PEM（64 栏）", pem.clone()),
+        ("单行", pem_with(SPKI_LABEL, &body, 0, "\n")),
+        ("76 栏", pem_with(SPKI_LABEL, &body, 76, "\n")),
         ("CRLF", pem_with(SPKI_LABEL, &body, 64, "\r\n")),
         (
-            "BOM 與前後空白",
+            "BOM 与前后空白",
             format!("\u{feff}  \n{}\n  ", pem_with(SPKI_LABEL, &body, 64, "\n")),
         ),
-        ("跳脫換行", escaped),
+        ("跳脱换行", escaped),
     ];
 
     for (name, text) in variants {

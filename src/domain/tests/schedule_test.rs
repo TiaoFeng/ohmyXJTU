@@ -60,7 +60,7 @@ fn merges_multi_segment_weeks_for_same_slot() {
     let math = slots
         .iter()
         .find(|slot| slot.course_name == "高等数学")
-        .expect("合併後應保留高等數學");
+        .expect("合并后应保留高等数学");
     assert_eq!(math.weeks_label(), "1-4,6-8");
     assert!(math.is_in_week(7));
     assert!(!math.is_in_week(5));

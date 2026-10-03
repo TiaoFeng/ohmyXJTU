@@ -70,11 +70,11 @@ fn selection_normalizes_stale_index_before_wrapping() {
     // 越界索引在畫面上一律夾到最後一項；移動應從該可見位置出發。
     app.schedule_state.select(Some(9));
     app.select_next();
-    assert_eq!(app.page_selection(), 0, "應從可見的最後一項循環回開頭");
+    assert_eq!(app.page_selection(), 0, "应从可见的最后一项循环回开头");
 
     app.schedule_state.select(Some(9));
     app.select_previous();
-    assert_eq!(app.page_selection(), 1, "應從可見的最後一項往前一項");
+    assert_eq!(app.page_selection(), 1, "应从可见的最后一项往前一项");
 }
 
 #[test]
@@ -92,7 +92,7 @@ fn selection_wraps_across_lms_courses_and_flow_pages() {
     app.nav = NavItem::Lms;
     app.lms.courses = Page::Ready(vec![course("1"), course("2")]);
     app.select_previous();
-    assert_eq!(app.page_selection(), 1, "课程層应循环到最后一门");
+    assert_eq!(app.page_selection(), 1, "课程层应循环到最后一门");
 
     app.nav = NavItem::Attendance;
     app.attendance = Page::Ready(FlowData {
@@ -102,7 +102,7 @@ fn selection_wraps_across_lms_courses_and_flow_pages() {
         total: 3,
     });
     app.select_previous();
-    assert_eq!(app.page_selection(), 2, "流水頁应循环到最后一笔");
+    assert_eq!(app.page_selection(), 2, "流水页应循环到最后一笔");
 }
 
 fn course(id: &str) -> LmsCourse {
@@ -185,7 +185,7 @@ fn messages_expire_only_after_ttl() {
     assert_eq!(
         app.message_text(),
         Some("登录成功"),
-        "刚设置的訊息不应立即过期"
+        "刚设置的信息不应立即过期"
     );
     assert_eq!(app.message_text(), Some("登录成功"));
 }
@@ -193,7 +193,7 @@ fn messages_expire_only_after_ttl() {
 #[test]
 fn animation_tick_advances_for_loading_dots() {
     let mut app = App::new(AccessPolicy::Auto);
-    assert_eq!(app.tick, 0, "動畫由第 0 相位開始");
+    assert_eq!(app.tick, 0, "动画由第 0 相位开始");
     app.advance_tick();
     assert_eq!(app.tick, 1);
     app.advance_tick();
@@ -213,7 +213,7 @@ fn agreement_requires_reaching_bottom_before_confirming() {
     assert!(!state.can_confirm(), "尚未到底部不得确认");
 
     state.scroll_by(1000);
-    assert_eq!(state.scroll(), 40, "捲动应夹取到最大位置");
+    assert_eq!(state.scroll(), 40, "滚动应夹取到最大位置");
     assert!(state.can_confirm(), "到底部后可确认");
 
     // 黏性：讀到底部後捲回上方不應失去確認資格。
@@ -236,7 +236,7 @@ fn agreement_ignores_scroll_before_first_layout() {
     state.scroll_by(10);
     state.page_by(1);
     state.to_bottom();
-    assert_eq!(state.scroll(), 0, "版面未知时不得捲动");
+    assert_eq!(state.scroll(), 0, "版面未知时不得滚动");
     assert!(!state.can_confirm(), "版面未知时不得确认");
     assert_eq!(state.progress(), 0);
 }
@@ -323,11 +323,11 @@ fn course_navigation_follows_the_displayed_partition_order() {
 
     // 畫面上的下一門是歷史課程（真實索引 0），不是不存在的原始索引 2。
     app.select_next();
-    assert_eq!(app.page_selection(), 0, "應依畫面順序移到歷史課程");
+    assert_eq!(app.page_selection(), 0, "应依画面顺序移到历史课程");
 
     // 再下一門循環回本學期課程。
     app.select_next();
-    assert_eq!(app.page_selection(), 1, "應循環回本學期課程");
+    assert_eq!(app.page_selection(), 1, "应循环回本学期课程");
 
     // 反向：從本學期課程往前是歷史課程。
     app.select_previous();

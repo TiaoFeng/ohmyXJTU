@@ -264,7 +264,7 @@ fn control_jobs_interrupt_homework_between_steps() {
                 target: FailedTarget::Homework
             }
         )),
-        "取消后应通知介面解除载入中状态"
+        "取消后应通知界面解除加载中状态"
     );
 
     let seen = seen.lock().expect("lock").clone();
@@ -392,17 +392,17 @@ fn forced_refresh_during_non_forced_homework_load_is_not_swallowed() {
     // 第二次，即代表重載確實執行完畢。
     assert!(
         wait_settled(|| count(&seen, "/courses/2/activities"), 2),
-        "強制刷新必須再執行一次完整載入"
+        "强制刷新必须再执行一次完整加载"
     );
     assert_eq!(
         count(&seen, "/api/my-courses"),
         2,
-        "強制刷新必須重新查詢課程"
+        "强制刷新必须重新查询课程"
     );
     assert_eq!(
         count(&seen, "/courses/1/activities"),
         2,
-        "強制刷新必須繞過活動快取"
+        "强制刷新必须绕过活动缓存"
     );
     assert_eq!(count(&seen, "/courses/2/activities"), 2);
 }
@@ -451,7 +451,7 @@ fn forced_refresh_upgrades_a_queued_non_forced_load() {
     worker.send(Job::LoadCourses { force: false });
     assert!(
         worker.wait_event(|event| matches!(event, Event::Courses(_))),
-        "預熱載入應完成"
+        "预热加载应完成"
     );
 
     // 作業載入進行中（第一門課程的活動查詢阻塞），同時排入非強制與強制課程載入。
@@ -463,9 +463,9 @@ fn forced_refresh_upgrades_a_queued_non_forced_load() {
 
     assert!(
         wait_settled(|| count(&seen, "/api/my-courses"), 2),
-        "佇列中的非強制載入應升級為強制並繞過快取"
+        "队列中的非强制加载应升级为强制并绕过缓存"
     );
-    assert_eq!(count(&seen, "/api/my-courses"), 2, "最多一次重載");
+    assert_eq!(count(&seen, "/api/my-courses"), 2, "最多一次重载");
 }
 /// 切換學期必須使進行中的作業載入失效，不得再回填舊學期的進度與結果。
 #[test]
@@ -517,7 +517,7 @@ fn switching_term_cancels_the_running_load_without_old_results() {
 
     assert!(
         wait_settled(|| count(&seen, "/api/my-courses"), 2),
-        "切換學期後應再執行一次強制重載"
+        "切换学期后应再执行一次强制重载"
     );
 
     // 舊學期的載入必須在切換後立即中止：切換後不得再出現任何舊學期的進度
@@ -529,13 +529,13 @@ fn switching_term_cancels_the_running_load_without_old_results() {
     let switch_at = events
         .iter()
         .position(|event| matches!(event, Event::CoursesTerm(Some(term)) if *term == new_term))
-        .expect("應收到學期切換事件");
+        .expect("应收到学期切换事件");
     assert!(
         !events[switch_at..].iter().any(|event| matches!(
             event,
             Event::Homework(update) if update.term_label.as_deref() == Some(old_label.as_str())
         )),
-        "切換學期後不得再回填舊學期的進度或結果：{:?}",
+        "切换学期后不得再回填旧学期的进度或结果：{:?}",
         &events[switch_at..]
     );
     assert!(
@@ -544,7 +544,7 @@ fn switching_term_cancels_the_running_load_without_old_results() {
             Event::Homework(update) if update.progress.is_none()
                 && update.term_label.as_deref() == Some(new_label.as_str())
         )),
-        "應得到新學期的完成結果：{events:?}"
+        "应得到新学期的完成结果：{events:?}"
     );
 }
 /// 課程單步載入進行中收到強制刷新：排隊的下一筆必須是強制（不得被吞或降級）。
@@ -587,9 +587,9 @@ fn forced_refresh_is_kept_behind_a_running_non_forced_course_load() {
 
     assert!(
         wait_settled(|| count(&seen, "/api/my-courses"), 2),
-        "排隊的課程載入應被升級為強制並重新查詢"
+        "排队的课程加载应被升级为强制并重新查询"
     );
-    assert_eq!(count(&seen, "/api/my-courses"), 2, "最多一次重載");
+    assert_eq!(count(&seen, "/api/my-courses"), 2, "最多一次重载");
 }
 
 /// 活動單步載入進行中收到強制刷新：同樣必須保留強制任務。
@@ -640,9 +640,9 @@ fn forced_refresh_is_kept_behind_a_running_non_forced_activity_load() {
 
     assert!(
         wait_settled(|| count(&seen, "/courses/1/activities"), 2),
-        "排隊的活動載入應被升級為強制並重新查詢"
+        "排队的活动加载应被升级为强制并重新查询"
     );
-    assert_eq!(count(&seen, "/courses/1/activities"), 2, "最多一次重載");
+    assert_eq!(count(&seen, "/courses/1/activities"), 2, "最多一次重载");
 }
 
 /// 學期載入中連續兩次選擇：佇列只留一筆強制重載（不得重複完整重載）。
@@ -701,15 +701,15 @@ fn set_homework_term_keeps_a_single_forced_reload() {
             worker.wait_event(
                 |event| matches!(event, Event::Notice(text) if text.contains("已记住学期"))
             ),
-            "兩次選擇都應被處理"
+            "两次选择都应被处理"
         );
     }
     // 恰有一次重載：課程查詢計數應穩定於 2（兩次選擇各排一筆的舊行為會出現第三次）。
     assert!(
         wait_settled(|| count(&seen, "/api/my-courses"), 2),
-        "應恰有一次強制重載"
+        "应恰有一次强制重载"
     );
-    assert_eq!(count(&seen, "/api/my-courses"), 2, "不得出現第二次重載");
+    assert_eq!(count(&seen, "/api/my-courses"), 2, "不得出现第二次重载");
 }
 
 /// 強制載入進行中切換學期：必須再排入一次強制重載（切換不得被吞掉）。
@@ -763,7 +763,7 @@ fn set_homework_term_reloads_while_a_forced_load_runs() {
 
     assert!(
         wait_until(|| count(&seen, "/api/my-courses") == 2),
-        "切換學期後應再執行一次強制重載"
+        "切换学期后应再执行一次强制重载"
     );
     assert!(
         worker.wait_event(|event| matches!(
@@ -771,9 +771,9 @@ fn set_homework_term_reloads_while_a_forced_load_runs() {
             Event::Homework(update) if update.progress.is_none()
                 && update.term_label.as_deref() == Some("2025-2026 学年 第 2 学期")
         )),
-        "重載結果應為新學期"
+        "重载结果应为新学期"
     );
-    assert_eq!(count(&seen, "/api/my-courses"), 2, "最多一次重載");
+    assert_eq!(count(&seen, "/api/my-courses"), 2, "最多一次重载");
 }
 
 /// 長查詢期間按 `o` 開啟網頁：應在下一個步進邊界執行，不必等整輪載入。

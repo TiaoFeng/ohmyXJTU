@@ -62,7 +62,7 @@ fn setup_form_creates_vault() {
         other => panic!("应为创建凭证任务，实际为 {other:?}"),
     }
     let Screen::Setup(form) = &app.screen else {
-        panic!("提交后应停留在设定表单");
+        panic!("提交后应停留在设置表单");
     };
     assert!(form.busy, "提交后应显示处理中");
 }
@@ -78,7 +78,7 @@ fn setup_form_rejects_short_passphrase() {
 
     assert!(rx.try_recv().is_err(), "口令过短时不应送出任务");
     let Screen::Setup(form) = &app.screen else {
-        panic!("应停留在设定画面");
+        panic!("应停留在设置画面");
     };
     assert!(form.error.is_some());
 }
@@ -131,7 +131,7 @@ fn change_passphrase_minimum_applies_to_new_passphrase_only() {
     press(&mut app, &jobs, KeyCode::Enter);
     assert!(
         matches!(rx.try_recv(), Ok(Job::ChangePassphrase { old, new }) if old == "old6ch" && new == "12345678"),
-        "新口令 8 字元、原口令 6 字元应被接受"
+        "新口令 8 字符、原口令 6 字符应被接受"
     );
 }
 
@@ -226,11 +226,11 @@ fn busy_form_ignores_input_until_reply() {
     // 送出後忽略輸入與重複提交。
     press(&mut app, &jobs, KeyCode::Char('x'));
     press(&mut app, &jobs, KeyCode::Enter);
-    assert!(rx.try_recv().is_err(), "處理中不應重複送出");
+    assert!(rx.try_recv().is_err(), "处理中不应重复送出");
     let Screen::Setup(form) = &app.screen else {
-        panic!("应停留在设定表单");
+        panic!("应停留在设置表单");
     };
-    assert_eq!(form.value("账号"), "3120000001", "處理中輸入不應被改動");
+    assert_eq!(form.value("账号"), "3120000001", "处理中输入不应被改动");
 }
 
 #[test]
@@ -353,7 +353,7 @@ fn settings_policy_draft_updates_locally_without_tasks() {
     // 右鍵：草稿即時變為 Direct，不送任務。
     press(&mut app, &jobs, KeyCode::Right);
     let Screen::Settings(state) = app.screen else {
-        panic!("应停留在设定弹窗");
+        panic!("应停留在设置弹窗");
     };
     assert_eq!(state.policy(app.access_policy), AccessPolicy::Direct);
     assert!(rx.try_recv().is_err(), "调整草稿不应送出任务");
@@ -361,7 +361,7 @@ fn settings_policy_draft_updates_locally_without_tasks() {
     // 左鍵回到 Auto。
     press(&mut app, &jobs, KeyCode::Left);
     let Screen::Settings(state) = app.screen else {
-        panic!("应停留在设定弹窗");
+        panic!("应停留在设置弹窗");
     };
     assert_eq!(state.policy(app.access_policy), AccessPolicy::Auto);
     assert!(rx.try_recv().is_err());
@@ -506,7 +506,7 @@ fn failed_screen_retries_with_saved_credentials_or_quits() {
     ));
     assert!(
         matches!(app.login.as_deref(), Some(LoginScreen::Progress { .. })),
-        "重試時應顯示進度覆蓋層"
+        "重试时应显示进度覆盖层"
     );
 
     press(&mut app, &jobs, KeyCode::Char('q'));
@@ -520,21 +520,21 @@ fn failed_screen_esc_closes_overlay_so_refresh_works() {
     let mut app = failed_app("登录失败：网络连接失败（域名解析失败）");
 
     press(&mut app, &jobs, KeyCode::Esc);
-    assert!(app.login.is_none(), "esc 應關閉登入覆蓋層");
+    assert!(app.login.is_none(), "esc 应关闭登录覆盖层");
     assert!(
         app.login_cancel_pending,
-        "esc 後應進入等待取消狀態，直到工作者回報取消完成"
+        "esc 后应进入等待取消状态，直到工作者回报取消完成"
     );
     assert!(
         matches!(rx.try_recv(), Ok(Job::CancelLogin)),
-        "關閉覆蓋層應一併取消工作者端的登入流程"
+        "关闭覆盖层应一并取消工作者端的登录流程"
     );
 
     // 覆蓋層關閉後，主畫面的 r 才能刷新目前頁面。
     press(&mut app, &jobs, KeyCode::Char('r'));
     assert!(
         matches!(rx.try_recv(), Ok(Job::LoadSchedule)),
-        "關閉覆蓋層後 r 應能刷新目前頁面"
+        "关闭覆盖层后 r 应能刷新目前页面"
     );
 }
 
@@ -674,8 +674,8 @@ fn login_overlay_takes_keys_and_keeps_underlying_screen() {
 
     // 主畫面按鍵（右鍵切頁）在覆蓋層開啟時不生效。
     press(&mut app, &jobs, KeyCode::Right);
-    assert_eq!(app.nav, NavItem::Schedule, "覆蓋層開啟時不應切換頁面");
-    assert!(matches!(app.screen, Screen::Main), "底層畫面維持不變");
+    assert_eq!(app.nav, NavItem::Schedule, "覆盖层开启时不应切换页面");
+    assert!(matches!(app.screen, Screen::Main), "底层画面维持不变");
 
     // 輸入進驗證碼框。
     type_text(&mut app, &jobs, "9f9f");
@@ -690,7 +690,7 @@ fn login_overlay_takes_keys_and_keeps_underlying_screen() {
         KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
         &jobs,
     );
-    assert!(matches!(app.screen, Screen::Main), "覆蓋層期間不應開啟設定");
+    assert!(matches!(app.screen, Screen::Main), "覆盖层期间不应开启设置");
 }
 
 #[test]
@@ -750,7 +750,7 @@ fn bracket_keys_switch_activity_group_on_lms_activities() {
     press(&mut app, &jobs, KeyCode::Char(']'));
     assert_eq!(app.lms.activity_group, ActivityGroup::Lesson);
     assert_eq!(app.page_selection(), 0);
-    assert!(rx.try_recv().is_err(), "切換分組不應送出網路任務");
+    assert!(rx.try_recv().is_err(), "切换分组不应送出网络任务");
 
     press(&mut app, &jobs, KeyCode::Char(']'));
     assert_eq!(app.lms.activity_group, ActivityGroup::Homework);
@@ -852,7 +852,7 @@ fn o_key_on_homework_page_opens_selected_homework_course() {
 
     // 尚未載入作業：提示而不送任務。
     press(&mut app, &jobs, KeyCode::Char('o'));
-    assert!(rx.try_recv().is_err(), "未載入時不應送出任務");
+    assert!(rx.try_recv().is_err(), "未加载时不应送出任务");
     assert_eq!(app.message_text(), Some("请先选择要打开的作业"));
 
     app.homework = Page::Ready(homework_page("42", "a-1", 0));
@@ -873,7 +873,7 @@ fn o_key_on_homework_page_opens_selected_homework_course() {
     app.homework_group = HomeworkGroup::Completed;
     app.set_selection(0);
     press(&mut app, &jobs, KeyCode::Char('o'));
-    assert!(rx.try_recv().is_err(), "空清單不應送出任務");
+    assert!(rx.try_recv().is_err(), "空清单不应送出任务");
 }
 
 #[test]
@@ -895,7 +895,7 @@ fn enter_on_lms_activities_uses_filtered_selection() {
         Ok(Job::LoadActivityDetail { activity_id }) if activity_id == "2"
     ));
     assert_eq!(app.lms.level, LmsLevel::Detail);
-    assert!(app.lms.detail.is_loading(), "應切換到詳情載入中");
+    assert!(app.lms.detail.is_loading(), "应切换到详情加载中");
 }
 
 fn course_with_term(id: &str, code: Option<&str>) -> LmsCourse {
@@ -968,7 +968,7 @@ fn switching_courses_drops_the_previous_courses_activities() {
     assert!(app.lms.activities.is_loading());
     assert!(
         app.lms.activities.ready().is_none(),
-        "不得沿用前一門課的活動清單"
+        "不得沿用前一门课的活动清单"
     );
 
     // 重新進入同一門課則保留舊資料：刷新期間仍可閱讀。
@@ -979,7 +979,7 @@ fn switching_courses_drops_the_previous_courses_activities() {
     assert_eq!(
         app.lms.activities.ready().map(Vec::len),
         Some(1),
-        "同一門課重新載入時應保留舊資料"
+        "同一门课重新加载时应保留旧数据"
     );
 }
 
@@ -1012,7 +1012,7 @@ fn switching_activities_drops_the_previous_detail() {
     ));
     assert_eq!(app.lms.detail_activity.as_deref(), Some("2"));
     assert!(app.lms.detail.is_loading());
-    assert!(app.lms.detail.ready().is_none(), "不得沿用上一個活動的詳情");
+    assert!(app.lms.detail.ready().is_none(), "不得沿用上一个活动的详情");
 }
 
 #[test]
@@ -1104,7 +1104,7 @@ fn app_with_agreement() -> App {
 
 /// 目前協議狀態。
 fn agreement_state(app: &App) -> &AgreementState {
-    app.agreement.as_deref().expect("協议閱讀門应开启")
+    app.agreement.as_deref().expect("协议阅读门应开启")
 }
 
 #[test]
@@ -1120,7 +1120,7 @@ fn agreement_gate_blocks_settings_and_main_shortcuts() {
     );
     assert!(
         matches!(app.screen, Screen::Main),
-        "協議開啟時 ctrl+p 不作用"
+        "协议开启时 ctrl+p 不作用"
     );
 
     // Ctrl+U 不清空底層表單。
@@ -1137,7 +1137,7 @@ fn agreement_gate_blocks_settings_and_main_shortcuts() {
         assert_eq!(
             form.fields[0].value.value(),
             "secret",
-            "ctrl+u 不得穿透協議畫面"
+            "ctrl+u 不得穿透协议画面"
         );
     }
 
@@ -1146,15 +1146,15 @@ fn agreement_gate_blocks_settings_and_main_shortcuts() {
     let group = app.homework_group;
     press(&mut app, &jobs, KeyCode::Char('s'));
     press(&mut app, &jobs, KeyCode::Char(']'));
-    assert!(matches!(app.screen, Screen::Main), "協議開啟時 s 不作用");
-    assert_eq!(app.homework_group, group, "協議開啟時 ] 不作用");
+    assert!(matches!(app.screen, Screen::Main), "协议开启时 s 不作用");
+    assert_eq!(app.homework_group, group, "协议开启时 ] 不作用");
 }
 
 #[test]
 fn agreement_scroll_keys_move_document() {
     let (jobs, _rx) = channel();
     let mut app = app_with_agreement();
-    app.agreement.as_mut().expect("閱讀門").sync_layout(10, 50);
+    app.agreement.as_mut().expect("阅读门").sync_layout(10, 50);
 
     press(&mut app, &jobs, KeyCode::Char('j'));
     assert_eq!(agreement_state(&app).scroll(), 1);
@@ -1176,7 +1176,7 @@ fn agreement_scroll_keys_move_document() {
 fn agreement_enter_requires_bottom_and_sends_once() {
     let (jobs, rx) = channel();
     let mut app = app_with_agreement();
-    app.agreement.as_mut().expect("閱讀門").sync_layout(10, 50);
+    app.agreement.as_mut().expect("阅读门").sync_layout(10, 50);
 
     // 未讀到底部：enter 不送任務。
     press(&mut app, &jobs, KeyCode::Enter);
@@ -1205,12 +1205,12 @@ fn agreement_quit_keys_exit_without_accepting() {
     let mut app = app_with_agreement();
 
     press(&mut app, &jobs, KeyCode::Char('q'));
-    assert!(app.quit, "q 應直接退出");
+    assert!(app.quit, "q 应直接退出");
     assert!(rx.try_recv().is_err(), "退出不得送出同意");
 
     let mut app = app_with_agreement();
     press(&mut app, &jobs, KeyCode::Esc);
-    assert!(app.quit, "esc 應直接退出");
+    assert!(app.quit, "esc 应直接退出");
     assert!(rx.try_recv().is_err(), "退出不得送出同意");
 
     let mut app = app_with_agreement();
@@ -1245,7 +1245,7 @@ fn control_modified_characters_are_not_inserted() {
     }
 
     let Screen::Unlock(form) = &app.screen else {
-        panic!("應停留在解鎖表單");
+        panic!("应停留在解锁表单");
     };
     assert!(
         form.focused().expect("聚焦字段").value.is_empty(),
@@ -1260,9 +1260,9 @@ fn control_modified_characters_are_not_inserted() {
         &jobs,
     );
     let Screen::Unlock(form) = &app.screen else {
-        panic!("應停留在解鎖表單");
+        panic!("应停留在解锁表单");
     };
-    assert_eq!(form.value("加密口令"), "", "ctrl+u 應清空欄位");
+    assert_eq!(form.value("加密口令"), "", "ctrl+u 应清空字段");
 }
 
 /// 捲動鍵（PgUp／PgDn／Home／End）：只在詳情可捲動的頁面生效。

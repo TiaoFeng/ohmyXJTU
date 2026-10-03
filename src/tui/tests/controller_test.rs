@@ -6,7 +6,7 @@ use crate::tui::app::FormState;
 
 /// 依畫面順序設定每個欄位的值。
 fn set_values(form: &mut FormState, values: &[&str]) {
-    assert_eq!(form.fields.len(), values.len(), "欄位數應與測試資料相符");
+    assert_eq!(form.fields.len(), values.len(), "字段数应与测试数据相符");
     for (field, value) in form.fields.iter_mut().zip(values) {
         field.value.set(*value);
     }

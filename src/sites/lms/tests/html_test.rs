@@ -170,7 +170,7 @@ fn deeply_nested_markup_is_bounded() {
 fn malformed_markup_does_not_panic() {
     assert_eq!(plain("<p>a<div>b").as_deref(), Some("a\nb"));
     assert_eq!(plain("</p>孤立</div>").as_deref(), Some("孤立"));
-    assert_eq!(plain("<p><b>未閉合").as_deref(), Some("未閉合"));
+    assert_eq!(plain("<p><b>未闭合").as_deref(), Some("未闭合"));
 }
 
 #[test]

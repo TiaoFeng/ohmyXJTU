@@ -9,7 +9,7 @@ fn debug_is_masked_and_never_contains_the_value() {
     assert_eq!(debug, "Secret(<redacted>)");
     assert!(
         !debug.contains("super-secret"),
-        "Debug 不得洩漏內容：{debug}"
+        "Debug 不得泄漏内容：{debug}"
     );
 
     // 巢狀結構的 Debug 輸出也不含內容。
@@ -22,8 +22,8 @@ fn view_conversions_and_equality() {
     let from_string = Secret::from("secret123".to_owned());
     let from_str = Secret::from("secret123");
     assert_eq!(from_string.as_str(), "secret123");
-    assert_eq!(from_string, from_str, "相同內容應相等");
-    assert_eq!(from_string, "secret123", "應可與 &str 比較");
+    assert_eq!(from_string, from_str, "相同内容应相等");
+    assert_eq!(from_string, "secret123", "应可与 &str 比较");
     assert_ne!(from_string, Secret::from("other"));
 
     // Deref 讓 &Secret 可直接作為 &str 使用。

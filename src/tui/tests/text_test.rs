@@ -12,9 +12,9 @@ fn debug_is_masked_and_clear_empties() {
     let debug = format!("{line:?}");
     assert!(
         !debug.contains("secret-password"),
-        "Debug 不得洩漏輸入內容：{debug}"
+        "Debug 不得泄漏输入内容：{debug}"
     );
-    assert!(debug.contains("len: 15"), "Debug 可顯示長度：{debug}");
+    assert!(debug.contains("len: 15"), "Debug 可显示长度：{debug}");
 
     line.clear();
     assert!(line.is_empty());
@@ -110,11 +110,11 @@ fn combining_character_keeps_cursor_on_one_grapheme() {
     // U+0301 組合重音：與前一個 'a' 合併為單一字素。
     line.insert('\u{0301}');
     assert_eq!(line.value(), "a\u{0301}");
-    assert_eq!(line.len(), 1, "組合字元不應自成一個字素");
-    assert_eq!(line.cursor(), 1, "游標不應越過合併後的字素");
+    assert_eq!(line.len(), 1, "组合字符不应自成一个字素");
+    assert_eq!(line.cursor(), 1, "光标不应越过合并后的字素");
 
     // 游標在尾端：backspace 應刪掉整個字素，而不是看似無效。
-    assert!(line.backspace(), "組合字元後仍應能刪除");
+    assert!(line.backspace(), "组合字符后仍应能删除");
     assert_eq!(line.value(), "");
     assert_eq!(line.cursor(), 0);
 }
@@ -135,14 +135,14 @@ fn scrolls_by_display_width_for_wide_characters() {
     let (visible, column) = input_window(&line, 8);
     assert!(
         display_width(&visible) <= 8,
-        "可見內容不得超出輸入區：{visible}（{} 欄）",
+        "可见内容不得超出输入区：{visible}（{} 栏）",
         display_width(&visible)
     );
     assert_eq!(visible, "文中文");
     assert_eq!(
         usize::from(column),
         display_width(&visible),
-        "游標應緊接在可見內容之後"
+        "光标应紧接在可见内容之后"
     );
 
     // 游標在開頭時可放滿四欄全形字。
@@ -160,7 +160,7 @@ fn keeps_the_cursor_inside_a_narrow_field() {
     line.move_home();
     let (visible, column) = input_window(&line, 1);
     assert_eq!(visible, "中");
-    assert_eq!(column, 0, "游標在字素起點");
+    assert_eq!(column, 0, "光标在字素起点");
 
     // 游標在尾端時改顯示游標前的那一個字素。
     line.move_end();
@@ -172,10 +172,10 @@ fn keeps_the_cursor_inside_a_narrow_field() {
     line.move_home();
     line.move_right();
     let (visible, column) = input_window(&line, 5);
-    assert_eq!(column, 2, "游標前的全形字佔兩欄");
+    assert_eq!(column, 2, "光标前的全形字占两栏");
     assert!(
         display_width(&visible) <= 5,
-        "可見內容不得超出輸入區：{visible}"
+        "可见内容不得超出输入区：{visible}"
     );
     assert_eq!(visible, "中a文");
 }

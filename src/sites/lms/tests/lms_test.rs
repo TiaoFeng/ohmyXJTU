@@ -18,11 +18,11 @@ fn course_homework_url_uses_verified_route_without_hash() {
     assert_eq!(
         course_homework_url(" 4711 ").as_deref(),
         Some("https://lms.xjtu.edu.cn/course/4711/homework"),
-        "前後空白應先去除"
+        "前后空白应先去除"
     );
     // 帶 hash 的啟動網址會讓前端卡死，產出的網址一律不得含 '#'。
-    let url = course_homework_url("27465").expect("網址");
-    assert!(!url.contains('#'), "網址不得附帶 hash 片段：{url}");
+    let url = course_homework_url("27465").expect("网址");
+    assert!(!url.contains('#'), "网址不得附带 hash 片段：{url}");
 }
 
 #[test]
@@ -31,20 +31,20 @@ fn course_homework_url_rejects_unsafe_identifiers() {
         assert_eq!(
             course_homework_url(course_id),
             None,
-            "識別碼 {course_id:?} 不應被拼接進網址"
+            "识别码 {course_id:?} 不应被拼接进网址"
         );
     }
 }
 
 #[test]
 fn safe_identifier_accepts_only_url_safe_tokens() {
-    assert_eq!(safe_identifier(" 42 "), Some("42"), "前後空白應去除");
+    assert_eq!(safe_identifier(" 42 "), Some("42"), "前后空白应去除");
     assert_eq!(safe_identifier("abc-DEF_09"), Some("abc-DEF_09"));
     for value in ["", "   ", "1 2", "a/b", "a?b", "a#b", "中文", "a.b", "\n"] {
         assert_eq!(
             safe_identifier(value),
             None,
-            "應拒絕不安全識別碼：{value:?}"
+            "应拒绝不安全识别码：{value:?}"
         );
     }
 }
@@ -68,7 +68,7 @@ fn parses_courses_and_skips_incomplete_items() {
     let (courses, skipped): (Vec<LmsCourse>, usize) =
         crate::sites::parse_lenient(value, "查询我的课程").unwrap();
     assert_eq!(courses.len(), 1);
-    assert_eq!(skipped, 1, "缺少必要欄位的項目應被跳過");
+    assert_eq!(skipped, 1, "缺少必要字段的项目应被跳过");
     assert_eq!(courses[0].id, "4711");
     assert_eq!(courses[0].instructor_names(), "李老师");
     assert_eq!(courses[0].semester_label(), "2026-2027 秋季学期");
@@ -103,7 +103,7 @@ fn parses_activities_and_kinds() {
     assert_eq!(
         activities[0].end_time.as_deref(),
         Some("2026-09-30T15:59:00.000Z"),
-        "模型保留原始字串，換算只發生在解析與顯示層"
+        "模型保留原始字符串，换算只发生在解析与显示层"
     );
 }
 
@@ -224,7 +224,7 @@ fn ignores_top_level_description_field() {
 fn tolerates_non_object_activity_data() {
     for value in [
         json!({"id": 9001, "type": "homework", "data": ""}),
-        json!({"id": 9001, "type": "homework", "data": "<p>整份是字串</p>"}),
+        json!({"id": 9001, "type": "homework", "data": "<p>整份是字符串</p>"}),
         json!({"id": 9001, "type": "homework", "data": []}),
         json!({"id": 9001, "type": "homework", "data": 123}),
         json!({"id": 9001, "type": "homework", "data": true}),
@@ -401,7 +401,7 @@ fn post_login_rejects_maintenance_and_login_pages() {
     let context = PostLogin::new(client.as_ref(), AccessMode::Direct, None);
     let err = LmsSite
         .post_login(&context)
-        .expect_err("維護頁不得視為登入成功");
+        .expect_err("维护页不得视为登录成功");
     assert!(matches!(err, AppError::Http { status: 500 }), "{err:?}");
 
     // 被導回統一認證：同樣不是登入成功。
@@ -413,7 +413,7 @@ fn post_login_rejects_maintenance_and_login_pages() {
     let context = PostLogin::new(client.as_ref(), AccessMode::Direct, None);
     let err = LmsSite
         .post_login(&context)
-        .expect_err("登入頁不得視為登入成功");
+        .expect_err("登录页不得视为登录成功");
     assert!(matches!(err, AppError::SessionExpired), "{err:?}");
 
     // 正常首頁：應取得使用者識別碼。
@@ -423,7 +423,7 @@ fn post_login_rejects_maintenance_and_login_pages() {
         r#"<script>var globalData = {"user":{"id":7788},"dept":{}};</script>"#,
     )]));
     let context = PostLogin::new(client.as_ref(), AccessMode::Direct, None);
-    let login = LmsSite.post_login(&context).expect("正常首頁應可登入");
+    let login = LmsSite.post_login(&context).expect("正常首页应可登录");
     assert_eq!(login.user_id.as_deref(), Some("7788"));
 }
 

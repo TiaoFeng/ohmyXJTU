@@ -232,11 +232,11 @@ fn injected_failure_count_continues_across_drivers() {
             .unwrap(),
         LoginReply::Fail { .. }
     ));
-    assert_eq!(first.fail_count(), 3, "失敗後應遞增");
+    assert_eq!(first.fail_count(), 3, "失败后应递增");
     assert_eq!(
         login_posts(&client)[0].form_field("failN"),
         Some("2"),
-        "重建後應沿用保存的失敗次數"
+        "重建后应沿用保存的失败次数"
     );
 
     // 已達門檻：新驅動器注入後不再提交，直接要求驗證碼。
@@ -251,11 +251,11 @@ fn injected_failure_count_continues_across_drivers() {
     assert_eq!(
         login_posts(&client).len(),
         posts_before,
-        "已達門檻的驅動器不得再提交帳密"
+        "已达门槛的驱动器不得再提交账密"
     );
     assert!(
         !next.used_existing_session(),
-        "有提交帳密的流程不應被視為沿用既有登入態"
+        "有提交账密的流程不应被视为沿用既有登录态"
     );
 }
 
@@ -268,7 +268,7 @@ fn reports_login_that_reused_an_existing_session() {
 
     let mut driver = driver(&client);
     assert!(driver.is_already_authenticated());
-    assert!(!driver.used_existing_session(), "執行前不應判定");
+    assert!(!driver.used_existing_session(), "执行前不应判定");
 
     let reply = driver
         .start(&credentials(), AccountType::Undergraduate)
@@ -277,7 +277,7 @@ fn reports_login_that_reused_an_existing_session() {
     assert_eq!(reply, LoginReply::Success);
     assert!(
         driver.used_existing_session(),
-        "未提交帳密即成功必須被標記，否則換帳號會寫回未驗證的憑證"
+        "未提交账密即成功必须被标记，否则换账号会写回未验证的凭证"
     );
     assert!(login_posts(&client).is_empty());
 }
@@ -425,7 +425,7 @@ fn verify_mfa_code_accepts_success_codes_and_rejects_the_rest() {
         let mut driver = mfa_driver_with_valid_data(data.clone());
         driver
             .verify_mfa_code("123456")
-            .unwrap_or_else(|err| panic!("{data} 應視為通過：{err}"));
+            .unwrap_or_else(|err| panic!("{data} 应视为通过：{err}"));
     }
 
     // 失敗：其他整數與字串（非整數的失敗狀態先前會被誤判為成功）。
@@ -436,11 +436,11 @@ fn verify_mfa_code_accepts_success_codes_and_rejects_the_rest() {
     ] {
         let mut driver = mfa_driver_with_valid_data(data.clone());
         let Err(err) = driver.verify_mfa_code("123456") else {
-            panic!("{data} 應視為失敗");
+            panic!("{data} 应视为失败");
         };
         assert!(
             matches!(err, AppError::VerificationRetry(_)),
-            "{data} 應為可重試的驗證碼錯誤：{err}"
+            "{data} 应为可重试的验证码错误：{err}"
         );
     }
 }
@@ -522,7 +522,7 @@ fn completes_safety_verify_flow() {
     );
     assert!(
         !driver.used_existing_session(),
-        "提交帳密後才出現的二次認證不得標記為沿用既有會話"
+        "提交账密后才出现的二次认证不得标记为沿用既有会话"
     );
     assert_eq!(driver.send_mfa_code().unwrap(), "139****9999");
     driver.verify_mfa_code("654321").expect("核验验证码");
@@ -569,7 +569,7 @@ fn enters_the_safety_verify_flow_when_the_initial_page_is_safety_verify() {
             )),
             MFA_SEND_URL => Ok(ok_json(MFA_SEND_URL, serde_json::json!({ "code": 0 }))),
             // 抓公鑰或呼叫 `/cas/mfa/detect` 代表走了錯誤的帳密登入流程。
-            other => panic!("初始二次認證不得请求：{other}"),
+            other => panic!("初始二次认证不得请求：{other}"),
         }
     }));
 
@@ -579,11 +579,11 @@ fn enters_the_safety_verify_flow_when_the_initial_page_is_safety_verify() {
             .start(&credentials(), AccountType::Undergraduate)
             .unwrap(),
         LoginReply::NeedMfa,
-        "初始頁即二次認證時應直接進入安全驗證流程"
+        "初始页即二次认证时应直接进入安全验证流程"
     );
     assert!(
         driver.used_existing_session(),
-        "未提交帳密的二次認證流程必須標記為沿用既有會話"
+        "未提交账密的二次认证流程必须标记为沿用既有会话"
     );
     assert_eq!(driver.mfa_phone().unwrap(), "137****7777");
     assert_eq!(driver.send_mfa_code().unwrap(), "137****7777");
@@ -595,7 +595,7 @@ fn enters_the_safety_verify_flow_when_the_initial_page_is_safety_verify() {
         client.requests().iter().all(|request| {
             request.form_field("username").is_none() && request.form_field("password").is_none()
         }),
-        "初始二次認證流程不得提交帳密"
+        "初始二次认证流程不得提交账密"
     );
     let verify = client
         .requests()

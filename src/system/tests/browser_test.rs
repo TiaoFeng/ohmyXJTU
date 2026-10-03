@@ -26,7 +26,7 @@ fn builds_platform_commands_with_separate_arguments() {
         !args
             .iter()
             .any(|arg| arg.contains("cmd") || arg.contains("start https")),
-        "不得以 shell 字串拼接：{args:?}"
+        "不得以 shell 字符串拼接：{args:?}"
     );
 }
 
@@ -38,16 +38,16 @@ fn passes_urls_verbatim_on_every_platform() {
         let (_program, args) = command_for(os, url).expect("命令");
         assert!(
             args.iter().any(|arg| arg == url),
-            "{os} 應原樣傳遞網址：{args:?}"
+            "{os} 应原样传递网址：{args:?}"
         );
         assert!(
             !args.iter().any(|arg| arg.contains("%PATH%") && arg != url),
-            "{os} 不得改寫或逸出網址：{args:?}"
+            "{os} 不得改写或逸出网址：{args:?}"
         );
     }
     let (_, args) = command_for("windows", url).expect("命令");
-    assert_eq!(args[0], "url.dll,FileProtocolHandler", "參數必須分開傳遞");
-    assert_eq!(args.len(), 2, "Windows 只應有處理器與網址兩個參數");
+    assert_eq!(args[0], "url.dll,FileProtocolHandler", "参数必须分开传递");
+    assert_eq!(args.len(), 2, "Windows 只应有处理器与网址两个参数");
 }
 
 #[test]
@@ -61,7 +61,7 @@ fn rejects_non_http_urls() {
     ] {
         assert!(
             command_for("linux", url).is_err(),
-            "應拒絕非 http(s) 網址：{url}"
+            "应拒绝非 http(s) 网址：{url}"
         );
     }
     assert!(open_url("javascript:alert(1)").is_err());

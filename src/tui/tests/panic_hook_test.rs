@@ -15,5 +15,5 @@ fn panic_message_includes_location_without_payload() {
 fn panic_message_without_location_is_single_line() {
     let message = panic_hook_message(None);
     assert_eq!(message, "错误：程序发生内部错误，已退出。");
-    assert!(!message.contains('\n'), "訊息必須是單行");
+    assert!(!message.contains('\n'), "信息必须是单行");
 }

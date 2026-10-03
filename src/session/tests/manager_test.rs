@@ -149,7 +149,7 @@ fn reset_session_rebuilds_both_backends_and_clears_state() {
     let mut manager =
         SessionManager::with_client_factories(&config, direct_factory, webvpn_factory)
             .expect("建立会话管理器");
-    assert_eq!(built.load(Ordering::SeqCst), 2, "建立時兩個後端各建一次");
+    assert_eq!(built.load(Ordering::SeqCst), 2, "建立时两个后端各建一次");
 
     manager.register(Box::new(TestLmsSite));
     manager.mark_logged_in(SiteKind::Lms, AccessMode::Direct, Vec::new());
@@ -160,11 +160,11 @@ fn reset_session_rebuilds_both_backends_and_clears_state() {
     assert_eq!(
         built.load(Ordering::SeqCst),
         4,
-        "重建時兩個後端都必須換成新實例（新的 cookie jar）"
+        "重建时两个后端都必须换成新实例（新的 cookie jar）"
     );
     assert!(
         !manager.is_logged_in(SiteKind::Lms),
-        "重建後不得殘留舊的站點登入態"
+        "重建后不得残留旧的站点登录态"
     );
     assert!(manager.access_mode(SiteKind::Lms).is_none());
     assert!(manager.resolved_access_mode(SiteKind::Lms).is_none());
@@ -175,7 +175,7 @@ fn reset_session_rebuilds_both_backends_and_clears_state() {
         .expect("取得登录步骤");
     assert!(
         matches!(stage, LoginStage::Drive(_)),
-        "重建後應重新驅動登入流程"
+        "重建后应重新驱动登录流程"
     );
 }
 
@@ -235,14 +235,14 @@ fn webvpn_policy_logs_into_backend_before_site() {
     let (mut manager, _, webvpn) = manager_with(AccessPolicy::WebVpn, |_| ok_response());
 
     let LoginStage::Drive(driver) = manager.next_login_step(SiteKind::Attendance).unwrap() else {
-        panic!("尚未登入时应有下一步");
+        panic!("尚未登录时应有下一步");
     };
     let requests = webvpn.requests();
     assert!(
         requests
             .iter()
             .any(|request| request.url.starts_with("https://webvpn.xjtu.edu.cn/login")),
-        "第一步應先登入 WebVPN 後端，实际请求：{:?}",
+        "第一步应先登录 WebVPN 后端，实际请求：{:?}",
         requests
             .iter()
             .map(|request| &request.url)
@@ -252,7 +252,7 @@ fn webvpn_policy_logs_into_backend_before_site() {
     // 完成 WebVPN 後端登入後，下一步是站點登入，且網址已改寫。
     let next = manager
         .complete_login_step(SiteKind::Attendance, &driver)
-        .expect("完成后端登入");
+        .expect("完成后端登录");
     assert!(matches!(next, LoginStage::Drive(_)));
     assert!(
         webvpn
@@ -321,7 +321,137 @@ fn send_reports_expired_session_when_login_page_is_returned() {
         )
         .unwrap_err();
     assert!(matches!(err, AppError::SessionExpired), "实际错误：{err}");
-    assert!(!manager.is_logged_in(SiteKind::Lms), "失效後应重置登入态");
+    assert!(!manager.is_logged_in(SiteKind::Lms), "失效后应重置登录态");
+}
+
+#[test]
+fn send_batch_keeps_order_and_injects_site_headers() {
+    // 回應內容即請求網址：據此驗證「結果與輸入同序」。**送出的先後**在並行下
+    // 不保證（也不是契約），只檢查三筆都送出且都帶了站點頭標。
+    let (mut manager, direct, _) = manager_with(AccessPolicy::Direct, |request| {
+        Ok(HttpResponse::new(
+            200,
+            request.url.clone(),
+            request.url.clone(),
+        ))
+    });
+    manager.mark_logged_in(
+        SiteKind::Lms,
+        AccessMode::Direct,
+        vec![("X-Business-Token".to_owned(), "token-1".to_owned())],
+    );
+
+    let requests = ["/api/a", "/api/b", "/api/c"]
+        .iter()
+        .map(|path| HttpRequest::get(format!("https://lms.xjtu.edu.cn{path}")))
+        .collect();
+    let responses = manager
+        .send_batch(SiteKind::Lms, requests)
+        .expect("批次应成功");
+
+    assert_eq!(responses.len(), 3, "每笔请求都应有结果");
+    for (index, response) in responses.iter().enumerate() {
+        let response = response.as_ref().expect("每笔请求都应成功");
+        assert_eq!(
+            response.text(),
+            format!("https://lms.xjtu.edu.cn/api/{}", ["a", "b", "c"][index]),
+            "结果应与输入同序"
+        );
+    }
+
+    let sent = direct.requests();
+    assert_eq!(sent.len(), 3);
+    let mut urls: Vec<&str> = sent.iter().map(|request| request.url.as_str()).collect();
+    urls.sort_unstable();
+    assert_eq!(
+        urls,
+        [
+            "https://lms.xjtu.edu.cn/api/a",
+            "https://lms.xjtu.edu.cn/api/b",
+            "https://lms.xjtu.edu.cn/api/c",
+        ]
+    );
+    for request in &sent {
+        assert_eq!(
+            request.header_value("X-Business-Token"),
+            Some("token-1"),
+            "站点头标应逐笔注入"
+        );
+    }
+}
+
+#[test]
+fn send_batch_rewrites_urls_in_webvpn_mode() {
+    let (mut manager, _, webvpn) = manager_with(AccessPolicy::WebVpn, |_| ok_response());
+    manager.mark_logged_in(
+        SiteKind::Attendance,
+        AccessMode::WebVpn,
+        vec![("X-Business-Token".to_owned(), "token-1".to_owned())],
+    );
+
+    let requests = ["/sa/student/a", "/sa/student/b"]
+        .iter()
+        .map(|path| HttpRequest::get(format!("https://bk-kq.xjtu.edu.cn{path}")))
+        .collect();
+    manager
+        .send_batch(SiteKind::Attendance, requests)
+        .expect("批次应成功");
+
+    let sent = webvpn.requests();
+    assert_eq!(sent.len(), 2);
+    let mut urls: Vec<&str> = sent.iter().map(|request| request.url.as_str()).collect();
+    urls.sort_unstable();
+    for (index, url) in urls.iter().enumerate() {
+        assert!(
+            url.starts_with("https://webvpn.xjtu.edu.cn/https/"),
+            "应改写为 WebVPN 网址：{url}"
+        );
+        assert!(
+            url.ends_with(&format!("/sa/student/{}", ["a", "b"][index])),
+            "改写后仍应指向原路径：{url}"
+        );
+    }
+    for request in &sent {
+        assert_eq!(request.header_value("X-Business-Token"), Some("token-1"));
+    }
+}
+
+#[test]
+fn send_batch_reports_expired_session_when_any_response_is_a_login_page() {
+    let (mut manager, _, _) = manager_with(AccessPolicy::Direct, |request| {
+        // 第二筆回傳統一認證登入頁：整批都應視為登入態失效。
+        if request.url.ends_with("/api/b") {
+            return Ok(HttpResponse::new(
+                200,
+                "https://login.xjtu.edu.cn/cas/login?service=lms",
+                LOGIN_PAGE.as_bytes(),
+            ));
+        }
+        ok_response()
+    });
+    manager.mark_logged_in(SiteKind::Lms, AccessMode::Direct, Vec::new());
+
+    let requests = ["/api/a", "/api/b", "/api/c"]
+        .iter()
+        .map(|path| HttpRequest::get(format!("https://lms.xjtu.edu.cn{path}")))
+        .collect();
+    let err = manager
+        .send_batch(SiteKind::Lms, requests)
+        .expect_err("任一请求失效时整批应作废");
+    assert!(matches!(err, AppError::SessionExpired), "实际错误：{err}");
+    assert!(!manager.is_logged_in(SiteKind::Lms), "失效后应重置登录态");
+}
+
+#[test]
+fn send_batch_without_login_reports_expired_session() {
+    let (mut manager, _, _) = manager_with(AccessPolicy::Direct, |_| ok_response());
+    let err = manager
+        .send_batch(
+            SiteKind::Lms,
+            vec![HttpRequest::get("https://lms.xjtu.edu.cn/api/a")],
+        )
+        .expect_err("未登录时不应送出请求");
+    assert!(matches!(err, AppError::SessionExpired), "实际错误：{err}");
 }
 
 #[test]
@@ -376,7 +506,7 @@ fn fallback_to_webvpn_switches_once_under_auto() {
     assert_eq!(
         manager.resolve_access_mode(SiteKind::Attendance).unwrap(),
         AccessMode::Direct,
-        "校內探測成功時先走直連"
+        "校内探测成功时先走直连"
     );
     manager.mark_logged_in(SiteKind::Attendance, AccessMode::Direct, Vec::new());
 
@@ -386,12 +516,12 @@ fn fallback_to_webvpn_switches_once_under_auto() {
     );
     assert!(
         manager.access_mode(SiteKind::Attendance).is_none(),
-        "回退後旧的直连登入态必须失效，重新登入"
+        "回退后旧的直连登录态必须失效，重新登录"
     );
     assert_eq!(
         manager.resolve_access_mode(SiteKind::Attendance).unwrap(),
         AccessMode::WebVpn,
-        "回退後该站应解析为 WebVPN"
+        "回退后该站应解析为 WebVPN"
     );
     assert!(
         !manager.fallback_to_webvpn(SiteKind::Attendance),
@@ -441,7 +571,7 @@ fn send_wraps_network_errors_with_site_and_mode() {
         .unwrap_err();
 
     let text = err.to_string();
-    assert!(text.contains("考勤系统"), "訊息：{text}");
-    assert!(text.contains("直连"), "訊息：{text}");
-    assert!(text.contains("connection refused"), "訊息：{text}");
+    assert!(text.contains("考勤系统"), "信息：{text}");
+    assert!(text.contains("直连"), "信息：{text}");
+    assert!(text.contains("connection refused"), "信息：{text}");
 }

@@ -202,6 +202,8 @@ impl Worker {
         activity_id: &str,
     ) -> AppResult<ActivityDetailView> {
         let activity = self.lms_activity_detail(activity_id, false)?;
+        // 正文先轉純文字：`activity_from` 會取走活動，且轉換只需做一次。
+        let description = activity.body();
         let session = self.session_mut()?;
         let mut api = LmsApi::new(session);
         let detail = api.activity_from(activity)?;
@@ -211,6 +213,7 @@ impl Worker {
             id: detail.activity.id.clone(),
             title: detail.activity.display_title(),
             kind,
+            description,
             end_time: detail.activity.end_time,
             submit_by_group: detail.activity.submit_by_group,
             submissions: detail.submissions.map(|list| list.list),

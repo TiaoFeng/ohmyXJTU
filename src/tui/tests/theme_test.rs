@@ -9,9 +9,9 @@ use crate::tone::Tone;
 fn flow_states_have_distinct_colors() {
     let effective = THEME.status_style(Tone::Success).fg;
     let unmatched = THEME.status_style(Tone::Warning).fg;
-    assert_eq!(effective, Some(THEME.green), "有效應為成功綠");
-    assert_eq!(unmatched, Some(THEME.yellow), "未匹配應為警告黃");
-    assert_ne!(effective, unmatched, "兩種流水狀態不得同色");
+    assert_eq!(effective, Some(THEME.green), "有效应为成功绿");
+    assert_eq!(unmatched, Some(THEME.yellow), "未匹配应为警告黄");
+    assert_ne!(effective, unmatched, "两种流水状态不得同色");
 }
 
 #[test]

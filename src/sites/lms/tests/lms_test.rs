@@ -4,6 +4,11 @@ use serde_json::json;
 
 use super::*;
 
+/// 只取正文純文字（多數斷言不關心是否含圖片）。
+fn body_text(activity: &LmsActivity) -> Option<String> {
+    activity.body().and_then(|body| body.text)
+}
+
 #[test]
 fn course_homework_url_uses_verified_route_without_hash() {
     assert_eq!(
@@ -13,11 +18,11 @@ fn course_homework_url_uses_verified_route_without_hash() {
     assert_eq!(
         course_homework_url(" 4711 ").as_deref(),
         Some("https://lms.xjtu.edu.cn/course/4711/homework"),
-        "前後空白應先去除"
+        "前后空白应先去除"
     );
     // 帶 hash 的啟動網址會讓前端卡死，產出的網址一律不得含 '#'。
-    let url = course_homework_url("27465").expect("網址");
-    assert!(!url.contains('#'), "網址不得附帶 hash 片段：{url}");
+    let url = course_homework_url("27465").expect("网址");
+    assert!(!url.contains('#'), "网址不得附带 hash 片段：{url}");
 }
 
 #[test]
@@ -26,20 +31,20 @@ fn course_homework_url_rejects_unsafe_identifiers() {
         assert_eq!(
             course_homework_url(course_id),
             None,
-            "識別碼 {course_id:?} 不應被拼接進網址"
+            "识别码 {course_id:?} 不应被拼接进网址"
         );
     }
 }
 
 #[test]
 fn safe_identifier_accepts_only_url_safe_tokens() {
-    assert_eq!(safe_identifier(" 42 "), Some("42"), "前後空白應去除");
+    assert_eq!(safe_identifier(" 42 "), Some("42"), "前后空白应去除");
     assert_eq!(safe_identifier("abc-DEF_09"), Some("abc-DEF_09"));
     for value in ["", "   ", "1 2", "a/b", "a?b", "a#b", "中文", "a.b", "\n"] {
         assert_eq!(
             safe_identifier(value),
             None,
-            "應拒絕不安全識別碼：{value:?}"
+            "应拒绝不安全识别码：{value:?}"
         );
     }
 }
@@ -63,7 +68,7 @@ fn parses_courses_and_skips_incomplete_items() {
     let (courses, skipped): (Vec<LmsCourse>, usize) =
         crate::sites::parse_lenient(value, "查询我的课程").unwrap();
     assert_eq!(courses.len(), 1);
-    assert_eq!(skipped, 1, "缺少必要欄位的項目應被跳過");
+    assert_eq!(skipped, 1, "缺少必要字段的项目应被跳过");
     assert_eq!(courses[0].id, "4711");
     assert_eq!(courses[0].instructor_names(), "李老师");
     assert_eq!(courses[0].semester_label(), "2026-2027 秋季学期");
@@ -98,7 +103,7 @@ fn parses_activities_and_kinds() {
     assert_eq!(
         activities[0].end_time.as_deref(),
         Some("2026-09-30T15:59:00.000Z"),
-        "模型保留原始字串，換算只發生在解析與顯示層"
+        "模型保留原始字符串，换算只发生在解析与显示层"
     );
 }
 
@@ -139,6 +144,208 @@ fn parses_submission_lists() {
         Some("2026-09-20T10:00:00+08:00")
     );
     assert_eq!(submissions.list[1].timestamp(), Some("2026-09-21 09:30:00"));
+}
+
+/// 活動正文（作業說明）來自詳情回應的嵌套 `data`；列表端不含此區塊。
+#[test]
+fn parses_activity_body_from_nested_data() {
+    // 形態對齊參考實作：作業說明在 data.description（HTML）。
+    let value = json!({
+        "id": 9001,
+        "type": "homework",
+        "title": "第 3 次作业",
+        "submit_by_group": false,
+        "data": {"description": "<p>第一章习题</p><p>交到邮箱</p>", "content": ""}
+    });
+    let activity: LmsActivity = crate::sites::deserialize_value(value, "查询活动详情").unwrap();
+    assert_eq!(
+        body_text(&activity).as_deref(),
+        Some("第一章习题\n交到邮箱"),
+        "说明应去除 HTML 标签"
+    );
+
+    // 頁面型活動：description 為空白時改用 content。
+    let value = json!({
+        "id": 9002,
+        "type": "material",
+        "title": "课程简介",
+        "data": {"description": "   ", "content": "<div>课程介绍</div>"}
+    });
+    let activity: LmsActivity = crate::sites::deserialize_value(value, "查询活动详情").unwrap();
+    assert_eq!(body_text(&activity).as_deref(), Some("课程介绍"));
+
+    // 沒有 data（或沒有可見文字）時不得產生說明。
+    for value in [
+        json!({"id": 1, "type": "homework"}),
+        json!({"id": 1, "type": "homework", "data": {}}),
+        json!({"id": 1, "type": "homework", "data": {"description": ""}}),
+        json!({"id": 1, "type": "homework", "data": {"description": "<p></p>"}}),
+    ] {
+        let activity: LmsActivity = crate::sites::deserialize_value(value.clone(), "查询活动详情")
+            .unwrap_or_else(|err| panic!("{value}: {err}"));
+        assert_eq!(body_text(&activity), None, "{value}");
+    }
+}
+
+/// 正文只在 `data` 子物件內；頂層同名欄位不得被當成正文。
+///
+/// 但頂層真有內容時必須看得見：那代表本版讀錯了欄位，介面要提示而不是靜默地
+/// 看起來「這項活動沒有說明」（見 [`TOP_LEVEL_BODY_NOTE`]）。
+#[test]
+fn ignores_top_level_description_field() {
+    let value = json!({
+        "id": 9001,
+        "type": "homework",
+        "description": "<p>顶层字段</p>",
+    });
+    let activity: LmsActivity = crate::sites::deserialize_value(value, "查询活动详情").unwrap();
+    assert_eq!(body_text(&activity), None);
+    assert_eq!(
+        activity.body().and_then(|body| body.issue),
+        Some(TOP_LEVEL_BODY_NOTE)
+    );
+    // 空白的頂層欄位不算內容，不提示。
+    for value in [
+        json!({"id": 9001, "type": "homework"}),
+        json!({"id": 9001, "type": "homework", "description": "   "}),
+        json!({"id": 9001, "type": "homework", "description": null}),
+    ] {
+        let activity: LmsActivity = crate::sites::deserialize_value(value.clone(), "查询活动详情")
+            .unwrap_or_else(|err| panic!("{value}: {err}"));
+        assert!(activity.body().is_none(), "{value}");
+    }
+}
+
+/// `data` 不是物件時只視為「沒有正文」，不得讓整份活動解析失敗；但必須提示原因。
+///
+/// 詳情解析失敗會使該課程的作業全部退回「待核实」，代價遠大於少一段說明；
+/// 反過來，靜默地看起來「這項活動沒有說明」也讓人無法判斷欄位假設是否正確。
+#[test]
+fn tolerates_non_object_activity_data() {
+    for value in [
+        json!({"id": 9001, "type": "homework", "data": ""}),
+        json!({"id": 9001, "type": "homework", "data": "<p>整份是字符串</p>"}),
+        json!({"id": 9001, "type": "homework", "data": []}),
+        json!({"id": 9001, "type": "homework", "data": 123}),
+        json!({"id": 9001, "type": "homework", "data": true}),
+    ] {
+        let activity: LmsActivity = crate::sites::deserialize_value(value.clone(), "查询活动详情")
+            .unwrap_or_else(|err| panic!("{value}: {err}"));
+        assert_eq!(body_text(&activity), None, "{value}");
+        assert_eq!(
+            activity.body().and_then(|body| body.issue),
+            Some(BODY_NOT_OBJECT_NOTE),
+            "{value}"
+        );
+    }
+
+    // `null` 是明確的「沒有這段內容」，不算型別異常。
+    let value = json!({"id": 9001, "type": "homework", "data": null});
+    let activity: LmsActivity = crate::sites::deserialize_value(value, "查询活动详情").unwrap();
+    assert!(activity.body().is_none());
+}
+
+/// 正文子物件「內部」欄位型別異常時只忽略該欄位，不得讓整份活動解析失敗。
+///
+/// 詳情解析失敗會使該課程的作業全部退回「待核实」（提交狀態也一起失去），代價
+/// 遠大於少一段說明。
+#[test]
+fn tolerates_non_string_activity_body_fields() {
+    for value in [
+        json!({"id": 9001, "type": "homework", "data": {"description": 123}}),
+        json!({"id": 9001, "type": "homework", "data": {"description": {"a": 1}}}),
+        json!({"id": 9001, "type": "homework", "data": {"description": ["x"]}}),
+        json!({"id": 9001, "type": "homework", "data": {"description": null}}),
+        json!({"id": 9001, "type": "homework", "data": {"content": 42}}),
+    ] {
+        let activity: LmsActivity = crate::sites::deserialize_value(value.clone(), "查询活动详情")
+            .unwrap_or_else(|err| panic!("{value}: {err}"));
+        assert_eq!(body_text(&activity), None, "{value}");
+    }
+
+    // 一個欄位型別異常不得影響另一個正常欄位（頁面型活動的正文在 content）。
+    let value = json!({
+        "id": 9002,
+        "type": "material",
+        "data": {"description": 999, "content": "<div>课程介绍</div>"}
+    });
+    let activity: LmsActivity = crate::sites::deserialize_value(value, "查询活动详情").unwrap();
+    assert_eq!(body_text(&activity).as_deref(), Some("课程介绍"));
+    // 正文已由 `content` 取得，不因另一個欄位型別異常而提示。
+    assert_eq!(activity.body().and_then(|body| body.issue), None);
+}
+
+/// `data` 是物件、但正文欄位型別不符時提示原因（內容被丟棄，不能靜默）。
+#[test]
+fn reports_unreadable_body_field_types() {
+    for value in [
+        json!({"id": 9001, "type": "homework", "data": {"description": 123}}),
+        json!({"id": 9001, "type": "homework", "data": {"description": {"a": 1}}}),
+        json!({"id": 9001, "type": "homework", "data": {"description": ["x"]}}),
+        json!({"id": 9001, "type": "homework", "data": {"content": 42}}),
+    ] {
+        let activity: LmsActivity = crate::sites::deserialize_value(value.clone(), "查询活动详情")
+            .unwrap_or_else(|err| panic!("{value}: {err}"));
+        assert_eq!(body_text(&activity), None, "{value}");
+        assert_eq!(
+            activity.body().and_then(|body| body.issue),
+            Some(BODY_FIELD_TYPE_NOTE),
+            "{value}"
+        );
+    }
+
+    // 明確的空值（`null`）與空字串是「沒有這段內容」，不是型別異常。
+    for value in [
+        json!({"id": 9001, "type": "homework", "data": {"description": null}}),
+        json!({"id": 9001, "type": "homework", "data": {"description": ""}}),
+        json!({"id": 9001, "type": "homework", "data": {}}),
+    ] {
+        let activity: LmsActivity = crate::sites::deserialize_value(value.clone(), "查询活动详情")
+            .unwrap_or_else(|err| panic!("{value}: {err}"));
+        assert!(activity.body().is_none(), "{value}");
+    }
+
+    // 附件仍要照常列出，但正文被丟棄的原因不得因為「有東西可顯示」而省略。
+    let value = json!({
+        "id": 9001, "type": "homework",
+        "data": {"description": 7},
+        "uploads": [{"id": 1, "name": "题目.pdf", "size": 2048}]
+    });
+    let activity: LmsActivity = crate::sites::deserialize_value(value, "查询活动详情").unwrap();
+    let body = activity.body().expect("有附件时仍应显示说明区块");
+    assert_eq!(body.attachments.len(), 1, "附件应照常列出");
+    assert_eq!(body.issue, Some(BODY_FIELD_TYPE_NOTE));
+}
+
+/// 正常取得正文（或確實沒有正文）時不帶任何原因。
+#[test]
+fn normal_body_has_no_issue() {
+    let value = json!({
+        "id": 9001,
+        "type": "homework",
+        "data": {"description": "<p>第一章习题</p>"},
+        "uploads": [{"id": 1, "name": "题目.pdf", "size": 2048}]
+    });
+    let activity: LmsActivity = crate::sites::deserialize_value(value, "查询活动详情").unwrap();
+    let body = activity.body().expect("应取得正文");
+    assert_eq!(body.text.as_deref(), Some("第一章习题"));
+    assert_eq!(body.attachments.len(), 1, "附件仍应带出");
+    assert_eq!(body.issue, None);
+}
+
+/// 整份說明只有一張圖片：不得當成「沒有說明」，要讓介面能標註。
+#[test]
+fn reports_media_only_body() {
+    let value = json!({
+        "id": 9003,
+        "type": "homework",
+        "title": "图片作业",
+        "data": {"description": "<p><img src=\"/a.png\"></p>"}
+    });
+    let activity: LmsActivity = crate::sites::deserialize_value(value, "查询活动详情").unwrap();
+    let body = activity.body().expect("纯图片说明仍应有正文");
+    assert_eq!(body.text, None, "图片没有可见文字");
+    assert!(body.has_media, "应标记含图片");
 }
 
 #[test]
@@ -194,7 +401,7 @@ fn post_login_rejects_maintenance_and_login_pages() {
     let context = PostLogin::new(client.as_ref(), AccessMode::Direct, None);
     let err = LmsSite
         .post_login(&context)
-        .expect_err("維護頁不得視為登入成功");
+        .expect_err("维护页不得视为登录成功");
     assert!(matches!(err, AppError::Http { status: 500 }), "{err:?}");
 
     // 被導回統一認證：同樣不是登入成功。
@@ -206,7 +413,7 @@ fn post_login_rejects_maintenance_and_login_pages() {
     let context = PostLogin::new(client.as_ref(), AccessMode::Direct, None);
     let err = LmsSite
         .post_login(&context)
-        .expect_err("登入頁不得視為登入成功");
+        .expect_err("登录页不得视为登录成功");
     assert!(matches!(err, AppError::SessionExpired), "{err:?}");
 
     // 正常首頁：應取得使用者識別碼。
@@ -216,7 +423,7 @@ fn post_login_rejects_maintenance_and_login_pages() {
         r#"<script>var globalData = {"user":{"id":7788},"dept":{}};</script>"#,
     )]));
     let context = PostLogin::new(client.as_ref(), AccessMode::Direct, None);
-    let login = LmsSite.post_login(&context).expect("正常首頁應可登入");
+    let login = LmsSite.post_login(&context).expect("正常首页应可登录");
     assert_eq!(login.user_id.as_deref(), Some("7788"));
 }
 
@@ -272,4 +479,76 @@ fn course_activities_rejects_unsafe_identifiers_without_requests() {
             .expect_err("非法识别码应被拒绝");
         assert!(matches!(err, AppError::Protocol(_)), "{err:?}");
     }
+}
+
+/// 附件在詳情回應的**頂層** `uploads`（不在 `data` 底下）；只保留名稱與大小。
+#[test]
+fn parses_activity_uploads_from_the_detail_top_level() {
+    let value = json!({
+        "id": 9001,
+        "type": "homework",
+        "title": "第 3 次作业",
+        "data": { "description": "", "content": "" },
+        "uploads": [
+            {"id": 1, "name": "题目.pdf", "type": "application/pdf", "size": 1234567},
+            {"id": 2, "name": "参考答案.docx", "size": "24576"},
+            {"id": 3, "name": "   ", "size": null},
+            {"id": 4}
+        ]
+    });
+    let activity: LmsActivity =
+        crate::sites::deserialize_value(value, "查询活动详情").expect("应可解析");
+    assert_eq!(activity.uploads.len(), 4);
+    assert_eq!(activity.uploads[0].display_name(), "题目.pdf");
+    assert_eq!(activity.uploads[0].size_label().as_deref(), Some("1.2 MB"));
+    assert_eq!(activity.uploads[1].display_name(), "参考答案.docx");
+    assert_eq!(activity.uploads[1].size_label().as_deref(), Some("24 KB"));
+    // 沒有名稱或大小的附件仍留在清單裡，不會因為欄位缺漏就消失。
+    assert_eq!(activity.uploads[2].display_name(), "未命名附件");
+    assert_eq!(activity.uploads[2].size_label(), None);
+    assert_eq!(activity.uploads[3].display_name(), "未命名附件");
+
+    // 正文為空、只有附件時仍算「有可顯示的內容」，介面才不會整段藏起來。
+    let content = activity.body().expect("只有附件也是可显示的内容");
+    assert_eq!(content.text, None);
+    assert_eq!(content.attachments.len(), 4);
+}
+
+/// 附件欄位缺漏或型別異常都不影響其他欄位（詳情失敗會讓整批作業退回「待核实」）。
+#[test]
+fn tolerates_missing_or_malformed_uploads() {
+    for value in [
+        json!({"id": 1, "type": "homework"}),
+        json!({"id": 1, "type": "homework", "uploads": null}),
+        json!({"id": 1, "type": "homework", "uploads": {}}),
+        json!({"id": 1, "type": "homework", "uploads": "题目.pdf"}),
+    ] {
+        let activity: LmsActivity = crate::sites::deserialize_value(value.clone(), "查询活动详情")
+            .unwrap_or_else(|err| panic!("{value}: {err}"));
+        assert!(activity.uploads.is_empty(), "{value}");
+    }
+
+    // 個別項目異常時跳過該項，其餘照常解析。
+    let value = json!({
+        "id": 1,
+        "type": "homework",
+        "uploads": [{"name": "题目.pdf", "size": 1024}, 7, null]
+    });
+    let activity: LmsActivity =
+        crate::sites::deserialize_value(value, "查询活动详情").expect("应可解析");
+    assert_eq!(activity.uploads.len(), 1);
+    assert_eq!(activity.uploads[0].size_label().as_deref(), Some("1 KB"));
+}
+
+/// 大小顯示沿用參考實作的進位門檻（B／KB／MB）。
+#[test]
+fn upload_size_labels_follow_the_reference_thresholds() {
+    let label = |size: Option<u64>| LmsUpload { name: None, size }.size_label();
+    assert_eq!(label(Some(0)).as_deref(), Some("0 B"));
+    assert_eq!(label(Some(1023)).as_deref(), Some("1023 B"));
+    assert_eq!(label(Some(1024)).as_deref(), Some("1 KB"));
+    assert_eq!(label(Some(1024 * 1024 - 1)).as_deref(), Some("1023 KB"));
+    assert_eq!(label(Some(1024 * 1024)).as_deref(), Some("1.0 MB"));
+    assert_eq!(label(Some(5 * 1024 * 1024)).as_deref(), Some("5.0 MB"));
+    assert_eq!(label(None), None);
 }

@@ -12,7 +12,7 @@ fn blocks(lines: Vec<DocLine>) -> Vec<Block> {
 fn line_text(block: &Block) -> &str {
     match block {
         Block::Line(line) => &line.text,
-        Block::Table(_) => panic!("預期為文字列：{block:?}"),
+        Block::Table(_) => panic!("预期为文字列：{block:?}"),
     }
 }
 
@@ -20,7 +20,7 @@ fn line_text(block: &Block) -> &str {
 fn line(block: &Block) -> &DocLine {
     match block {
         Block::Line(line) => line,
-        Block::Table(_) => panic!("預期為文字列：{block:?}"),
+        Block::Table(_) => panic!("预期为文字列：{block:?}"),
     }
 }
 
@@ -54,7 +54,7 @@ fn parse_recognizes_headings_lists_quotes_and_rules() {
 
 #[test]
 fn parse_collects_consecutive_rows_into_a_table_block() {
-    let md = "| 平台 | 目录 |\n| --- | :---: |\n| Linux | `~/.data/` |\n\n後續段落\n";
+    let md = "| 平台 | 目录 |\n| --- | :---: |\n| Linux | `~/.data/` |\n\n后续段落\n";
     let blocks = privacy::parse(md);
     let table = match &blocks[0] {
         Block::Table(table) => table,
@@ -65,7 +65,7 @@ fn parse_collects_consecutive_rows_into_a_table_block() {
     // 對齊列被消耗（不再是全寬分隔線），其餘列仍是一般文字。
     assert_eq!(blocks.len(), 3);
     assert_eq!(line(&blocks[1]).kind, LineKind::Body);
-    assert_eq!(line_text(&blocks[2]), "後續段落");
+    assert_eq!(line_text(&blocks[2]), "后续段落");
 }
 
 #[test]
@@ -126,13 +126,13 @@ fn wrap_never_splits_ascii_runs_at_line_boundaries() {
 fn wrap_fills_short_leading_word_with_following_cjk() {
     // 短 ASCII 詞後面接長中文串時，不可提早斷行浪費整行。
     let lines = vec![DocLine::new(
-        "《ohmyXJTU 用户协议同意與否之详细说明文字",
+        "《ohmyXJTU 用户协议同意与否之详细说明文字",
         LineKind::Body,
     )];
     let wrapped = privacy::wrap(&blocks(lines), 20);
     assert!(
         display_width(&wrapped[0].text) >= 16,
-        "首行應盡量填滿：{:?}",
+        "首行应尽量填满：{:?}",
         wrapped[0].text
     );
     assert!(wrapped[0].text.contains("用户协议"));
@@ -197,12 +197,12 @@ fn embedded_text_has_expected_shape() {
         .iter()
         .filter(|block| matches!(block, Block::Line(line) if line.kind == LineKind::Heading))
         .count();
-    assert_eq!(headings, 13, "应保留全部章節標題");
+    assert_eq!(headings, 13, "应保留全部章节标题");
     let tables = blocks
         .iter()
         .filter(|block| matches!(block, Block::Table(_)))
         .count();
-    assert_eq!(tables, 4, "四張表格都應收成表格區塊");
+    assert_eq!(tables, 4, "四张表格都应收成表格区块");
     assert_eq!(
         privacy::document(),
         privacy::parse(privacy::TEXT).as_slice()
@@ -215,7 +215,7 @@ fn wrap_keeps_every_line_within_the_width() {
         for line in privacy::wrap(privacy::document(), width) {
             assert!(
                 display_width(&line.text) <= width,
-                "{width} 欄時超寬：{:?}",
+                "{width} 栏时超宽：{:?}",
                 line.text
             );
         }
@@ -245,7 +245,7 @@ fn wrap_keeps_table_content_at_narrow_widths() {
             .chars()
             .filter(|character| !character.is_whitespace())
             .collect();
-        assert!(compact.contains(&needle), "{cell} 在排版後不應消失");
+        assert!(compact.contains(&needle), "{cell} 在排版后不应消失");
     }
 }
 
@@ -255,7 +255,7 @@ fn wrapped_table_fields_carry_their_label_columns() {
     let field = lines
         .iter()
         .find(|line| line.kind == LineKind::TableField && line.text.contains("会上传的内容"))
-        .expect("§5.1 的卡片欄位");
-    assert_eq!(field.label_len, 16, "縮排 2 ＋ 標籤 12 ＋ 分隔 2");
+        .expect("§5.1 的卡片字段");
+    assert_eq!(field.label_len, 16, "缩进 2 ＋ 标签 12 ＋ 分隔 2");
     assert!(field.text.starts_with("  会上传的内容："));
 }

@@ -3,6 +3,7 @@
 //! 業務程式碼只依賴 [`HttpClient`]：正式執行時注入 [`ReqwestClient`]，
 //! 單元測試時注入回放固定回應的假客戶端，因此所有站點邏輯都能離線驗證。
 
+pub mod batch;
 pub mod reqwest_client;
 
 #[cfg(test)]

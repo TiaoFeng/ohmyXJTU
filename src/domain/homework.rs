@@ -13,6 +13,7 @@
 
 use chrono::{DateTime, FixedOffset, NaiveDateTime, TimeZone as _};
 
+use crate::sites::lms::ActivityContent;
 use crate::tone::Tone;
 
 /// 校園時區（中國標準時間，UTC+8）相對 UTC 的偏移秒數。
@@ -127,6 +128,8 @@ pub struct HomeworkInput {
     pub title: String,
     /// 截止時間（原始字串）。
     pub end_time: Option<String>,
+    /// 作業說明與附件（正文＋附件）；`None` 代表沒有可顯示的內容。
+    pub description: Option<ActivityContent>,
     /// 是否以小組為單位提交；`None` 代表無法確認（詳情缺少該欄位）。
     pub submit_by_group: Option<bool>,
     /// 提交記錄數；`None` 代表無法確認。
@@ -148,6 +151,8 @@ pub struct HomeworkItem {
     pub title: String,
     /// 截止時間（原始字串）。
     pub end_time: Option<String>,
+    /// 作業說明與附件（正文＋附件）；`None` 代表沒有可顯示的內容。
+    pub description: Option<ActivityContent>,
     /// 是否以小組為單位提交；`None` 代表無法確認（詳情缺少該欄位）。
     pub submit_by_group: Option<bool>,
     /// 判定狀態。
@@ -189,6 +194,7 @@ pub fn aggregate(items: &[HomeworkInput], now: DateTime<FixedOffset>) -> Vec<Hom
             activity_id: input.activity_id.clone(),
             title: input.title.clone(),
             end_time: input.end_time.clone(),
+            description: input.description.clone(),
             submit_by_group: input.submit_by_group,
             state: judge(input.submission_count, input.end_time.as_deref(), now),
             note: input.note.clone(),

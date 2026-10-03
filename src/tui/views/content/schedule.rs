@@ -17,7 +17,10 @@ use super::columns::{
     SECTIONS_WIDTH, ScheduleColumns, ScheduleNeeds, WEEKDAY_WIDTH, schedule_columns,
     schedule_min_row_width,
 };
-use super::{detail_panel, empty, empty_note, row_width, split_detail, title_suffix, too_narrow};
+use super::{
+    DETAIL_HEIGHT, detail_panel, empty, empty_note, row_width, split_detail, title_suffix,
+    too_narrow,
+};
 
 /// 依目前資料繪製課表頁。
 pub(super) fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
@@ -76,7 +79,7 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
         return;
     }
 
-    let (list_area, detail_area) = split_detail(body_area, app.schedule_detail);
+    let (list_area, detail_area) = split_detail(body_area, app.schedule_detail, DETAIL_HEIGHT);
     let width = row_width(list_area);
     let (items, detail) = {
         let Some(data) = app.schedule.ready() else {

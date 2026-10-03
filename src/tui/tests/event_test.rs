@@ -46,7 +46,7 @@ fn captcha_event_resets_input_but_keeps_error() {
     );
     assert!(
         matches!(app.login.as_deref(), Some(LoginScreen::Captcha { .. })),
-        "應顯示驗證碼覆蓋層"
+        "应显示验证码覆盖层"
     );
     assert_eq!(
         app.captcha_path.as_deref(),
@@ -66,8 +66,8 @@ fn captcha_event_resets_input_but_keeps_error() {
 
     match app.login.as_deref() {
         Some(LoginScreen::Captcha { input, error, path }) => {
-            assert_eq!(error.as_deref(), Some("验证码错误"), "應保留上一次的錯誤");
-            assert!(input.is_empty(), "換圖後舊驗證碼應清空");
+            assert_eq!(error.as_deref(), Some("验证码错误"), "应保留上一次的错误");
+            assert!(input.is_empty(), "换图后旧验证码应清空");
             assert_eq!(path, &PathBuf::from("/tmp/captcha-2.png"));
         }
         other => panic!("应停留在验证码画面，实际为 {other:?}"),
@@ -120,7 +120,7 @@ fn login_success_returns_to_main_and_updates_site_mode() {
             mode: Some(AccessMode::Direct),
         },
     );
-    assert!(app.login.is_none(), "登入成功後應關閉覆蓋層");
+    assert!(app.login.is_none(), "登录成功后应关闭覆盖层");
     assert!(matches!(app.screen, Screen::Main));
     assert_eq!(app.message_text(), Some("登录成功"));
     // 目前頁面為課表（考勤站點）：底欄顯示實際訪問方式。
@@ -142,7 +142,7 @@ fn data_events_fill_pages() {
         })),
     );
     assert!(app.schedule.ready().is_some());
-    assert!(matches!(app.screen, Screen::Main), "收到資料後應回到主畫面");
+    assert!(matches!(app.screen, Screen::Main), "收到数据后应回到主画面");
 
     apply_event(
         &mut app,
@@ -173,7 +173,7 @@ fn data_events_fill_pages() {
     assert_eq!(
         app.lms.courses_term,
         Some(TermCode::parse("2026-2027-1").expect("学期")),
-        "課程事件應帶入當前學期提示"
+        "课程事件应带入当前学期提示"
     );
     assert!(app.message_text().is_some());
 }
@@ -188,6 +188,7 @@ fn homework_event_updates_groups_and_counts() {
             activity_id: "9".to_owned(),
             title: "第三次作业".to_owned(),
             end_time: None,
+            description: None,
             submit_by_group: Some(false),
             submission_count: Some(0),
             note: None,
@@ -246,14 +247,14 @@ fn data_failure_settles_page_and_stuck_login_progress() {
         },
     );
 
-    assert!(matches!(app.screen, Screen::Main), "底層畫面維持不變");
+    assert!(matches!(app.screen, Screen::Main), "底层画面维持不变");
     assert!(
         matches!(app.schedule, Page::Failed { .. }),
-        "目標頁面必須收斂為失敗，而不是停在載入中"
+        "目标页面必须收敛为失败，而不是停在加载中"
     );
     assert!(
         matches!(app.login.as_deref(), Some(LoginScreen::Failed { .. })),
-        "停在「正在登入」的覆蓋層必須收斂為可重試的失敗畫面：{:?}",
+        "停在「正在登录」的覆盖层必须收敛为可重试的失败画面：{:?}",
         app.login
     );
 
@@ -277,7 +278,7 @@ fn data_failure_settles_page_and_stuck_login_progress() {
     );
     assert!(
         matches!(waiting.login.as_deref(), Some(LoginScreen::Captcha { .. })),
-        "等使用者輸入的覆蓋層不應被資料失敗替換：{:?}",
+        "等用户输入的覆盖层不应被数据失败替换：{:?}",
         waiting.login
     );
 }
@@ -303,9 +304,9 @@ fn login_failure_shows_failed_overlay() {
 
     assert!(
         matches!(app.login.as_deref(), Some(LoginScreen::Failed { .. })),
-        "登入失敗應在覆蓋層顯示失敗畫面"
+        "登录失败应在覆盖层显示失败画面"
     );
-    assert!(matches!(app.screen, Screen::Main), "底層畫面維持不變");
+    assert!(matches!(app.screen, Screen::Main), "底层画面维持不变");
 }
 
 #[test]
@@ -389,11 +390,11 @@ fn credential_failure_restores_unlock_form_with_error() {
     );
 
     let Screen::Unlock(form) = &app.screen else {
-        panic!("應留在解鎖表單");
+        panic!("应留在解锁表单");
     };
-    assert!(!form.busy, "失敗後應解除處理中");
+    assert!(!form.busy, "失败后应解除处理中");
     assert_eq!(form.error.as_deref(), Some("解锁凭证失败：加密口令错误"));
-    assert!(form.fields[0].value.is_empty(), "口令欄位應清空");
+    assert!(form.fields[0].value.is_empty(), "口令字段应清空");
 }
 
 #[test]
@@ -420,13 +421,13 @@ fn credential_failure_keeps_setup_account_but_clears_secrets() {
     );
 
     let Screen::Setup(form) = &app.screen else {
-        panic!("應留在設定表單");
+        panic!("应留在设置表单");
     };
     assert!(!form.busy);
     assert!(form.error.is_some());
-    assert_eq!(form.value("账号"), "3120000001", "帳號欄位應保留");
-    assert!(form.value("密码").is_empty(), "密碼欄位應清空");
-    assert!(form.value("加密口令").is_empty(), "口令欄位應清空");
+    assert_eq!(form.value("账号"), "3120000001", "账号字段应保留");
+    assert!(form.value("密码").is_empty(), "密码字段应清空");
+    assert!(form.value("加密口令").is_empty(), "口令字段应清空");
 }
 
 #[test]
@@ -440,7 +441,7 @@ fn passphrase_updated_returns_to_settings_list() {
 
     assert!(
         matches!(app.screen, Screen::Settings(_)),
-        "成功後應回到設定選單"
+        "成功后应回到设置菜单"
     );
     assert_eq!(app.message_text(), Some("加密口令已更新"));
 }
@@ -456,7 +457,7 @@ fn account_updated_leaves_form_for_main() {
 
     assert!(
         matches!(app.screen, Screen::Main),
-        "修改帳號成功後應離開表單"
+        "修改账号成功后应离开表单"
     );
 }
 
@@ -532,13 +533,13 @@ fn login_failed_stays_on_credentials_form() {
             assert_eq!(
                 form.error.as_deref(),
                 Some("登录失败：用户名或密码错误"),
-                "帳密被拒時應就地表單顯示"
+                "账密被拒时应就地表单显示"
             );
-            assert!(!form.busy, "失敗後應恢復可輸入");
+            assert!(!form.busy, "失败后应恢复可输入");
             assert_eq!(
                 form.fields[0].value.value(),
                 "3120000001",
-                "失敗後應保留已輸入的帳號"
+                "失败后应保留已输入的账号"
             );
         }
         other => panic!("应停留在凭证表单，实际为 {other:?}"),
@@ -571,7 +572,7 @@ fn task_failure_stays_on_credentials_form() {
         }
         other => panic!("应停留在凭证表单，实际为 {other:?}"),
     }
-    assert!(app.message_text().is_some(), "狀態列仍應顯示錯誤");
+    assert!(app.message_text().is_some(), "状态列仍应显示错误");
 }
 
 #[test]
@@ -584,9 +585,9 @@ fn open_url_event_queues_browser_open() {
     assert_eq!(
         app.pending_open.as_deref(),
         Some("https://lms.xjtu.edu.cn"),
-        "網址應交給主迴圈開啟"
+        "网址应交给主循环开启"
     );
-    assert!(app.message_text().is_some(), "應顯示進行中提示");
+    assert!(app.message_text().is_some(), "应显示进行中提示");
 }
 
 #[test]
@@ -650,7 +651,7 @@ fn account_change_discards_pages_and_policy_change_keeps_data() {
         },
     );
     assert!(app.schedule.is_idle(), "换账号后课表资料应清空");
-    assert!(app.attendance.is_idle(), "换账号后卡住的载入应回到未载入");
+    assert!(app.attendance.is_idle(), "换账号后卡住的加载应回到未加载");
     assert!(app.lms.courses.is_idle(), "换账号后课程列表应清空");
     assert_eq!(
         app.lms.level,
@@ -671,7 +672,7 @@ fn account_change_discards_pages_and_policy_change_keeps_data() {
         },
     );
     assert!(app.schedule.ready().is_some(), "切换模式后旧资料应保留");
-    assert!(!app.homework.is_loading(), "卡住的载入状态应被解除");
+    assert!(!app.homework.is_loading(), "卡住的加载状态应被解除");
 }
 
 #[test]
@@ -692,25 +693,25 @@ fn disabled_session_returns_to_the_unlock_screen() {
         Event::SessionDisabled("无法建立新的会话，已停用当前会话：连接失败".to_owned()),
     );
 
-    assert!(app.login.is_none(), "登入覆蓋層應關閉");
-    assert_eq!(app.session_label(), "未登录", "站點登入狀態應清除");
-    assert!(app.schedule.is_idle(), "停用會話後舊資料應清空");
-    assert!(app.homework.is_idle(), "卡住的載入狀態應解除");
+    assert!(app.login.is_none(), "登录覆盖层应关闭");
+    assert_eq!(app.session_label(), "未登录", "站点登录状态应清除");
+    assert!(app.schedule.is_idle(), "停用会话后旧数据应清空");
+    assert!(app.homework.is_idle(), "卡住的加载状态应解除");
     match &app.screen {
         Screen::Unlock(form) => assert!(
             form.error
                 .as_deref()
                 .is_some_and(|error| error.contains("已停用当前会话")),
-            "解鎖表單應顯示停用原因：{:?}",
+            "解锁表单应显示停用原因：{:?}",
             form.error
         ),
-        other => panic!("應回到解鎖畫面，實際為 {other:?}"),
+        other => panic!("应回到解锁画面，实际为 {other:?}"),
     }
     assert!(
         app.message
             .as_ref()
             .is_some_and(|(text, _)| text.contains("会话已停用")),
-        "應提示使用者重新解鎖：{:?}",
+        "应提示用户重新解锁：{:?}",
         app.message
     );
 }
@@ -742,12 +743,12 @@ fn verification_retry_keeps_the_mfa_input() {
             error,
             phone,
         }) => {
-            assert!(*sent, "仍應維持「已發送」狀態，不必重發簡訊");
+            assert!(*sent, "仍应维持「已发送」状态，不必重发短信");
             assert_eq!(phone.as_deref(), Some("138****1234"));
-            assert!(input.is_empty(), "重輸前應清空輸入框：{:?}", input.value());
+            assert!(input.is_empty(), "重输前应清空输入框：{:?}", input.value());
             assert_eq!(error.as_deref(), Some("短信验证码不正确，请重试"));
         }
-        other => panic!("應留在簡訊驗證畫面，實際為 {other:?}"),
+        other => panic!("应留在短信验证画面，实际为 {other:?}"),
     }
 
     // 圖片驗證碼同樣保留輸入畫面。
@@ -765,10 +766,10 @@ fn verification_retry_keeps_the_mfa_input() {
     );
     match app.login.as_deref() {
         Some(LoginScreen::Captcha { input, error, .. }) => {
-            assert!(input.is_empty(), "重輸前應清空驗證碼");
+            assert!(input.is_empty(), "重输前应清空验证码");
             assert_eq!(error.as_deref(), Some("验证码不正确"));
         }
-        other => panic!("應留在驗證碼畫面，實際為 {other:?}"),
+        other => panic!("应留在验证码画面，实际为 {other:?}"),
     }
 
     // 沒有驗證輸入畫面時（例如流程已被取消）：退回一般的失敗提示。
@@ -790,7 +791,7 @@ fn verification_retry_keeps_the_mfa_input() {
                 ..
             })
         ),
-        "無輸入畫面時應顯示失敗畫面：{:?}",
+        "无输入画面时应显示失败画面：{:?}",
         app.login
     );
 }
@@ -815,23 +816,23 @@ fn homework_partial_updates_keep_page_loading_until_terminal() {
     };
 
     apply_event(&mut app, update(Some((0, 2))));
-    assert!(app.homework.is_loading(), "部分結果仍屬載入中");
-    assert!(app.homework.ready().is_some(), "部分結果應可顯示");
+    assert!(app.homework.is_loading(), "部分结果仍属加载中");
+    assert!(app.homework.ready().is_some(), "部分结果应可显示");
     assert!(
         app.homework
             .note()
             .is_some_and(|note| note.contains("已完成 0/2")),
-        "載入說明應帶進度：{:?}",
+        "加载说明应带进度：{:?}",
         app.homework.note()
     );
 
     apply_event(&mut app, update(None));
-    assert!(!app.homework.is_loading(), "終態應結束載入");
+    assert!(!app.homework.is_loading(), "终态应结束加载");
     assert!(
         app.homework
             .ready()
             .is_some_and(|data| data.items.is_empty()),
-        "終態資料應就緒"
+        "终态数据应就绪"
     );
 }
 
@@ -845,7 +846,7 @@ fn loading_cancelled_settles_page_without_losing_partial_data() {
             target: FailedTarget::Homework,
         },
     );
-    assert!(app.homework.is_idle(), "沒有資料時取消應回到未載入");
+    assert!(app.homework.is_idle(), "没有数据时取消应回到未加载");
 
     app.homework = Page::Loading {
         note: "正在汇总作业（已完成 1/2 门课程，累计 0 项）…".to_owned(),
@@ -869,7 +870,7 @@ fn loading_cancelled_settles_page_without_losing_partial_data() {
     );
     assert!(
         matches!(app.homework, Page::Ready(_)),
-        "已有部分資料時取消應保留資料"
+        "已有部分数据时取消应保留数据"
     );
 }
 
@@ -878,7 +879,7 @@ fn agreement_accepted_closes_gate() {
     let mut app = app();
     app.agreement = Some(Box::new(AgreementState::new()));
     apply_event(&mut app, Event::AgreementAccepted);
-    assert!(app.agreement.is_none(), "同意成功应关闭協议閱讀門");
+    assert!(app.agreement.is_none(), "同意成功应关闭协议阅读门");
 }
 
 #[test]
@@ -897,7 +898,7 @@ fn agreement_failure_keeps_gate_with_inline_error() {
             resource: None,
         },
     );
-    let state = app.agreement.as_deref().expect("失败后閱讀門应保留");
+    let state = app.agreement.as_deref().expect("失败后阅读门应保留");
     assert!(!state.saving, "失败后应解除保存中");
     assert_eq!(state.error.as_deref(), Some("写入配置文件失败"));
 }
@@ -922,9 +923,9 @@ fn courses_event_does_not_pull_the_user_back_to_the_course_list() {
     assert_eq!(
         app.lms.level,
         LmsLevel::Activities,
-        "資料更新不應改變目前的瀏覽層級"
+        "数据更新不应改变目前的浏览层级"
     );
-    assert!(app.lms.courses.ready().is_some(), "課程資料仍應更新");
+    assert!(app.lms.courses.ready().is_some(), "课程数据仍应更新");
 }
 
 /// 課程列表的順序可能改變：目前課程必須以識別碼而非索引來維持。
@@ -946,11 +947,11 @@ fn courses_event_reanchors_the_current_course_by_id() {
     );
 
     assert_eq!(app.lms.level, LmsLevel::Activities);
-    assert_eq!(app.lms.course_index, 1, "應以課程識別碼重新定位目前課程");
+    assert_eq!(app.lms.course_index, 1, "应以课程识别码重新定位目前课程");
     assert_eq!(
         app.course_state.selected(),
         Some(1),
-        "課程層的選取也應跟著移動"
+        "课程层的选取也应跟着移动"
     );
 }
 
@@ -970,7 +971,7 @@ fn courses_event_returns_to_the_list_when_the_current_course_is_gone() {
         }),
     );
 
-    assert_eq!(app.lms.level, LmsLevel::Courses, "應回到課程列表");
+    assert_eq!(app.lms.level, LmsLevel::Courses, "应回到课程列表");
     assert_eq!(app.lms.course_index, 0);
 }
 
@@ -1032,7 +1033,7 @@ fn term_picker_survives_background_data_updates() {
     apply_event(&mut app, Event::Homework(homework_update(Some((0, 2)))));
     assert!(
         matches!(app.screen, Screen::TermPicker(_)),
-        "作業進度不得關閉學期選擇器"
+        "作业进度不得关闭学期选择器"
     );
     apply_event(&mut app, Event::Homework(homework_update(None)));
     assert!(matches!(app.screen, Screen::TermPicker(_)));
@@ -1055,7 +1056,7 @@ fn term_picker_survives_background_data_updates() {
     );
     assert!(
         matches!(app.screen, Screen::TermPicker(_)),
-        "其他資料事件也不得關閉學期選擇器"
+        "其他数据事件也不得关闭学期选择器"
     );
 }
 
@@ -1081,7 +1082,7 @@ fn stale_activities_failure_does_not_pollute_the_new_course() {
     );
     assert!(
         app.lms.activities.is_loading(),
-        "舊課程的失敗不得影響目前課程：{:?}",
+        "旧课程的失败不得影响目前课程：{:?}",
         app.lms.activities
     );
 
@@ -1118,7 +1119,7 @@ fn stale_activity_detail_failure_is_ignored() {
             resource: Some("a".to_owned()),
         },
     );
-    assert!(app.lms.detail.is_loading(), "舊活動的失敗不得影響目前詳情");
+    assert!(app.lms.detail.is_loading(), "旧活动的失败不得影响目前详情");
 }
 
 /// 帳號驗證成功但憑證保存失敗：解除表單處理中並就地顯示錯誤（不再卡住）。
@@ -1135,9 +1136,9 @@ fn credential_save_failure_clears_busy_settings_form() {
     );
 
     let Screen::SettingsForm(form) = &app.screen else {
-        panic!("保存失敗應留在表單");
+        panic!("保存失败应留在表单");
     };
-    assert!(!form.busy, "保存失敗後必須解除處理中，否則連 Esc 都被忽略");
+    assert!(!form.busy, "保存失败后必须解除处理中，否则连 Esc 都被忽略");
     assert_eq!(
         form.error.as_deref(),
         Some("登录成功，但凭据保存失败：磁盘只读")
@@ -1160,7 +1161,7 @@ fn credential_save_failure_clears_busy_login_form() {
     apply_event(&mut app, Event::CredentialSaveFailed("保存失败".to_owned()));
 
     let Some(LoginScreen::Credentials { form, .. }) = app.login.as_deref() else {
-        panic!("應留在重新輸入表單");
+        panic!("应留在重新输入表单");
     };
     assert!(!form.busy);
     assert_eq!(form.error.as_deref(), Some("保存失败"));
@@ -1183,7 +1184,7 @@ fn late_activities_response_is_dropped() {
     );
     assert!(
         app.lms.activities.ready().is_none(),
-        "遲到且不屬於目前課程的回應應丟棄"
+        "迟到且不属于目前课程的响应应丢弃"
     );
 
     apply_event(
@@ -1193,7 +1194,7 @@ fn late_activities_response_is_dropped() {
             activities: Vec::new(),
         },
     );
-    assert!(app.lms.activities.ready().is_some(), "目前課程的回應應套用");
+    assert!(app.lms.activities.ready().is_some(), "目前课程的响应应套用");
 }
 
 #[test]
@@ -1211,10 +1212,10 @@ fn late_activity_detail_response_is_dropped() {
     };
 
     apply_event(&mut app, Event::ActivityDetail(detail("1")));
-    assert!(app.lms.detail.ready().is_none(), "上一個活動的詳情應丟棄");
+    assert!(app.lms.detail.ready().is_none(), "上一个活动的详情应丢弃");
 
     apply_event(&mut app, Event::ActivityDetail(detail("2")));
-    assert!(app.lms.detail.ready().is_some(), "目前活動的詳情應套用");
+    assert!(app.lms.detail.ready().is_some(), "目前活动的详情应套用");
 }
 
 /// 遲到的舊資源失敗雖不標記目前頁面，仍必須收斂卡住的登入進度覆蓋層。
@@ -1245,11 +1246,11 @@ fn stale_resource_failure_still_settles_login_progress() {
 
     assert!(
         app.lms.activities.is_loading(),
-        "舊資源的失敗不得標記目前頁面"
+        "旧资源的失败不得标记目前页面"
     );
     assert!(
         matches!(app.login.as_deref(), Some(LoginScreen::Failed { .. })),
-        "覆蓋層仍須離開「正在登入」：{:?}",
+        "覆盖层仍须离开「正在登录」：{:?}",
         app.login
     );
 }
@@ -1277,7 +1278,7 @@ fn credential_save_failure_survives_login_success() {
             mode: Some(AccessMode::Direct),
         },
     );
-    assert!(app.login.is_none(), "登入成功應關閉覆蓋層");
+    assert!(app.login.is_none(), "登录成功应关闭覆盖层");
 
     apply_event(
         &mut app,
@@ -1286,7 +1287,7 @@ fn credential_save_failure_survives_login_success() {
     assert_eq!(
         app.message_text(),
         Some("登录成功，但凭据保存失败：磁盘只读"),
-        "保存失敗的提醒不得被「登录成功」蓋掉"
+        "保存失败的提醒不得被「登录成功」盖掉"
     );
 }
 
@@ -1306,24 +1307,24 @@ fn dismissed_login_overlay_ignores_late_login_events_until_cancelled() {
             sent: false,
         },
     );
-    assert!(app.login.is_none(), "取消中的遲到簡訊事件不得重開覆蓋層");
+    assert!(app.login.is_none(), "取消中的迟到短信事件不得重开覆盖层");
 
     apply_event(
         &mut app,
         Event::LoginProgress("正在登录考勤系统…".to_owned()),
     );
-    assert!(app.login.is_none(), "取消中的遲到進度事件不得重開覆蓋層");
+    assert!(app.login.is_none(), "取消中的迟到进度事件不得重开覆盖层");
 
     apply_event(
         &mut app,
         Event::LoginNeedsCaptcha(PathBuf::from("/tmp/captcha-late.png")),
     );
-    assert!(app.login.is_none(), "取消中的遲到驗證碼事件不得重開覆蓋層");
-    assert!(app.captcha_path.is_none(), "被忽略的驗證碼不應殘留路徑");
+    assert!(app.login.is_none(), "取消中的迟到验证码事件不得重开覆盖层");
+    assert!(app.captcha_path.is_none(), "被忽略的验证码不应残留路径");
 
     // 取消完成：清除等待狀態。
     apply_event(&mut app, Event::LoginCancelled);
-    assert!(!app.login_cancel_pending, "取消完成後應清除等待狀態");
+    assert!(!app.login_cancel_pending, "取消完成后应清除等待状态");
 
     // 之後的新登入事件照常開啟覆蓋層。
     apply_event(
@@ -1335,7 +1336,7 @@ fn dismissed_login_overlay_ignores_late_login_events_until_cancelled() {
     );
     assert!(
         matches!(app.login.as_deref(), Some(LoginScreen::Mfa { .. })),
-        "取消完成後的登入事件應正常顯示：{:?}",
+        "取消完成后的登录事件应正常显示：{:?}",
         app.login
     );
 }
@@ -1355,8 +1356,8 @@ fn login_cancelled_closes_the_overlay() {
 
     apply_event(&mut app, Event::LoginCancelled);
 
-    assert!(app.login.is_none(), "取消完成應關閉登入覆蓋層");
-    assert!(!app.login_cancel_pending, "取消完成應清除等待狀態");
+    assert!(app.login.is_none(), "取消完成应关闭登录覆盖层");
+    assert!(!app.login_cancel_pending, "取消完成应清除等待状态");
 }
 
 /// 登入成功、憑證就緒與會話停用都會清除取消等待狀態，避免永久壓抑新事件。
@@ -1373,16 +1374,50 @@ fn terminal_login_events_clear_the_cancel_pending_state() {
             mode: Some(AccessMode::Direct),
         },
     );
-    assert!(!app.login_cancel_pending, "登入成功後應清除等待狀態");
+    assert!(!app.login_cancel_pending, "登录成功后应清除等待状态");
 
     app.login_cancel_pending = true;
     apply_event(&mut app, Event::VaultReady);
-    assert!(!app.login_cancel_pending, "憑證就緒後應清除等待狀態");
+    assert!(!app.login_cancel_pending, "凭证就绪后应清除等待状态");
 
     app.login_cancel_pending = true;
     apply_event(
         &mut app,
         Event::SessionDisabled("无法建立新的会话".to_owned()),
     );
-    assert!(!app.login_cancel_pending, "會話停用後應清除等待狀態");
+    assert!(!app.login_cancel_pending, "会话停用后应清除等待状态");
+}
+
+/// 詳情內容被取代時捲動回到頂端；部分結果不清位移（使用者可能正在讀）。
+#[test]
+fn detail_updates_reset_scroll() {
+    let mut app = app();
+    app.homework_scroll.sync(5, 20);
+    app.homework_scroll.to_bottom();
+    assert_eq!(app.homework_scroll.offset(), 15);
+
+    apply_event(&mut app, Event::Homework(homework_update(Some((1, 2)))));
+    assert_eq!(app.homework_scroll.offset(), 15, "部分结果不应打断阅读位置");
+
+    apply_event(&mut app, Event::Homework(homework_update(None)));
+    assert_eq!(app.homework_scroll.offset(), 0, "终态更新应回到顶端");
+
+    app.lms.detail_activity = Some("1".to_owned());
+    app.lms.detail_scroll.sync(5, 20);
+    app.lms.detail_scroll.to_bottom();
+    assert_eq!(app.lms.detail_scroll.offset(), 15);
+    apply_event(
+        &mut app,
+        Event::ActivityDetail(Box::new(ActivityDetailView {
+            id: "1".to_owned(),
+            title: "作业A".to_owned(),
+            kind: crate::sites::lms::ActivityKind::Homework,
+            description: None,
+            end_time: None,
+            submit_by_group: Some(false),
+            submissions: None,
+            note: None,
+        })),
+    );
+    assert_eq!(app.lms.detail_scroll.offset(), 0, "详情更新应回到顶端");
 }

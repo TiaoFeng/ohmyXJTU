@@ -15,7 +15,7 @@ fn rewrite_for_mode_only_touches_school_urls_in_webvpn_mode() {
     assert_eq!(
         rewrite_for_mode(AccessMode::Direct, school).unwrap(),
         school,
-        "直连模式不應改寫"
+        "直连模式不应改写"
     );
     assert_eq!(
         rewrite_for_mode(AccessMode::Direct, external).unwrap(),
@@ -24,17 +24,17 @@ fn rewrite_for_mode_only_touches_school_urls_in_webvpn_mode() {
     assert_eq!(
         rewrite_for_mode(AccessMode::WebVpn, external).unwrap(),
         external,
-        "非校內網址不應改寫"
+        "非校内网址不应改写"
     );
     let rewritten = rewrite_for_mode(AccessMode::WebVpn, school).unwrap();
     assert!(
         rewritten.starts_with("https://webvpn.xjtu.edu.cn/"),
-        "WebVPN 模式應改寫校內網址：{rewritten}"
+        "WebVPN 模式应改写校内网址：{rewritten}"
     );
     assert_eq!(
         rewritten,
         crate::auth::webvpn::to_webvpn_url(school).unwrap(),
-        "應與底層轉換一致"
+        "应与底层转换一致"
     );
 }
 
@@ -115,7 +115,7 @@ fn ordinary_responses_are_not_auth_failures() {
     // WebVPN 代理的考勤資料（代理目標為 bk-kq，非登入入口）。
     let proxied =
         webvpn::to_webvpn_url("https://bk-kq.xjtu.edu.cn/sa/student/pc/attendance-streams/page")
-            .expect("WebVPN 網址");
+            .expect("WebVPN 网址");
     assert!(!is_auth_failure(&json_response(&proxied)));
 }
 
@@ -124,17 +124,17 @@ fn ordinary_responses_are_not_auth_failures() {
 fn proxied_login_targets_are_auth_failures() {
     let proxied_cas =
         webvpn::to_webvpn_url("https://bk-kq.xjtu.edu.cn/sa/auth/cas/login/student-pc")
-            .expect("WebVPN 網址");
+            .expect("WebVPN 网址");
     assert!(
         is_auth_failure(&json_response(&proxied_cas)),
         "被代理的站点 CAS 入口应判定为失效：{proxied_cas}"
     );
 
     let proxied_login = webvpn::to_webvpn_url("https://login.xjtu.edu.cn/cas/login?service=x")
-        .expect("WebVPN 網址");
+        .expect("WebVPN 网址");
     assert!(
         is_auth_failure(&json_response(&proxied_login)),
-        "被代理的統一認證應判定为失效：{proxied_login}"
+        "被代理的统一认证应判定为失效：{proxied_login}"
     );
 }
 

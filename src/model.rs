@@ -8,7 +8,7 @@ use chrono::NaiveDate;
 
 use crate::domain::attendance_match::LessonAttendance;
 use crate::sites::attendance::FlowRecord;
-use crate::sites::lms::{ActivityKind, LmsSubmission};
+use crate::sites::lms::{ActivityContent, ActivityKind, LmsSubmission};
 
 /// 本週的一堂課。
 #[derive(Debug, Clone)]
@@ -70,6 +70,8 @@ pub struct ActivityDetailView {
     pub title: String,
     /// 活動類型。
     pub kind: ActivityKind,
+    /// 活動說明與附件（正文＋附件）；`None` 代表沒有可顯示的內容。
+    pub description: Option<ActivityContent>,
     /// 截止時間。
     pub end_time: Option<String>,
     /// 是否小組作業；`None` 代表無法確認（詳情缺少該欄位）。

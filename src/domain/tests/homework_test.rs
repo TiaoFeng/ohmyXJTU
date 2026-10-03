@@ -15,6 +15,7 @@ fn input(title: &str, end_time: Option<&str>, submission_count: Option<usize>) -
         activity_id: format!("a-{title}"),
         title: title.to_owned(),
         end_time: end_time.map(str::to_owned),
+        description: None,
         submit_by_group: Some(false),
         submission_count,
         note: None,
@@ -67,7 +68,7 @@ fn judges_overdue_by_instant_across_time_offsets() {
     assert_eq!(
         judge(Some(0), Some("2026-09-28T04:00:00Z"), now()),
         HomeworkState::Pending,
-        "與 now 同一瞬間（12:00+08:00）不算逾期"
+        "与 now 同一瞬间（12:00+08:00）不算逾期"
     );
 }
 

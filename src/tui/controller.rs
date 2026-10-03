@@ -61,7 +61,11 @@ pub(super) fn request(app: &mut App, jobs: &Sender<Job>, nav: NavItem, force: bo
 pub(super) fn activate(app: &mut App, jobs: &Sender<Job>) {
     match app.nav {
         NavItem::Schedule => app.schedule_detail = !app.schedule_detail,
-        NavItem::Homework => app.homework_detail = !app.homework_detail,
+        NavItem::Homework => {
+            app.homework_detail = !app.homework_detail;
+            // 展開或收起都回到頂端：下次展開時從標題開始讀。
+            app.homework_scroll.reset();
+        }
         NavItem::Attendance => app.flow_detail = !app.flow_detail,
         NavItem::Lms => match app.lms.level {
             LmsLevel::Courses => {
@@ -114,6 +118,7 @@ pub(super) fn activate(app: &mut App, jobs: &Sender<Job>) {
                 }
                 app.lms.detail_activity = Some(activity_id.clone());
                 app.lms.level = LmsLevel::Detail;
+                app.lms.detail_scroll.reset();
                 let _ = jobs.send(Job::LoadActivityDetail { activity_id });
             }
             LmsLevel::Detail => {}
@@ -145,6 +150,7 @@ pub(super) fn change_group(app: &mut App, delta: i32) {
         };
         // 切換分組後重設選取，避免索引越界。
         app.set_selection(0);
+        app.homework_scroll.reset();
         return;
     }
     if app.nav == NavItem::Lms && app.lms.level == LmsLevel::Activities {
@@ -154,6 +160,36 @@ pub(super) fn change_group(app: &mut App, delta: i32) {
             app.lms.activity_group.next()
         };
         app.set_selection(0);
+    }
+}
+
+/// 詳情內容的捲動指令（PgUp／PgDn／Home／End）。
+#[derive(Clone, Copy)]
+pub(super) enum DetailScroll {
+    /// 往上捲一頁。
+    PageUp,
+    /// 往下捲一頁。
+    PageDown,
+    /// 捲到頂端。
+    Top,
+    /// 捲到底端。
+    Bottom,
+}
+
+/// 捲動目前頁面的詳情內容；沒有可捲動的詳情時不動作。
+pub(super) fn scroll_detail(app: &mut App, command: DetailScroll) {
+    let state = if app.nav == NavItem::Homework && app.homework_detail {
+        &mut app.homework_scroll
+    } else if app.nav == NavItem::Lms && app.lms.level == LmsLevel::Detail {
+        &mut app.lms.detail_scroll
+    } else {
+        return;
+    };
+    match command {
+        DetailScroll::PageUp => state.page(-1),
+        DetailScroll::PageDown => state.page(1),
+        DetailScroll::Top => state.to_top(),
+        DetailScroll::Bottom => state.to_bottom(),
     }
 }
 

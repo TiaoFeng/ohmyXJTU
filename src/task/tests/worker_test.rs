@@ -1269,6 +1269,11 @@ fn homework_updates(harness: &mut Harness) -> Vec<HomeworkUpdate> {
         .collect()
 }
 
+/// 取出說明中的純文字（測試斷言用；是否含圖片另有斷言）。
+fn description_text(description: &Option<lms::ActivityText>) -> Option<&str> {
+    description.as_ref().and_then(|body| body.text.as_deref())
+}
+
 #[test]
 fn attendance_term_propagates_session_expiry_instead_of_falling_back() {
     // 考勤已登入，但學期端點回傳登入頁（會話過期）：錯誤應向上傳播，
@@ -1368,6 +1373,10 @@ fn homework_filters_to_current_term_and_streams_progress() {
         last.items[0].submit_by_group,
         Some(true),
         "小组判定应取自活动详情"
+    );
+    assert_eq!(
+        last.items[0].description, None,
+        "详情没有说明时不得凭空产生"
     );
 
     let seen = site.urls();
@@ -2259,7 +2268,8 @@ fn activity_detail_for_material_skips_submission_request() {
         details: vec![(
             "77",
             serde_json::json!({ "id": "77", "type": "material", "title": "课件",
-                "end_time": "2026-10-01 12:00:00" }),
+                "end_time": "2026-10-01 12:00:00",
+                "data": { "description": "   ", "content": "<div>课程介绍</div>" } }),
         )],
         expire_first_submission: false,
         submissions: AtomicUsize::new(0),
@@ -2285,13 +2295,21 @@ fn activity_detail_for_material_skips_submission_request() {
         !seen.iter().any(|url| url.contains("/submission_list")),
         "非作業不得查詢提交記錄：{seen:?}"
     );
-    assert!(
-        harness.saw(|event| matches!(
-            event,
-            Event::ActivityDetail(detail)
-                if detail.kind == lms::ActivityKind::Material && detail.submissions.is_none()
-        )),
-        "應回報資料類型的詳情且不帶提交狀態"
+    // `saw` 會取出事件，因此一次取完再逐項斷言。
+    let detail = harness
+        .drain_events()
+        .into_iter()
+        .find_map(|event| match event {
+            Event::ActivityDetail(detail) => Some(detail),
+            _ => None,
+        })
+        .expect("應回報活動詳情");
+    assert_eq!(detail.kind, lms::ActivityKind::Material);
+    assert!(detail.submissions.is_none(), "非作業不得帶提交狀態");
+    assert_eq!(
+        description_text(&detail.description),
+        Some("课程介绍"),
+        "页面型活动的正文应取自 data.content（description 为空）"
     );
 }
 
@@ -2305,7 +2323,8 @@ fn activity_detail_for_homework_queries_submission_list() {
             "11",
             serde_json::json!({ "id": "11", "type": "homework", "title": "第 3 次作业",
                 "end_time": "2026-10-01 23:59:59", "submit_by_group": false,
-                "user_submit_count": 0 }),
+                "user_submit_count": 0,
+                "data": { "description": "<p>第一章习题</p>" } }),
         )],
         expire_first_submission: false,
         submissions: AtomicUsize::new(0),
@@ -2328,14 +2347,129 @@ fn activity_detail_for_homework_queries_submission_list() {
             .any(|url| url.contains("/students/42/submission_list")),
         "作業詳情應查詢個人提交記錄：{seen:?}"
     );
-    assert!(
-        harness.saw(|event| matches!(
-            event,
-            Event::ActivityDetail(detail)
-                if detail.kind == lms::ActivityKind::Homework && detail.submissions.is_some()
-        )),
-        "作業詳情應帶提交記錄"
+    // `saw` 會取出事件，因此一次取完再逐項斷言。
+    let detail = harness
+        .drain_events()
+        .into_iter()
+        .find_map(|event| match event {
+            Event::ActivityDetail(detail) => Some(detail),
+            _ => None,
+        })
+        .expect("應回報活動詳情");
+    assert_eq!(detail.kind, lms::ActivityKind::Homework);
+    assert!(detail.submissions.is_some(), "作業詳情應帶提交記錄");
+    assert_eq!(
+        description_text(&detail.description),
+        Some("第一章习题"),
+        "作業說明應轉為純文字帶進詳情"
     );
+}
+
+/// 作業說明來自已抓取的活動詳情：冷啟動與快取命中都必須帶出，且不增加請求。
+#[test]
+fn homework_carries_activity_description_without_extra_requests() {
+    let site = Arc::new(FakeHomeworkSite {
+        seen: Arc::new(Mutex::new(Vec::new())),
+        courses: serde_json::json!({ "courses": [
+            { "id": "1", "name": "编译原理", "semester": { "code": "2026-1" } },
+        ]}),
+        activities: vec![(
+            "1",
+            serde_json::json!({ "activities": [
+                { "id": "11", "type": "homework", "title": "作业A",
+                  "end_time": "2099-12-31 23:59:59" },
+            ]}),
+        )],
+        details: vec![(
+            "11",
+            serde_json::json!({ "id": "11", "type": "homework", "title": "作业A",
+                "end_time": "2099-12-31 23:59:59",
+                "submit_by_group": false, "user_submit_count": 0,
+                "data": { "description": "<p>第一章习题</p><p>交到邮箱</p>", "content": "" } }),
+        )],
+        expire_first_submission: false,
+        submissions: AtomicUsize::new(0),
+        attendance_term: Some(("2026-2027", "第一学期")),
+    });
+
+    let system = Arc::clone(&site);
+    let mut harness = harness(move |request| system.handle(request));
+    harness.login_both_sites();
+
+    harness
+        .dispatch(Job::LoadHomework { force: false })
+        .expect("作业加载应当成功");
+    let updates = homework_updates(&mut harness);
+    let last = updates.last().expect("最终更新");
+    assert_eq!(
+        description_text(&last.items[0].description),
+        Some("第一章习题\n交到邮箱"),
+        "作业说明应为去除标签的纯文字"
+    );
+
+    // 第二次载入命中快取：说明仍须带出，且不得重新查询课程、活动或详情
+    // （考勤学期查询与作业快取无关，不在此限）。
+    let api_calls = |site: &FakeHomeworkSite| {
+        site.urls()
+            .iter()
+            .filter(|url| url.contains("/api/"))
+            .count()
+    };
+    let before = api_calls(&site);
+    harness
+        .dispatch(Job::LoadHomework { force: false })
+        .expect("第二次载入应当成功");
+    let updates = homework_updates(&mut harness);
+    let last = updates.last().expect("第二次最终更新");
+    assert_eq!(
+        description_text(&last.items[0].description),
+        Some("第一章习题\n交到邮箱"),
+        "快取命中时说明不得遗失"
+    );
+    assert_eq!(api_calls(&site), before, "快取命中不应重新查询 LMS 资料");
+}
+
+/// 整份说明只有一张图片：不得当成「没有说明」，要保留「含图片」的标记。
+#[test]
+fn homework_marks_image_only_description() {
+    let site = Arc::new(FakeHomeworkSite {
+        seen: Arc::new(Mutex::new(Vec::new())),
+        courses: serde_json::json!({ "courses": [
+            { "id": "1", "name": "编译原理", "semester": { "code": "2026-1" } },
+        ]}),
+        activities: vec![(
+            "1",
+            serde_json::json!({ "activities": [
+                { "id": "11", "type": "homework", "title": "图片作业",
+                  "end_time": "2099-12-31 23:59:59" },
+            ]}),
+        )],
+        details: vec![(
+            "11",
+            serde_json::json!({ "id": "11", "type": "homework", "title": "图片作业",
+                "end_time": "2099-12-31 23:59:59",
+                "submit_by_group": false, "user_submit_count": 0,
+                "data": { "description": "<p><img src=\"/a.png\"></p>" } }),
+        )],
+        expire_first_submission: false,
+        submissions: AtomicUsize::new(0),
+        attendance_term: Some(("2026-2027", "第一学期")),
+    });
+
+    let system = Arc::clone(&site);
+    let mut harness = harness(move |request| system.handle(request));
+    harness.login_both_sites();
+
+    harness
+        .dispatch(Job::LoadHomework { force: false })
+        .expect("作业加载应当成功");
+    let updates = homework_updates(&mut harness);
+    let description = updates.last().expect("最终更新").items[0]
+        .description
+        .clone()
+        .expect("純圖片說明仍應保留正文（供介面標註）");
+    assert_eq!(description.text, None, "圖片沒有可見文字");
+    assert!(description.has_media, "應標記含圖片");
 }
 
 #[test]

@@ -66,3 +66,44 @@ fn split_at_display_never_cuts_a_grapheme() {
     let text = "e\u{301}xyz";
     assert_eq!(split_at_display(text, 1), ("e\u{301}", "xyz"));
 }
+
+#[test]
+fn wraps_at_spaces_by_display_width() {
+    assert_eq!(
+        wrap_display("alpha beta gamma", 11),
+        vec!["alpha beta", "gamma"]
+    );
+    // 連續空白折成一個空格；行首與行尾不留空白。
+    assert_eq!(wrap_display("  a   b  ", 3), vec!["a b"]);
+    assert_eq!(wrap_display("a b", 3), vec!["a b"]);
+    assert_eq!(wrap_display("aa bbbb", 6), vec!["aa", "bbbb"]);
+}
+
+#[test]
+fn wraps_long_words_by_grapheme() {
+    // 沒有空白可斷：逐字素硬切。
+    assert_eq!(wrap_display("abcdef", 3), vec!["abc", "def"]);
+    // 組合字元不被拆開。
+    assert_eq!(wrap_display("e\u{301}xyz", 2), vec!["e\u{301}x", "yz"]);
+}
+
+#[test]
+fn wraps_cjk_by_display_width() {
+    // 「中文」各佔 2 欄：寬度 4 只放得下兩個字。
+    assert_eq!(
+        wrap_display("中文中文中文", 4),
+        vec!["中文", "中文", "中文"]
+    );
+    assert_eq!(wrap_display("中文 abc", 6), vec!["中文", "abc"]);
+    // 單一字素就超過欄寬時仍自成一列（不得無窮迴圈）。
+    assert_eq!(wrap_display("中文", 1), vec!["中", "文"]);
+}
+
+#[test]
+fn wrap_display_keeps_line_count_stable() {
+    assert_eq!(wrap_display("", 10), vec![""]);
+    assert_eq!(wrap_display("   ", 10), vec![""]);
+    assert_eq!(wrap_display("abcd", 10), vec!["abcd"]);
+    assert_eq!(wrap_display("abcd", 4), vec!["abcd"]);
+    assert!(wrap_display("abcd", 0).is_empty());
+}

@@ -6,6 +6,7 @@
 use serde::Deserialize;
 
 use super::super::{optional_string_or_number, string_or_number};
+use super::html;
 
 /// 活動類型。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -138,6 +139,32 @@ impl LmsCourse {
     }
 }
 
+/// 活動詳情回應的正文區塊（`data`）。
+///
+/// 作業與資料的說明放在 `description`，頁面型活動（課程簡介、教學進度…）
+/// 的正文放在 `content`；兩者都是 HTML。列表項目不含這個區塊。
+#[derive(Debug, Clone, Deserialize)]
+pub struct LmsActivityBody {
+    /// 作業／資料說明（HTML）。
+    #[serde(default)]
+    pub description: Option<String>,
+    /// 頁面型活動正文（HTML）。
+    #[serde(default)]
+    pub content: Option<String>,
+}
+
+/// 活動正文（純文字與是否含圖片等內容）。
+///
+/// 純文字不足以呈現整份正文（作業說明可能就是一張圖片），因此額外回報
+/// `has_media`，讓介面能提示使用者「說明含圖片，請開網頁查看」。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ActivityText {
+    /// 純文字內容（沒有可見文字時為 `None`）。
+    pub text: Option<String>,
+    /// 是否含圖片、影片等無法以文字呈現的元素。
+    pub has_media: bool,
+}
+
 /// 活動（作業、資料、課程內容…）。
 #[derive(Debug, Clone, Deserialize)]
 pub struct LmsActivity {
@@ -165,9 +192,9 @@ pub struct LmsActivity {
     /// 小組識別碼（小組作業時使用）。
     #[serde(default, deserialize_with = "optional_string_or_number")]
     pub group_id: Option<String>,
-    /// 說明（HTML）。
+    /// 活動正文區塊（只有詳情回應提供；列表項目為 `None`）。
     #[serde(default)]
-    pub description: Option<String>,
+    pub data: Option<LmsActivityBody>,
     /// 伺服器記錄的提交次數。
     #[serde(default)]
     pub user_submit_count: Option<u64>,
@@ -188,6 +215,30 @@ impl LmsActivity {
             .clone()
             .filter(|title| !title.trim().is_empty())
             .unwrap_or_else(|| self.kind().label().to_owned())
+    }
+
+    /// 可顯示的正文 HTML：`data.description` 優先，空白時改用 `data.content`。
+    ///
+    /// 兩處都試一次是參考實作的做法：頁面型活動的 `description` 實測為空字串，
+    /// 正文只在 `content`。
+    pub fn body_html(&self) -> Option<&str> {
+        let data = self.data.as_ref()?;
+        [data.description.as_deref(), data.content.as_deref()]
+            .into_iter()
+            .flatten()
+            .find(|html| !html.trim().is_empty())
+    }
+
+    /// 活動正文（純文字＋是否含圖片等內容）；沒有正文時回 `None`。
+    pub fn body(&self) -> Option<ActivityText> {
+        let content = html::convert(self.body_html()?);
+        if content.text.is_none() && !content.has_media {
+            return None;
+        }
+        Some(ActivityText {
+            text: content.text,
+            has_media: content.has_media,
+        })
     }
 }
 

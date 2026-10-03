@@ -4,6 +4,11 @@ use serde_json::json;
 
 use super::*;
 
+/// 只取正文純文字（多數斷言不關心是否含圖片）。
+fn body_text(activity: &LmsActivity) -> Option<String> {
+    activity.body().and_then(|body| body.text)
+}
+
 #[test]
 fn course_homework_url_uses_verified_route_without_hash() {
     assert_eq!(
@@ -139,6 +144,74 @@ fn parses_submission_lists() {
         Some("2026-09-20T10:00:00+08:00")
     );
     assert_eq!(submissions.list[1].timestamp(), Some("2026-09-21 09:30:00"));
+}
+
+/// 活動正文（作業說明）來自詳情回應的嵌套 `data`；列表端不含此區塊。
+#[test]
+fn parses_activity_body_from_nested_data() {
+    // 形態對齊參考實作：作業說明在 data.description（HTML）。
+    let value = json!({
+        "id": 9001,
+        "type": "homework",
+        "title": "第 3 次作业",
+        "submit_by_group": false,
+        "data": {"description": "<p>第一章习题</p><p>交到邮箱</p>", "content": ""}
+    });
+    let activity: LmsActivity = crate::sites::deserialize_value(value, "查询活动详情").unwrap();
+    assert_eq!(
+        body_text(&activity).as_deref(),
+        Some("第一章习题\n交到邮箱"),
+        "說明應去除 HTML 標籤"
+    );
+
+    // 頁面型活動：description 為空白時改用 content。
+    let value = json!({
+        "id": 9002,
+        "type": "material",
+        "title": "课程简介",
+        "data": {"description": "   ", "content": "<div>课程介绍</div>"}
+    });
+    let activity: LmsActivity = crate::sites::deserialize_value(value, "查询活动详情").unwrap();
+    assert_eq!(body_text(&activity).as_deref(), Some("课程介绍"));
+
+    // 沒有 data（或沒有可見文字）時不得產生說明。
+    for value in [
+        json!({"id": 1, "type": "homework"}),
+        json!({"id": 1, "type": "homework", "data": {}}),
+        json!({"id": 1, "type": "homework", "data": {"description": ""}}),
+        json!({"id": 1, "type": "homework", "data": {"description": "<p></p>"}}),
+    ] {
+        let activity: LmsActivity = crate::sites::deserialize_value(value.clone(), "查询活动详情")
+            .unwrap_or_else(|err| panic!("{value}: {err}"));
+        assert_eq!(body_text(&activity), None, "{value}");
+    }
+}
+
+/// 正文只在 `data` 子物件內；頂層同名欄位（舊版解析的目標）不得被採用。
+#[test]
+fn ignores_top_level_description_field() {
+    let value = json!({
+        "id": 9001,
+        "type": "homework",
+        "description": "<p>顶层字段</p>",
+    });
+    let activity: LmsActivity = crate::sites::deserialize_value(value, "查询活动详情").unwrap();
+    assert_eq!(body_text(&activity), None);
+}
+
+/// 整份說明只有一張圖片：不得當成「沒有說明」，要讓介面能標註。
+#[test]
+fn reports_media_only_body() {
+    let value = json!({
+        "id": 9003,
+        "type": "homework",
+        "title": "图片作业",
+        "data": {"description": "<p><img src=\"/a.png\"></p>"}
+    });
+    let activity: LmsActivity = crate::sites::deserialize_value(value, "查询活动详情").unwrap();
+    let body = activity.body().expect("純圖片說明仍應有正文");
+    assert_eq!(body.text, None, "圖片沒有可見文字");
+    assert!(body.has_media, "應標記含圖片");
 }
 
 #[test]

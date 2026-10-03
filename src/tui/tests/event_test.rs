@@ -188,6 +188,7 @@ fn homework_event_updates_groups_and_counts() {
             activity_id: "9".to_owned(),
             title: "第三次作业".to_owned(),
             end_time: None,
+            description: None,
             submit_by_group: Some(false),
             submission_count: Some(0),
             note: None,
@@ -1385,4 +1386,38 @@ fn terminal_login_events_clear_the_cancel_pending_state() {
         Event::SessionDisabled("无法建立新的会话".to_owned()),
     );
     assert!(!app.login_cancel_pending, "會話停用後應清除等待狀態");
+}
+
+/// 詳情內容被取代時捲動回到頂端；部分結果不清位移（使用者可能正在讀）。
+#[test]
+fn detail_updates_reset_scroll() {
+    let mut app = app();
+    app.homework_scroll.sync(5, 20);
+    app.homework_scroll.to_bottom();
+    assert_eq!(app.homework_scroll.offset(), 15);
+
+    apply_event(&mut app, Event::Homework(homework_update(Some((1, 2)))));
+    assert_eq!(app.homework_scroll.offset(), 15, "部分結果不應打斷閱讀位置");
+
+    apply_event(&mut app, Event::Homework(homework_update(None)));
+    assert_eq!(app.homework_scroll.offset(), 0, "終態更新應回到頂端");
+
+    app.lms.detail_activity = Some("1".to_owned());
+    app.lms.detail_scroll.sync(5, 20);
+    app.lms.detail_scroll.to_bottom();
+    assert_eq!(app.lms.detail_scroll.offset(), 15);
+    apply_event(
+        &mut app,
+        Event::ActivityDetail(Box::new(ActivityDetailView {
+            id: "1".to_owned(),
+            title: "作业A".to_owned(),
+            kind: crate::sites::lms::ActivityKind::Homework,
+            description: None,
+            end_time: None,
+            submit_by_group: Some(false),
+            submissions: None,
+            note: None,
+        })),
+    );
+    assert_eq!(app.lms.detail_scroll.offset(), 0, "詳情更新應回到頂端");
 }

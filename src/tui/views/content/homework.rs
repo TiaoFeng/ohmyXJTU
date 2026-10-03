@@ -14,9 +14,13 @@ use crate::tui::ui::render_list;
 
 use super::columns::{GROUP_WIDTH, RowColumns, RowNeeds, homework_columns, homework_min_row_width};
 use super::{
-    deadline_cell, deadline_label, deadline_list_label, detail_panel, empty, group_label,
-    row_width, split_detail, too_narrow,
+    MEDIA_HINT, deadline_cell, deadline_label, deadline_list_label, empty, group_label,
+    panel_width, push_wrapped, row_width, scrolled_panel, split_detail, too_narrow,
 };
+
+/// 展開詳情時的框高範圍：內容區一半，並限制在可讀區間。
+const DETAIL_MIN_HEIGHT: u16 = 7;
+const DETAIL_MAX_HEIGHT: u16 = 14;
 
 /// 依目前資料繪製作業頁。
 pub(super) fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
@@ -59,7 +63,9 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
         frame.render_widget(Paragraph::new(line).style(THEME.base_style()), warning_area);
     }
 
-    let (list_area, detail_area) = split_detail(body_area, app.homework_detail);
+    // 展開詳情時加大面板：描述可能有好幾行，原本的 5 列內容區讀不了多少。
+    let detail_height = (body_area.height / 2).clamp(DETAIL_MIN_HEIGHT, DETAIL_MAX_HEIGHT);
+    let (list_area, detail_area) = split_detail(body_area, app.homework_detail, detail_height);
     let (items, detail) = {
         let Some(data) = app.homework.ready() else {
             return;
@@ -79,12 +85,15 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
             .iter()
             .map(|item| homework_item(item, columns))
             .collect::<Vec<_>>();
-        let detail = app.homework_detail.then(|| homework_lines(visible[index]));
+        // 詳情內容預先換行：列數必須已知，捲動位移才夾得住。
+        let detail = detail_area.map(|area| homework_lines(visible[index], panel_width(area)));
         (items, detail)
     };
     render_list(frame, list_area, &title, items, &mut app.homework_state);
     if let (Some(area), Some(lines)) = (detail_area, detail) {
-        detail_panel(frame, area, "作业详情", lines);
+        app.homework_scroll
+            .sync(area.height.saturating_sub(2), lines.len());
+        scrolled_panel(frame, area, "作业详情", lines, app.homework_scroll.offset());
     }
 }
 
@@ -215,38 +224,64 @@ fn homework_item(item: &HomeworkItem, columns: RowColumns) -> ListItem<'static> 
     ListItem::new(Line::from(spans))
 }
 
-fn homework_lines(item: &HomeworkItem) -> Vec<Line<'static>> {
-    let mut lines = vec![
-        Line::from(Span::styled(
-            item.title.clone(),
-            Style::default().fg(THEME.text).add_modifier(Modifier::BOLD),
-        )),
-        Line::from(Span::styled(
-            format!("课程：{}", item.course_name),
+fn homework_lines(item: &HomeworkItem, width: usize) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    push_wrapped(
+        &mut lines,
+        item.title.clone(),
+        Style::default().fg(THEME.text).add_modifier(Modifier::BOLD),
+        width,
+    );
+    push_wrapped(
+        &mut lines,
+        format!("课程：{}", item.course_name),
+        THEME.muted_style(),
+        width,
+    );
+    push_wrapped(
+        &mut lines,
+        format!("截止：{}", deadline_label(item.end_time.as_deref())),
+        THEME.muted_style(),
+        width,
+    );
+    // 狀態列由多個樣式組成（狀態色隨語意變），且短於最小面板寬度，因此不換行。
+    lines.push(Line::from(vec![
+        Span::styled("状态：", THEME.muted_style()),
+        Span::styled(item.state.label(), THEME.status_style(item.state.tone())),
+        Span::styled(
+            match item.submit_by_group {
+                Some(true) => "　提交单位：小组",
+                Some(false) => "　提交单位：个人",
+                None => "　提交单位：未知",
+            },
             THEME.muted_style(),
-        )),
-        Line::from(Span::styled(
-            format!("截止：{}", deadline_label(item.end_time.as_deref())),
-            THEME.muted_style(),
-        )),
-        Line::from(vec![
-            Span::styled("状态：", THEME.muted_style()),
-            Span::styled(item.state.label(), THEME.status_style(item.state.tone())),
-            Span::styled(
-                match item.submit_by_group {
-                    Some(true) => "　提交单位：小组",
-                    Some(false) => "　提交单位：个人",
-                    None => "　提交单位：未知",
-                },
-                THEME.muted_style(),
-            ),
-        ]),
-    ];
+        ),
+    ]));
     if let Some(note) = &item.note {
-        lines.push(Line::from(Span::styled(
+        push_wrapped(
+            &mut lines,
             format!("说明：{note}"),
             THEME.muted_style(),
-        )));
+            width,
+        );
+    }
+    // 作業說明：讓使用者不必按 `o` 開網頁就能看完題目內容。
+    if let Some(description) = &item.description {
+        push_wrapped(&mut lines, "作业描述：", THEME.muted_style(), width);
+        if let Some(text) = &description.text {
+            for line in text.split('\n') {
+                push_wrapped(
+                    &mut lines,
+                    line.to_owned(),
+                    Style::default().fg(THEME.text),
+                    width,
+                );
+            }
+        }
+        // 說明可能就是一張圖片：文字轉換後什麼都不剩，必須明講。
+        if description.has_media {
+            push_wrapped(&mut lines, MEDIA_HINT, THEME.muted_style(), width);
+        }
     }
     lines
 }

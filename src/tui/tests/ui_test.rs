@@ -16,7 +16,7 @@ use crate::domain::semester::TermCode;
 use crate::model::{ActivityDetailView, FlowData, LessonEntry, ScheduleData};
 use crate::session::{AccessMode, SiteKind};
 use crate::sites::attendance::{AttendanceStatus, FlowRecord};
-use crate::sites::lms::{ActivityKind, LmsActivity, LmsCourse, LmsSubmissionList};
+use crate::sites::lms::{ActivityKind, ActivityText, LmsActivity, LmsCourse, LmsSubmissionList};
 use crate::task::HomeworkIssue;
 use crate::tui::app::{
     AgreementState, App, FormState, HomeworkData, LmsLevel, LoginScreen, NavItem, Page, Screen,
@@ -276,6 +276,7 @@ fn homework_input(title: &str, end_time: &str, submitted: usize) -> HomeworkInpu
         activity_id: format!("a-{title}"),
         title: title.to_owned(),
         end_time: Some(end_time.to_owned()),
+        description: None,
         submit_by_group: Some(false),
         submission_count: Some(submitted),
         note: None,
@@ -390,6 +391,7 @@ fn draws_homework_unknown_warning_with_reason() {
                 activity_id: "a-unknown".to_owned(),
                 title: "待核实作业".to_owned(),
                 end_time: Some("2026-10-02 23:59:59".to_owned()),
+                description: None,
                 submit_by_group: Some(false),
                 submission_count: None,
                 note: Some("无法确认提交状态：思源学堂用户信息解析失败".to_owned()),
@@ -525,7 +527,7 @@ fn lms_activity(id: &str, kind: &str, end: Option<&str>) -> LmsActivity {
         end_time: end.map(str::to_owned),
         submit_by_group: None,
         group_id: None,
-        description: None,
+        data: None,
         user_submit_count: None,
         published: None,
     }
@@ -572,6 +574,7 @@ fn activity_detail_hides_submission_section_for_non_homework() {
         id: "1".to_owned(),
         title: "直播课".to_owned(),
         kind: ActivityKind::LectureLive,
+        description: None,
         end_time: Some("2026-10-01 12:00:00".to_owned()),
         submit_by_group: Some(false),
         submissions: None,
@@ -594,6 +597,7 @@ fn activity_detail_hides_submission_section_for_non_homework() {
         id: "2".to_owned(),
         title: "作业A".to_owned(),
         kind: ActivityKind::Homework,
+        description: None,
         end_time: None,
         submit_by_group: Some(false),
         submissions: None,
@@ -628,6 +632,7 @@ fn activity_detail_converts_submission_times_to_school_time() {
         id: "1".to_owned(),
         title: "作业A".to_owned(),
         kind: ActivityKind::Homework,
+        description: None,
         end_time: Some("2026-09-25T15:59:59.000Z".to_owned()),
         submit_by_group: Some(false),
         submissions: Some(list.list),
@@ -1327,6 +1332,7 @@ fn homework_rows_trade_group_and_title_detail_when_narrow() {
             activity_id: "a-2".to_owned(),
             title: "社会实践报告与社会调查作业".to_owned(),
             end_time: Some("2026-10-08T15:59:59.000Z".to_owned()),
+            description: None,
             submit_by_group: Some(true),
             submission_count: Some(0),
             note: None,
@@ -1433,6 +1439,7 @@ fn homework_rows_show_full_names_when_terminal_is_wide() {
                 activity_id: "a-1".to_owned(),
                 title: "第五章作业（含附件）".to_owned(),
                 end_time: Some("2026-10-12T15:59:59.000Z".to_owned()),
+                description: None,
                 submit_by_group: Some(false),
                 submission_count: Some(0),
                 note: None,
@@ -1943,6 +1950,7 @@ fn activity_detail_counts_effective_submissions_consistently() {
         id: "1".to_owned(),
         title: "作业A".to_owned(),
         kind: ActivityKind::Homework,
+        description: None,
         end_time: None,
         submit_by_group: Some(false),
         submissions: Some(list.list),
@@ -1982,6 +1990,7 @@ fn activity_detail_reports_no_effective_submissions() {
         id: "1".to_owned(),
         title: "作业A".to_owned(),
         kind: ActivityKind::Homework,
+        description: None,
         end_time: None,
         submit_by_group: Some(false),
         submissions: Some(list.list),
@@ -2009,6 +2018,7 @@ fn homework_detail_shows_unknown_submission_unit() {
             activity_id: "a-1".to_owned(),
             title: "缺单位作业".to_owned(),
             end_time: None,
+            description: None,
             submit_by_group: None,
             submission_count: Some(0),
             note: None,
@@ -2052,5 +2062,251 @@ fn schedule_renders_notice_above_empty_state() {
     assert!(
         text.contains("本周没有课程安排"),
         "空状态提示应保留：\n{text}"
+    );
+}
+
+/// 作業說明显示於詳情框：純文字、保留換行、不留 HTML 標籤。
+#[test]
+fn homework_detail_shows_activity_description() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00+08:00").expect("固定时间");
+    let items = aggregate(
+        &[HomeworkInput {
+            description: Some(ActivityText {
+                text: Some("第一章习题\n交到邮箱".to_owned()),
+                has_media: false,
+            }),
+            ..homework_input("第一章作业", "2026-10-01 23:59:59", 0)
+        }],
+        now,
+    );
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Homework;
+    app.homework = Page::Ready(homework_data(items, None));
+    app.homework_detail = true;
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(text.contains("作业描述："), "應顯示描述區塊：\n{text}");
+    assert!(text.contains("第一章习题"), "應顯示描述內容：\n{text}");
+    assert!(text.contains("交到邮箱"), "描述換行應保留：\n{text}");
+    assert!(!text.contains("<p>"), "不應殘留 HTML 標籤：\n{text}");
+}
+
+/// 沒有說明時不顯示描述區塊（不得把空值當成內容）。
+#[test]
+fn homework_detail_hides_description_section_when_absent() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00+08:00").expect("固定时间");
+    let items = aggregate(
+        &[homework_input("第一章作业", "2026-10-01 23:59:59", 0)],
+        now,
+    );
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Homework;
+    app.homework = Page::Ready(homework_data(items, None));
+    app.homework_detail = true;
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(
+        !text.contains("作业描述"),
+        "沒有說明時不應顯示描述區塊：\n{text}"
+    );
+}
+
+/// 長說明可捲動：列數由繪製回寫，捲到底後應看得到結尾。
+#[test]
+fn homework_detail_scrolls_long_description() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00+08:00").expect("固定时间");
+    let description = (1..=30)
+        .map(|line| format!("第{line}行"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let items = aggregate(
+        &[HomeworkInput {
+            description: Some(ActivityText {
+                text: Some(description),
+                has_media: false,
+            }),
+            ..homework_input("长作业", "2026-10-01 23:59:59", 0)
+        }],
+        now,
+    );
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Homework;
+    app.homework = Page::Ready(homework_data(items, None));
+    app.homework_detail = true;
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(text.contains("第1行"), "初始應顯示說明開頭：\n{text}");
+    assert!(!text.contains("第30行"), "初始不應顯示說明結尾：\n{text}");
+    assert!(app.homework_scroll.scrollable(), "內容超長時應可捲動");
+
+    app.homework_scroll.to_bottom();
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(text.contains("第30行"), "捲到底應顯示說明結尾：\n{text}");
+    assert!(
+        !text.contains("第1行"),
+        "捲到底後開頭應已離開畫面：\n{text}"
+    );
+}
+
+/// 整份說明只有一張圖片：必須標註含圖片並提示開網頁，而不是看起來沒有說明。
+#[test]
+fn homework_detail_marks_image_only_description() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00+08:00").expect("固定时间");
+    let items = aggregate(
+        &[HomeworkInput {
+            description: Some(ActivityText {
+                text: None,
+                has_media: true,
+            }),
+            ..homework_input("图片作业", "2026-10-01 23:59:59", 0)
+        }],
+        now,
+    );
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Homework;
+    app.homework = Page::Ready(homework_data(items, None));
+    app.homework_detail = true;
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(text.contains("作业描述："), "應顯示描述區塊：\n{text}");
+    assert!(text.contains("说明含图片"), "應標註說明含圖片：\n{text}");
+    assert!(
+        text.contains("按 o 打开网页查看"),
+        "應提示開網頁查看：\n{text}"
+    );
+}
+
+/// 底欄在詳情可捲動時提示捲動鍵（終端夠寬時才看得見完整提示）。
+#[test]
+fn footer_hints_scrolling_when_detail_is_scrollable() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00+08:00").expect("固定时间");
+    let description = (1..=30)
+        .map(|line| format!("第{line}行"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let items = aggregate(
+        &[HomeworkInput {
+            description: Some(ActivityText {
+                text: Some(description),
+                has_media: false,
+            }),
+            ..homework_input("长作业", "2026-10-01 23:59:59", 0)
+        }],
+        now,
+    );
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Homework;
+    app.homework = Page::Ready(homework_data(items, None));
+    app.homework_detail = true;
+
+    let terminal = draw(200, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(
+        text.contains("PgUp/PgDn 滚动"),
+        "底欄應提示捲動鍵：\n{text}"
+    );
+}
+
+/// 思源學堂活動詳情顯示說明，且長說明可捲動。
+#[test]
+fn activity_detail_shows_description_and_scrolls() {
+    let description = (1..=30)
+        .map(|line| format!("第{line}行"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Lms;
+    app.lms.level = LmsLevel::Detail;
+    app.lms.detail = Page::Ready(ActivityDetailView {
+        id: "1".to_owned(),
+        title: "作业A".to_owned(),
+        kind: ActivityKind::Homework,
+        description: Some(ActivityText {
+            text: Some(description),
+            has_media: false,
+        }),
+        end_time: None,
+        submit_by_group: Some(false),
+        submissions: None,
+        note: None,
+    });
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(text.contains("作业描述："), "應顯示描述區塊：\n{text}");
+    assert!(text.contains("第1行"), "初始應顯示說明開頭：\n{text}");
+    assert!(!text.contains("第30行"), "初始不應顯示說明結尾：\n{text}");
+
+    app.lms.detail_scroll.to_bottom();
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(text.contains("第30行"), "捲到底應顯示說明結尾：\n{text}");
+    assert!(
+        !text.contains("第1行"),
+        "捲到底後開頭應已離開畫面：\n{text}"
+    );
+}
+
+/// 說明區塊標題依活動類型：作業為「作业描述」，其他為「内容」。
+#[test]
+fn activity_detail_labels_description_by_kind() {
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Lms;
+    app.lms.level = LmsLevel::Detail;
+    app.lms.detail = Page::Ready(ActivityDetailView {
+        id: "1".to_owned(),
+        title: "课程简介".to_owned(),
+        kind: ActivityKind::Material,
+        description: Some(ActivityText {
+            text: Some("课程介绍".to_owned()),
+            has_media: true,
+        }),
+        end_time: None,
+        submit_by_group: None,
+        submissions: None,
+        note: None,
+    });
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(
+        text.contains("内容："),
+        "資料類型應使用「内容」標題：\n{text}"
+    );
+    assert!(text.contains("课程介绍"), "應顯示正文：\n{text}");
+    assert!(text.contains("说明含图片"), "應標註說明含圖片：\n{text}");
+    assert!(
+        !text.contains("作业描述"),
+        "非作業不得使用作業描述標題：\n{text}"
     );
 }

@@ -4,7 +4,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 
 use crate::domain::activity::ActivityGroup;
 use crate::domain::course_list::{self, CourseRow};
@@ -18,8 +18,9 @@ use crate::tui::ui::render_list;
 
 use super::columns::{GROUP_WIDTH, RowColumns, RowNeeds, activity_columns, activity_min_row_width};
 use super::{
-    deadline_cell, deadline_label, deadline_list_label, empty, empty_note, group_label, row_width,
-    submission_time_label, title_suffix, too_narrow,
+    MEDIA_HINT, deadline_cell, deadline_label, deadline_list_label, empty, empty_note, group_label,
+    panel_width, push_wrapped, row_width, scrolled_panel, submission_time_label, title_suffix,
+    too_narrow,
 };
 
 /// 詳情面板最多列出的提交記錄筆數（總數仍顯示於摘要行）。
@@ -117,14 +118,11 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
                     app.lms.detail.is_loading(),
                 ),
                 Some(detail) => {
-                    let lines = detail_lines(detail);
-                    frame.render_widget(
-                        Paragraph::new(lines)
-                            .block(THEME.block(&title))
-                            .style(THEME.base_style())
-                            .wrap(Wrap { trim: false }),
-                        area,
-                    );
+                    let lines = detail_lines(detail, panel_width(area));
+                    app.lms
+                        .detail_scroll
+                        .sync(area.height.saturating_sub(2), lines.len());
+                    scrolled_panel(frame, area, &title, lines, app.lms.detail_scroll.offset());
                 }
             }
         }
@@ -260,7 +258,8 @@ fn activity_list(
     frame.render_stateful_widget(list, list_area, state);
 }
 
-fn detail_lines(detail: &ActivityDetailView) -> Vec<Line<'static>> {
+/// 活動詳情內容（已依面板寬度換行）。
+fn detail_lines(detail: &ActivityDetailView, width: usize) -> Vec<Line<'static>> {
     let mut meta = format!(
         "类型：{}　截止：{}",
         detail.kind.label(),
@@ -276,22 +275,50 @@ fn detail_lines(detail: &ActivityDetailView) -> Vec<Line<'static>> {
             }
         ));
     }
-    let mut lines = vec![
-        Line::from(Span::styled(
-            detail.title.clone(),
-            Style::default().fg(THEME.text).add_modifier(Modifier::BOLD),
-        )),
-        Line::from(Span::styled(meta, THEME.muted_style())),
-    ];
+
+    let mut lines = Vec::new();
+    push_wrapped(
+        &mut lines,
+        detail.title.clone(),
+        Style::default().fg(THEME.text).add_modifier(Modifier::BOLD),
+        width,
+    );
+    push_wrapped(&mut lines, meta, THEME.muted_style(), width);
+
+    // 活動說明（作業／資料說明、頁面正文）；沒有可顯示內容時整個區塊不顯示。
+    if let Some(description) = &detail.description {
+        push_wrapped(
+            &mut lines,
+            description_label(detail.kind),
+            THEME.muted_style(),
+            width,
+        );
+        if let Some(text) = &description.text {
+            for line in text.split('\n') {
+                push_wrapped(
+                    &mut lines,
+                    line.to_owned(),
+                    Style::default().fg(THEME.text),
+                    width,
+                );
+            }
+        }
+        // 說明可能就是一張圖片：文字轉換後什麼都不剩，必須明講。
+        if description.has_media {
+            push_wrapped(&mut lines, MEDIA_HINT, THEME.muted_style(), width);
+        }
+    }
 
     // 提交狀態只適用於作業；其他類型不顯示「待核实」。
     if detail.kind == ActivityKind::Homework {
         match &detail.submissions {
             Some(submissions) if submissions.is_empty() => {
-                lines.push(Line::from(Span::styled(
+                push_wrapped(
+                    &mut lines,
                     "提交记录：暂无（视为未提交）",
                     THEME.status_style(Tone::Accent),
-                )));
+                    width,
+                );
             }
             Some(submissions) => {
                 // 與作業清單的「有效提交」語義保持一致（單一判據
@@ -314,13 +341,14 @@ fn detail_lines(detail: &ActivityDetailView) -> Vec<Line<'static>> {
                 } else {
                     (format!("提交记录：{effective} 条有效"), Tone::Success)
                 };
-                lines.push(Line::from(Span::styled(label, THEME.status_style(tone))));
+                push_wrapped(&mut lines, label, THEME.status_style(tone), width);
                 for submission in submissions.iter().take(DETAIL_SUBMISSION_LIMIT) {
                     let score = submission
                         .score
                         .as_ref()
                         .map_or(String::new(), |score| format!("　分数：{score}"));
-                    lines.push(Line::from(Span::styled(
+                    push_wrapped(
+                        &mut lines,
                         format!(
                             "· {}（最新版本：{}）{score}",
                             submission_time_label(submission.timestamp()),
@@ -331,20 +359,32 @@ fn detail_lines(detail: &ActivityDetailView) -> Vec<Line<'static>> {
                             }
                         ),
                         THEME.muted_style(),
-                    )));
+                        width,
+                    );
                 }
             }
             None => {
-                lines.push(Line::from(Span::styled(
+                push_wrapped(
+                    &mut lines,
                     "提交记录：无法确认（待核实）",
                     THEME.status_style(Tone::Warning),
-                )));
+                    width,
+                );
             }
         }
     }
 
     if let Some(note) = &detail.note {
-        lines.push(Line::from(Span::styled(note.clone(), THEME.error_style())));
+        push_wrapped(&mut lines, note.clone(), THEME.error_style(), width);
     }
     lines
+}
+
+/// 說明區塊的標題：作業為「作业描述」，其他活動為「内容」。
+fn description_label(kind: ActivityKind) -> &'static str {
+    if kind == ActivityKind::Homework {
+        "作业描述："
+    } else {
+        "内容："
+    }
 }

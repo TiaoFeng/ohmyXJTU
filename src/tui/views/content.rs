@@ -6,11 +6,12 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::domain::homework::parse_time;
-use crate::text::fit_display;
+use crate::text::{fit_display, wrap_display};
 use crate::tui::app::{App, NavItem};
 use crate::tui::theme::THEME;
 
@@ -36,6 +37,14 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
 
 /// 清單列以外的固定佔用欄寬：外框左右欄線與選取列的高亮符號。
 const ROW_CHROME_WIDTH: u16 = 3;
+
+/// 詳情面板的預設高度（課表與流水頁；作業頁依內容區高度自行計算）。
+const DETAIL_HEIGHT: u16 = 7;
+
+/// 說明含圖片等無法以文字呈現的內容時的提示。
+///
+/// 純圖片說明沒有任何文字可顯示，若不標註，使用者會以為這項作業沒有說明。
+const MEDIA_HINT: &str = "（说明含图片，按 o 打开网页查看）";
 
 /// 清單列的可用顯示寬度：扣除外框左右欄線與選取列的高亮符號。
 ///
@@ -67,12 +76,55 @@ fn too_narrow(frame: &mut Frame, area: Rect, title: &str, required: usize, avail
     );
 }
 
-fn split_detail(area: Rect, open: bool) -> (Rect, Option<Rect>) {
+fn split_detail(area: Rect, open: bool, detail_height: u16) -> (Rect, Option<Rect>) {
     if !open {
         return (area, None);
     }
-    let [list, detail] = Layout::vertical([Constraint::Min(6), Constraint::Length(7)]).areas(area);
+    let [list, detail] =
+        Layout::vertical([Constraint::Min(6), Constraint::Length(detail_height)]).areas(area);
     (list, Some(detail))
+}
+
+/// 面板的可用文字寬度（扣除外框左右欄線）。
+fn panel_width(area: Rect) -> usize {
+    usize::from(area.width.saturating_sub(2))
+}
+
+/// 依顯示寬度把一段文字換行後加入內容列。
+///
+/// 需要精確控制捲動的內容一律預先換行：繪製端的 `Wrap` 無法回報實際列數，
+/// 也就無法正確夾取捲動位移。
+fn push_wrapped(
+    lines: &mut Vec<Line<'static>>,
+    text: impl Into<String>,
+    style: Style,
+    width: usize,
+) {
+    for line in wrap_display(&text.into(), width) {
+        lines.push(Line::from(Span::styled(line, style)));
+    }
+}
+
+/// 繪製可捲動的內容面板：內容已預先換行，`offset` 為起始列。
+fn scrolled_panel(
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    lines: Vec<Line<'static>>,
+    offset: u16,
+) {
+    let viewport = usize::from(area.height.saturating_sub(2));
+    let visible = lines
+        .into_iter()
+        .skip(usize::from(offset))
+        .take(viewport)
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        Paragraph::new(visible)
+            .block(THEME.block(title))
+            .style(THEME.base_style()),
+        area,
+    );
 }
 
 fn detail_panel(frame: &mut Frame, area: Rect, title: &str, lines: Vec<Line<'static>>) {

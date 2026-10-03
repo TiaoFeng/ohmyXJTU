@@ -214,6 +214,8 @@ pub struct LmsState {
     ///
     /// 用途同 [`Self::activities_course`]。
     pub detail_activity: Option<String>,
+    /// 活動詳情的捲動狀態。
+    pub detail_scroll: ScrollState,
     /// 選取的課程索引。
     pub course_index: usize,
     /// 選取的活動索引（相對於目前分組過濾後的清單）。
@@ -776,6 +778,65 @@ pub enum Screen {
     TermPicker(TermPickerState),
 }
 
+/// 可捲動內容的位移狀態。
+///
+/// 視窗高度與總列數由繪製端回寫（見 [`Self::sync`]）：換行後的實際列數只有
+/// 繪製時才知道，按鍵端必須以同一組數字夾取位移，否則會捲過頭或捲不到底。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ScrollState {
+    offset: u16,
+    viewport: u16,
+    total: u16,
+}
+
+impl ScrollState {
+    /// 目前位移（列）。
+    pub fn offset(&self) -> u16 {
+        self.offset
+    }
+
+    /// 內容是否超過視窗（決定是否顯示捲動提示）。
+    pub fn scrollable(&self) -> bool {
+        self.total > self.viewport
+    }
+
+    /// 回到頂端。
+    pub fn reset(&mut self) {
+        self.offset = 0;
+    }
+
+    /// 由繪製端回寫視窗高度與總列數，並夾取目前位移。
+    pub fn sync(&mut self, viewport: u16, total: usize) {
+        self.viewport = viewport;
+        self.total = u16::try_from(total).unwrap_or(u16::MAX);
+        self.offset = self.offset.min(self.max_offset());
+    }
+
+    /// 往上（`-1`）／下（`+1`）捲動一頁。
+    pub fn page(&mut self, delta: i32) {
+        let step = i64::from(self.viewport.max(1)) * i64::from(delta);
+        let offset = (i64::from(self.offset) + step).max(0);
+        self.offset = u16::try_from(offset)
+            .unwrap_or(u16::MAX)
+            .min(self.max_offset());
+    }
+
+    /// 捲到頂端。
+    pub fn to_top(&mut self) {
+        self.offset = 0;
+    }
+
+    /// 捲到底端。
+    pub fn to_bottom(&mut self) {
+        self.offset = self.max_offset();
+    }
+
+    /// 最大位移（內容不超過視窗時為 0）。
+    fn max_offset(&self) -> u16 {
+        self.total.saturating_sub(self.viewport)
+    }
+}
+
 /// 應用程式狀態。
 #[derive(Debug)]
 pub struct App {
@@ -834,6 +895,8 @@ pub struct App {
     pub schedule_detail: bool,
     /// 作業是否展開詳情。
     pub homework_detail: bool,
+    /// 作業詳情的捲動狀態。
+    pub homework_scroll: ScrollState,
     /// 流水是否展開詳情。
     pub flow_detail: bool,
     /// 各頁最近一次成功載入的時間（顯示用）。
@@ -870,6 +933,7 @@ impl App {
             activity_state: ListState::default().with_selected(Some(0)),
             schedule_detail: false,
             homework_detail: false,
+            homework_scroll: ScrollState::default(),
             flow_detail: false,
             updated_at: UpdatedAt::default(),
         }
@@ -944,6 +1008,10 @@ impl App {
             (current + len - 1) % len
         };
         self.set_selection(next);
+        // 換一筆作業時詳情內容整組替換，捲動位置回到頂端。
+        if self.nav == NavItem::Homework {
+            self.homework_scroll.reset();
+        }
     }
 
     /// 依畫面可見順序找下一門課（跳過標題／空白列），回傳其真實課程索引。
@@ -1021,6 +1089,7 @@ impl App {
             self.flow_state.select(Some(0));
             self.course_state.select(Some(0));
             self.activity_state.select(Some(0));
+            self.homework_scroll.reset();
             return;
         }
         Self::settle_loading(&mut self.schedule);
@@ -1029,6 +1098,8 @@ impl App {
         Self::settle_loading(&mut self.lms.courses);
         Self::settle_loading(&mut self.lms.activities);
         Self::settle_loading(&mut self.lms.detail);
+        self.homework_scroll.reset();
+        self.lms.detail_scroll.reset();
     }
 
     /// 目前頁面的登入狀態文字（底欄顯示用）。

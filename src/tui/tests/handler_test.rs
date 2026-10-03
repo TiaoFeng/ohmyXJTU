@@ -725,7 +725,7 @@ fn lms_activity(id: &str, kind: &str) -> LmsActivity {
         end_time: None,
         submit_by_group: None,
         group_id: None,
-        description: None,
+        data: None,
         user_submit_count: None,
         published: None,
     }
@@ -797,6 +797,7 @@ fn o_key_sends_open_activity_for_selected_item() {
         id: "2".to_owned(),
         title: "作业".to_owned(),
         kind: ActivityKind::Homework,
+        description: None,
         end_time: None,
         submit_by_group: Some(false),
         submissions: None,
@@ -822,6 +823,7 @@ fn homework_page(course_id: &str, activity_id: &str, submitted: usize) -> Homewo
         activity_id: activity_id.to_owned(),
         title: "第一次作业".to_owned(),
         end_time: Some("2026-10-01 23:59:59".to_owned()),
+        description: None,
         submit_by_group: Some(false),
         submission_count: Some(submitted),
         note: None,
@@ -1259,4 +1261,80 @@ fn control_modified_characters_are_not_inserted() {
         panic!("應停留在解鎖表單");
     };
     assert_eq!(form.value("加密口令"), "", "ctrl+u 應清空欄位");
+}
+
+/// 捲動鍵（PgUp／PgDn／Home／End）：只在詳情可捲動的頁面生效。
+#[test]
+fn page_keys_scroll_detail_only_on_detail_pages() {
+    let (jobs, _rx) = channel();
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Homework;
+
+    // 未展開詳情：捲動鍵不動作。
+    app.homework_scroll.sync(5, 20);
+    press(&mut app, &jobs, KeyCode::PageDown);
+    assert_eq!(app.homework_scroll.offset(), 0, "未展開詳情時不應捲動");
+
+    // 展開詳情：PgDn／PgUp 以視窗為一步，End／Home 直達兩端。
+    app.homework_detail = true;
+    press(&mut app, &jobs, KeyCode::PageDown);
+    assert_eq!(app.homework_scroll.offset(), 5, "PgDn 應往下捲一頁");
+    press(&mut app, &jobs, KeyCode::PageUp);
+    assert_eq!(app.homework_scroll.offset(), 0, "PgUp 應往上捲一頁");
+    press(&mut app, &jobs, KeyCode::End);
+    assert_eq!(app.homework_scroll.offset(), 15, "End 應捲到底端");
+    press(&mut app, &jobs, KeyCode::Home);
+    assert_eq!(app.homework_scroll.offset(), 0, "Home 應回到頂端");
+
+    // 換一筆作業（↓）：新的說明從頂端開始讀。
+    let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00+08:00").expect("固定时间");
+    let items = aggregate(
+        &[
+            HomeworkInput {
+                course_id: "1".to_owned(),
+                course_name: "编译原理".to_owned(),
+                activity_id: "a-1".to_owned(),
+                title: "作业一".to_owned(),
+                end_time: None,
+                description: None,
+                submit_by_group: Some(false),
+                submission_count: Some(0),
+                note: None,
+            },
+            HomeworkInput {
+                course_id: "1".to_owned(),
+                course_name: "编译原理".to_owned(),
+                activity_id: "a-2".to_owned(),
+                title: "作业二".to_owned(),
+                end_time: None,
+                description: None,
+                submit_by_group: Some(false),
+                submission_count: Some(0),
+                note: None,
+            },
+        ],
+        now,
+    );
+    app.homework = Page::Ready(HomeworkData {
+        items,
+        ..HomeworkData::default()
+    });
+    app.homework_scroll.sync(5, 20);
+    app.homework_scroll.to_bottom();
+    assert_eq!(app.homework_scroll.offset(), 15, "前置條件：已捲到底端");
+    press(&mut app, &jobs, KeyCode::Down);
+    assert_eq!(app.homework_scroll.offset(), 0, "換作業後應回到頂端");
+
+    // 思源學堂詳情層：捲動作用於活動詳情。
+    app.nav = NavItem::Lms;
+    app.lms.level = LmsLevel::Detail;
+    app.lms.detail_scroll.sync(5, 20);
+    press(&mut app, &jobs, KeyCode::PageDown);
+    assert_eq!(app.lms.detail_scroll.offset(), 5, "詳情層應捲動活動詳情");
+
+    // 其他頁面：不影響任何捲動狀態。
+    app.nav = NavItem::Schedule;
+    press(&mut app, &jobs, KeyCode::PageDown);
+    assert_eq!(app.lms.detail_scroll.offset(), 5, "其他頁面不得捲動");
 }

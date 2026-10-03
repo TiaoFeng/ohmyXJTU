@@ -269,6 +269,8 @@ fn apply_homework(app: &mut App, update: HomeworkUpdate) {
         .min(len.saturating_sub(1));
     app.homework_state.select(Some(selected));
     if finished {
+        // 新一輪結果取代了畫面上的作業：詳情捲動回到頂端。
+        app.homework_scroll.reset();
         app.set_message(format!(
             "作业已更新：未完成 {unfinished} 项（用时 {:.1}s）",
             elapsed.as_secs_f32()
@@ -343,6 +345,7 @@ fn apply_activity_detail(app: &mut App, detail: ActivityDetailView) {
         return;
     }
     app.lms.detail = Page::Ready(detail);
+    app.lms.detail_scroll.reset();
     app.updated_at.lms = Some(now_clock());
     app.ensure_main();
 }

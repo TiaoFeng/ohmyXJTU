@@ -120,6 +120,9 @@ fn hints(app: &App) -> String {
         NavItem::Homework => {
             text.push_str("  [ ] 分组  s 学期  o 打开网页");
             if app.homework_detail {
+                if app.homework_scroll.scrollable() {
+                    text.push_str("  PgUp/PgDn 滚动");
+                }
                 text.push_str("  enter 收起详情");
             } else {
                 text.push_str("  enter 查看详情");
@@ -130,7 +133,12 @@ fn hints(app: &App) -> String {
             LmsLevel::Activities => {
                 text.push_str("  [ ] 分组  enter 查看详情  o 打开网页  esc 返回课程");
             }
-            LmsLevel::Detail => text.push_str("  o 打开网页  esc 返回活动"),
+            LmsLevel::Detail => {
+                text.push_str("  o 打开网页  esc 返回活动");
+                if app.lms.detail_scroll.scrollable() {
+                    text.push_str("  PgUp/PgDn 滚动");
+                }
+            }
         },
         _ => {
             if app.schedule_detail {

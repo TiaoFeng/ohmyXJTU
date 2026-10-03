@@ -478,6 +478,7 @@ impl Worker {
             // 簡要列表常缺少此欄位：先原樣保留，登入成功後由提交摘要覆寫；
             // 摘要失敗時維持 `None`（無法確認），不得預設為個人作業。
             submit_by_group: activity.submit_by_group,
+            description: None,
             submission_count: None,
             note: None,
         };
@@ -487,6 +488,7 @@ impl Worker {
                 input.submit_by_group = summary.submit_by_group;
                 input.submission_count = summary.count;
                 input.note = summary.note;
+                input.description = summary.description;
             }
             // 登入態失效與連線層錯誤向上傳播；其他單項失敗保留「待核实」。
             Err(err) if !is_recoverable(&err) => return Err(err),

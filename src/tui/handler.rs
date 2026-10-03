@@ -469,6 +469,11 @@ fn handle_main(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
         KeyCode::Char('s') => controller::open_term_picker(app),
         KeyCode::Char('n') => controller::change_flow_page(app, jobs, 1),
         KeyCode::Char('p') => controller::change_flow_page(app, jobs, -1),
+        // 詳情內容偏長時可捲動（作業頁詳情與思源學堂活動詳情）。
+        KeyCode::PageUp => controller::scroll_detail(app, controller::DetailScroll::PageUp),
+        KeyCode::PageDown => controller::scroll_detail(app, controller::DetailScroll::PageDown),
+        KeyCode::Home => controller::scroll_detail(app, controller::DetailScroll::Top),
+        KeyCode::End => controller::scroll_detail(app, controller::DetailScroll::Bottom),
         _ => {}
     }
 }

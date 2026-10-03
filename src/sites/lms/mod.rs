@@ -4,10 +4,13 @@
 //! 課程活動為 `GET /api/courses/{id}/activities`，活動詳情為
 //! `GET /api/activities/{id}`（作業會附帶提交記錄）。
 
+mod html;
 mod js_object;
 pub mod models;
 
-pub use models::{ActivityKind, LmsActivity, LmsCourse, LmsSubmission, LmsSubmissionList};
+pub use models::{
+    ActivityKind, ActivityText, LmsActivity, LmsCourse, LmsSubmission, LmsSubmissionList,
+};
 
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -107,6 +110,8 @@ pub struct SubmissionSummary {
     pub count: Option<usize>,
     /// 無法確認的原因。
     pub note: Option<String>,
+    /// 作業說明（純文字＋是否含圖片）；`None` 代表詳情沒有可顯示的說明。
+    pub description: Option<ActivityText>,
 }
 
 /// 活動詳情缺少 `submit_by_group` 時的說明。
@@ -258,13 +263,17 @@ impl<'a> LmsApi<'a> {
     /// 以既有詳情計算提交摘要（個人作業可省一次提交列表請求）。
     ///
     /// 詳情缺少 `submit_by_group` 時無法判定個人或小組，一律回報「待核实」
-    /// 且不發出任何提交查詢（含不查 `/user/index`）。
+    /// 且不發出任何提交查詢（含不查 `/user/index`）。說明欄位與提交狀態同源
+    /// （同一次詳情請求），因此所有分支都一併帶上。
     pub fn submission_summary_for(&mut self, detail: &LmsActivity) -> AppResult<SubmissionSummary> {
+        let description = detail.body();
+
         let Some(submit_by_group) = detail.submit_by_group else {
             return Ok(SubmissionSummary {
                 submit_by_group: None,
                 count: None,
                 note: Some(MISSING_SUBMIT_BY_GROUP_NOTE.to_owned()),
+                description,
             });
         };
 
@@ -275,6 +284,7 @@ impl<'a> LmsApi<'a> {
                 // 「未提交」；超出範圍時視為無法確認（`None`）。
                 count: usize::try_from(count).ok(),
                 note: None,
+                description,
             });
         }
 
@@ -283,6 +293,7 @@ impl<'a> LmsApi<'a> {
                 submit_by_group: Some(submit_by_group),
                 count: Some(list.effective_count()),
                 note: None,
+                description,
             }),
             // 登入態失效必須向上傳播，交由統一重登流程處理。
             Err(err) if err.needs_relogin() => Err(err),
@@ -291,6 +302,7 @@ impl<'a> LmsApi<'a> {
                 submit_by_group: Some(submit_by_group),
                 count: None,
                 note: Some(submission_failure_note(&err)),
+                description,
             }),
         }
     }

@@ -14,7 +14,9 @@ use crate::tui::theme::THEME;
 use crate::tui::ui::render_list;
 
 use super::columns::{FlowColumns, flow_columns};
-use super::{detail_panel, empty, empty_note, row_width, split_detail, title_suffix};
+use super::{
+    DETAIL_HEIGHT, detail_panel, empty, empty_note, row_width, split_detail, title_suffix,
+};
 
 /// 依目前資料繪製考勤流水頁。
 pub(super) fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
@@ -48,7 +50,7 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
             empty_note(frame, area, &title, "本页没有流水记录");
         }
         Some(_) => {
-            let (list_area, detail_area) = split_detail(area, app.flow_detail);
+            let (list_area, detail_area) = split_detail(area, app.flow_detail, DETAIL_HEIGHT);
             let (items, detail) = {
                 let Some(data) = app.attendance.ready() else {
                     return;

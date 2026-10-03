@@ -86,6 +86,74 @@ pub fn fit_display_start(text: &str, width: usize) -> String {
     pad_display_start(&truncated, width)
 }
 
+/// 依顯示寬度貪婪換行（空白處斷行優先，過長的詞逐字素硬切）。
+///
+/// 行首與行尾不留空白、連續空白視為一個空格；`width` 為 0 時回傳空 vec
+/// （沒有可顯示的欄位）。空字串回傳單一空行，讓呼叫端維持固定的列數。
+///
+/// 這是預先排版用的工具：需要精確控制「內容佔幾列」（例如可捲動的詳情面板）
+/// 時，必須自行換行，不能依賴繪製端的 `Wrap`——後者無法回報實際列數。
+pub fn wrap_display(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return Vec::new();
+    }
+
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut current_width = 0_usize;
+    // 本行最後一個可斷行處（`current` 的位元組位移）：只在空白之後成立。
+    let mut break_index: Option<usize> = None;
+    // 下一個非空白字素前需要補一個空白（詞間分隔）。
+    let mut pending_space = false;
+
+    for grapheme in text.graphemes(true) {
+        if grapheme.chars().all(char::is_whitespace) {
+            if !current.is_empty() {
+                break_index = Some(current.len());
+                pending_space = true;
+            }
+            continue;
+        }
+
+        let grapheme_width = display_width(grapheme);
+        let needed = grapheme_width + usize::from(pending_space);
+        if current_width + needed > width && !current.is_empty() {
+            match break_index {
+                Some(index) => {
+                    // 斷點之後的部分（含詞間空格）移到下一行。
+                    let tail = current.split_off(index);
+                    lines.push(current.trim_end().to_owned());
+                    current = tail.trim_start().to_owned();
+                    current_width = display_width(&current);
+                }
+                None => {
+                    // 單一詞超出一列：硬切（不切開字素）。
+                    lines.push(std::mem::take(&mut current));
+                    current_width = 0;
+                }
+            }
+            break_index = None;
+            pending_space = false;
+        }
+
+        if pending_space {
+            current.push(' ');
+            current_width += 1;
+            pending_space = false;
+        }
+        current.push_str(grapheme);
+        current_width += grapheme_width;
+    }
+
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
 #[cfg(test)]
 #[path = "tests/text_test.rs"]
 mod text_test;

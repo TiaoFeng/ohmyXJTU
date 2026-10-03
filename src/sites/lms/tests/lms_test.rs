@@ -187,7 +187,10 @@ fn parses_activity_body_from_nested_data() {
     }
 }
 
-/// 正文只在 `data` 子物件內；頂層同名欄位（舊版解析的目標）不得被採用。
+/// 正文只在 `data` 子物件內；頂層同名欄位不得被當成正文。
+///
+/// 但頂層真有內容時必須看得見：那代表本版讀錯了欄位，介面要提示而不是靜默地
+/// 看起來「這項活動沒有說明」（見 [`TOP_LEVEL_BODY_NOTE`]）。
 #[test]
 fn ignores_top_level_description_field() {
     let value = json!({
@@ -197,11 +200,26 @@ fn ignores_top_level_description_field() {
     });
     let activity: LmsActivity = crate::sites::deserialize_value(value, "查询活动详情").unwrap();
     assert_eq!(body_text(&activity), None);
+    assert_eq!(
+        activity.body().and_then(|body| body.issue),
+        Some(TOP_LEVEL_BODY_NOTE)
+    );
+    // 空白的頂層欄位不算內容，不提示。
+    for value in [
+        json!({"id": 9001, "type": "homework"}),
+        json!({"id": 9001, "type": "homework", "description": "   "}),
+        json!({"id": 9001, "type": "homework", "description": null}),
+    ] {
+        let activity: LmsActivity = crate::sites::deserialize_value(value.clone(), "查询活动详情")
+            .unwrap_or_else(|err| panic!("{value}: {err}"));
+        assert!(activity.body().is_none(), "{value}");
+    }
 }
 
-/// `data` 不是物件時只視為「沒有正文」，不得讓整份活動解析失敗。
+/// `data` 不是物件時只視為「沒有正文」，不得讓整份活動解析失敗；但必須提示原因。
 ///
-/// 詳情解析失敗會使該課程的作業全部退回「待核实」，代價遠大於少一段說明。
+/// 詳情解析失敗會使該課程的作業全部退回「待核实」，代價遠大於少一段說明；
+/// 反過來，靜默地看起來「這項活動沒有說明」也讓人無法判斷欄位假設是否正確。
 #[test]
 fn tolerates_non_object_activity_data() {
     for value in [
@@ -209,12 +227,22 @@ fn tolerates_non_object_activity_data() {
         json!({"id": 9001, "type": "homework", "data": "<p>整份是字串</p>"}),
         json!({"id": 9001, "type": "homework", "data": []}),
         json!({"id": 9001, "type": "homework", "data": 123}),
-        json!({"id": 9001, "type": "homework", "data": null}),
+        json!({"id": 9001, "type": "homework", "data": true}),
     ] {
         let activity: LmsActivity = crate::sites::deserialize_value(value.clone(), "查询活动详情")
             .unwrap_or_else(|err| panic!("{value}: {err}"));
         assert_eq!(body_text(&activity), None, "{value}");
+        assert_eq!(
+            activity.body().and_then(|body| body.issue),
+            Some(BODY_NOT_OBJECT_NOTE),
+            "{value}"
+        );
     }
+
+    // `null` 是明確的「沒有這段內容」，不算型別異常。
+    let value = json!({"id": 9001, "type": "homework", "data": null});
+    let activity: LmsActivity = crate::sites::deserialize_value(value, "查询活动详情").unwrap();
+    assert!(activity.body().is_none());
 }
 
 /// 正文子物件「內部」欄位型別異常時只忽略該欄位，不得讓整份活動解析失敗。
@@ -243,6 +271,66 @@ fn tolerates_non_string_activity_body_fields() {
     });
     let activity: LmsActivity = crate::sites::deserialize_value(value, "查询活动详情").unwrap();
     assert_eq!(body_text(&activity).as_deref(), Some("课程介绍"));
+    // 正文已由 `content` 取得，不因另一個欄位型別異常而提示。
+    assert_eq!(activity.body().and_then(|body| body.issue), None);
+}
+
+/// `data` 是物件、但正文欄位型別不符時提示原因（內容被丟棄，不能靜默）。
+#[test]
+fn reports_unreadable_body_field_types() {
+    for value in [
+        json!({"id": 9001, "type": "homework", "data": {"description": 123}}),
+        json!({"id": 9001, "type": "homework", "data": {"description": {"a": 1}}}),
+        json!({"id": 9001, "type": "homework", "data": {"description": ["x"]}}),
+        json!({"id": 9001, "type": "homework", "data": {"content": 42}}),
+    ] {
+        let activity: LmsActivity = crate::sites::deserialize_value(value.clone(), "查询活动详情")
+            .unwrap_or_else(|err| panic!("{value}: {err}"));
+        assert_eq!(body_text(&activity), None, "{value}");
+        assert_eq!(
+            activity.body().and_then(|body| body.issue),
+            Some(BODY_FIELD_TYPE_NOTE),
+            "{value}"
+        );
+    }
+
+    // 明確的空值（`null`）與空字串是「沒有這段內容」，不是型別異常。
+    for value in [
+        json!({"id": 9001, "type": "homework", "data": {"description": null}}),
+        json!({"id": 9001, "type": "homework", "data": {"description": ""}}),
+        json!({"id": 9001, "type": "homework", "data": {}}),
+    ] {
+        let activity: LmsActivity = crate::sites::deserialize_value(value.clone(), "查询活动详情")
+            .unwrap_or_else(|err| panic!("{value}: {err}"));
+        assert!(activity.body().is_none(), "{value}");
+    }
+
+    // 附件仍要照常列出，但正文被丟棄的原因不得因為「有東西可顯示」而省略。
+    let value = json!({
+        "id": 9001, "type": "homework",
+        "data": {"description": 7},
+        "uploads": [{"id": 1, "name": "题目.pdf", "size": 2048}]
+    });
+    let activity: LmsActivity = crate::sites::deserialize_value(value, "查询活动详情").unwrap();
+    let body = activity.body().expect("有附件时仍应显示说明区块");
+    assert_eq!(body.attachments.len(), 1, "附件应照常列出");
+    assert_eq!(body.issue, Some(BODY_FIELD_TYPE_NOTE));
+}
+
+/// 正常取得正文（或確實沒有正文）時不帶任何原因。
+#[test]
+fn normal_body_has_no_issue() {
+    let value = json!({
+        "id": 9001,
+        "type": "homework",
+        "data": {"description": "<p>第一章习题</p>"},
+        "uploads": [{"id": 1, "name": "题目.pdf", "size": 2048}]
+    });
+    let activity: LmsActivity = crate::sites::deserialize_value(value, "查询活动详情").unwrap();
+    let body = activity.body().expect("应取得正文");
+    assert_eq!(body.text.as_deref(), Some("第一章习题"));
+    assert_eq!(body.attachments.len(), 1, "附件仍应带出");
+    assert_eq!(body.issue, None);
 }
 
 /// 整份說明只有一張圖片：不得當成「沒有說明」，要讓介面能標註。

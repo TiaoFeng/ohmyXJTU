@@ -20,6 +20,7 @@ use crate::http::{HttpClient, HttpRequest, HttpResponse, Method};
 use crate::session::AccessMode;
 use crate::sites::attendance::{AttendanceSite, AttendanceStatus};
 use crate::sites::lms::LmsSite;
+use crate::sites::lms::{BODY_FIELD_TYPE_NOTE, BODY_NOT_OBJECT_NOTE};
 use crate::sites::{attendance, lms};
 use crate::task::protocol::{DataKey, HomeworkUpdate};
 use crate::tui::app::{App, LoginScreen};
@@ -2539,10 +2540,13 @@ fn malformed_description_does_not_break_submission_status() {
     let updates = homework_updates(&mut harness);
     let last = updates.last().expect("最终更新");
     assert_eq!(last.items.len(), 1);
-    assert!(
-        last.items[0].description.is_none(),
-        "类型异常的说明应被忽略"
-    );
+    // 型別異常的說明不顯示內容，但要留下原因讓介面提示（不得靜默成「沒有說明」）。
+    let description = last.items[0]
+        .description
+        .as_ref()
+        .expect("类型异常时应保留原因");
+    assert_eq!(description.text, None, "类型异常的说明不应显示内容");
+    assert_eq!(description.issue, Some(BODY_FIELD_TYPE_NOTE));
     assert_eq!(
         last.items[0].state,
         HomeworkState::Pending,
@@ -2553,6 +2557,59 @@ fn malformed_description_does_not_break_submission_status() {
         "不应产生待核实汇总：{:?}",
         last.issues
     );
+}
+
+/// `data` 不是物件（型別假設與實際回應不符）時：提交狀態照常，說明帶出原因。
+///
+/// 這是實網驗收的診斷路徑——若學校把正文改成字串（或改了欄位結構），作業清單仍
+/// 必須正確，而詳情面板會說明「未取得正文」，不必靠猜。
+#[test]
+fn non_object_activity_data_keeps_the_status_and_reports_the_reason() {
+    let site = Arc::new(FakeHomeworkSite {
+        seen: Arc::new(Mutex::new(Vec::new())),
+        courses: serde_json::json!({ "courses": [
+            { "id": "1", "name": "编译原理", "semester": { "code": "2026-1" } },
+        ]}),
+        activities: vec![(
+            "1",
+            serde_json::json!({ "activities": [
+                { "id": "11", "type": "homework", "title": "作业A",
+                  "end_time": "2099-12-31 23:59:59" },
+            ]}),
+        )],
+        details: vec![(
+            "11",
+            serde_json::json!({ "id": "11", "type": "homework", "title": "作业A",
+                "end_time": "2099-12-31 23:59:59",
+                "submit_by_group": false, "user_submit_count": 0,
+                "data": "<p>整份是字串</p>" }),
+        )],
+        expire_first_submission: false,
+        submissions: AtomicUsize::new(0),
+        attendance_term: Some(("2026-2027", "第一学期")),
+    });
+
+    let system = Arc::clone(&site);
+    let mut harness = harness(move |request| system.handle(request));
+    harness.login_both_sites();
+
+    harness
+        .dispatch(Job::LoadHomework { force: false })
+        .expect("作业加载应当成功");
+    let updates = homework_updates(&mut harness);
+    let last = updates.last().expect("最终更新");
+    assert_eq!(last.items.len(), 1);
+    assert_eq!(
+        last.items[0].state,
+        HomeworkState::Pending,
+        "提交状态不得因正文栏位型别异常而退回「待核实」"
+    );
+    let description = last.items[0]
+        .description
+        .as_ref()
+        .expect("应保留读取失败的原因");
+    assert_eq!(description.text, None);
+    assert_eq!(description.issue, Some(BODY_NOT_OBJECT_NOTE));
 }
 
 #[test]

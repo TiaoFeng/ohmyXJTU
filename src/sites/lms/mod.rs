@@ -9,8 +9,8 @@ mod js_object;
 pub mod models;
 
 pub use models::{
-    ActivityContent, ActivityKind, LmsActivity, LmsCourse, LmsSubmission, LmsSubmissionList,
-    LmsUpload,
+    ActivityContent, ActivityKind, BODY_FIELD_TYPE_NOTE, BODY_NOT_OBJECT_NOTE, LmsActivity,
+    LmsCourse, LmsSubmission, LmsSubmissionList, LmsUpload, TOP_LEVEL_BODY_NOTE,
 };
 
 use serde::de::DeserializeOwned;

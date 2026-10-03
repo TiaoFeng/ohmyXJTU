@@ -15,6 +15,7 @@ fn activity(id: &str, kind: &str, start: Option<&str>, end: Option<&str>) -> Lms
         submit_by_group: None,
         group_id: None,
         data: None,
+        top_level_description: None,
         uploads: Vec::new(),
         user_submit_count: None,
         published: None,

@@ -17,7 +17,8 @@ use crate::model::{ActivityDetailView, FlowData, LessonEntry, ScheduleData};
 use crate::session::{AccessMode, SiteKind};
 use crate::sites::attendance::{AttendanceStatus, FlowRecord};
 use crate::sites::lms::{
-    ActivityContent, ActivityKind, LmsActivity, LmsCourse, LmsSubmissionList, LmsUpload,
+    ActivityContent, ActivityKind, BODY_NOT_OBJECT_NOTE, LmsActivity, LmsCourse, LmsSubmissionList,
+    LmsUpload, TOP_LEVEL_BODY_NOTE,
 };
 use crate::task::HomeworkIssue;
 use crate::tui::app::{
@@ -530,6 +531,7 @@ fn lms_activity(id: &str, kind: &str, end: Option<&str>) -> LmsActivity {
         submit_by_group: None,
         group_id: None,
         data: None,
+        top_level_description: None,
         uploads: Vec::new(),
         user_submit_count: None,
         published: None,
@@ -2079,6 +2081,7 @@ fn homework_detail_shows_activity_description() {
                 has_media: false,
                 has_links: false,
                 attachments: Vec::new(),
+                issue: None,
             }),
             ..homework_input("第一章作业", "2026-10-01 23:59:59", 0)
         }],
@@ -2139,6 +2142,7 @@ fn homework_detail_scrolls_long_description() {
                 has_media: false,
                 has_links: false,
                 attachments: Vec::new(),
+                issue: None,
             }),
             ..homework_input("长作业", "2026-10-01 23:59:59", 0)
         }],
@@ -2181,6 +2185,7 @@ fn homework_detail_marks_image_only_description() {
                 has_media: true,
                 has_links: false,
                 attachments: Vec::new(),
+                issue: None,
             }),
             ..homework_input("图片作业", "2026-10-01 23:59:59", 0)
         }],
@@ -2215,6 +2220,7 @@ fn homework_detail_marks_link_only_description() {
                 has_media: false,
                 has_links: true,
                 attachments: Vec::new(),
+                issue: None,
             }),
             ..homework_input("链接作业", "2026-10-01 23:59:59", 0)
         }],
@@ -2249,6 +2255,7 @@ fn homework_detail_combines_media_and_link_hint() {
                 has_media: true,
                 has_links: true,
                 attachments: Vec::new(),
+                issue: None,
             }),
             ..homework_input("图文作业", "2026-10-01 23:59:59", 0)
         }],
@@ -2285,6 +2292,7 @@ fn footer_hints_scrolling_when_detail_is_scrollable() {
                 has_media: false,
                 has_links: false,
                 attachments: Vec::new(),
+                issue: None,
             }),
             ..homework_input("长作业", "2026-10-01 23:59:59", 0)
         }],
@@ -2355,6 +2363,7 @@ fn footer_keeps_page_hints_on_narrow_terminals() {
                 has_media: false,
                 has_links: false,
                 attachments: Vec::new(),
+                issue: None,
             }),
             ..homework_input("长作业", "2026-10-01 23:59:59", 0)
         }],
@@ -2422,6 +2431,7 @@ fn activity_detail_shows_description_and_scrolls() {
             has_media: false,
             has_links: false,
             attachments: Vec::new(),
+            issue: None,
         }),
         end_time: None,
         submit_by_group: Some(false),
@@ -2465,6 +2475,7 @@ fn activity_detail_labels_description_by_kind() {
             has_media: true,
             has_links: false,
             attachments: Vec::new(),
+            issue: None,
         }),
         end_time: None,
         submit_by_group: None,
@@ -2510,6 +2521,7 @@ fn homework_detail_lists_attachments() {
                     upload("题目.pdf", Some(1_234_567)),
                     upload("参考答案.docx", Some(24_576)),
                 ],
+                issue: None,
             }),
             ..homework_input("附件作业", "2026-10-01 23:59:59", 0)
         }],
@@ -2554,6 +2566,7 @@ fn homework_detail_caps_the_attachment_list() {
                 has_media: false,
                 has_links: false,
                 attachments,
+                issue: None,
             }),
             ..homework_input("多附件作业", "2026-10-01 23:59:59", 0)
         }],
@@ -2571,4 +2584,73 @@ fn homework_detail_caps_the_attachment_list() {
     assert!(text.contains("附件5.pdf"), "应列出前几项：\n{text}");
     assert!(!text.contains("附件6.pdf"), "超出的附件不应列出：\n{text}");
     assert!(text.contains("…另有 2 个"), "应注明剩余数量：\n{text}");
+}
+
+/// 讀不出正文時顯示原因：不得靜默地看起來「這項活動沒有說明」。
+///
+/// 這是實網驗收的診斷入口——欄位假設與實際回應不符時，畫面會直接說出原因。
+#[test]
+fn homework_detail_reports_unreadable_description() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00+08:00").expect("固定时间");
+    let items = aggregate(
+        &[HomeworkInput {
+            description: Some(ActivityContent {
+                text: None,
+                has_media: false,
+                has_links: false,
+                attachments: Vec::new(),
+                issue: Some(BODY_NOT_OBJECT_NOTE),
+            }),
+            ..homework_input("异常作业", "2026-10-01 23:59:59", 0)
+        }],
+        now,
+    );
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Homework;
+    app.homework = Page::Ready(homework_data(items, None));
+    app.homework_detail = true;
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(text.contains("作业描述："), "标题仍应显示：\n{text}");
+    assert!(
+        text.contains("未取得说明正文"),
+        "应显示读取失败的原因：\n{text}"
+    );
+    assert!(text.contains("不是对象"), "应指出具体原因：\n{text}");
+}
+
+/// 思源學堂活動詳情同樣顯示讀取失敗的原因（共用同一套說明區塊）。
+#[test]
+fn activity_detail_reports_unreadable_description() {
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Lms;
+    app.lms.level = LmsLevel::Detail;
+    app.lms.detail = Page::Ready(ActivityDetailView {
+        id: "1".to_owned(),
+        title: "作业A".to_owned(),
+        kind: ActivityKind::Homework,
+        description: Some(ActivityContent {
+            text: None,
+            has_media: false,
+            has_links: false,
+            attachments: Vec::new(),
+            issue: Some(TOP_LEVEL_BODY_NOTE),
+        }),
+        end_time: None,
+        submit_by_group: Some(false),
+        submissions: None,
+        note: None,
+    });
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(text.contains("未取得说明正文"), "应显示原因：\n{text}");
+    assert!(text.contains("顶层"), "应指出正文实际位置：\n{text}");
 }

@@ -75,56 +75,6 @@ fn tolerant_field_errors_describe_type_only() {
     );
 }
 
-/// 可選物件欄位：缺欄位或非物件一律視為「沒有這個區塊」。
-///
-/// 伺服器對同一欄位的型別並不總是穩定（例如活動正文的 `data`）：一段可選內容
-/// 不應該毀掉整份解析。
-#[test]
-fn optional_object_tolerates_non_object_values() {
-    #[derive(serde::Deserialize, Debug)]
-    struct Body {
-        #[serde(default)]
-        text: Option<String>,
-    }
-
-    #[derive(serde::Deserialize, Debug)]
-    struct Target {
-        #[serde(default, deserialize_with = "optional_object")]
-        data: Option<Body>,
-    }
-
-    for value in [
-        serde_json::json!({}),
-        serde_json::json!({ "data": null }),
-        serde_json::json!({ "data": "" }),
-        serde_json::json!({ "data": "<p>整份是字串</p>" }),
-        serde_json::json!({ "data": [1, 2] }),
-        serde_json::json!({ "data": 12 }),
-    ] {
-        let target: Target = deserialize_value(value.clone(), "活动详情")
-            .unwrap_or_else(|err| panic!("{value}: {err}"));
-        assert!(target.data.is_none(), "{value}");
-    }
-
-    let target: Target = deserialize_value(
-        serde_json::json!({ "data": { "text": "正文" } }),
-        "活动详情",
-    )
-    .expect("物件应正常解析");
-    assert_eq!(
-        target.data.and_then(|body| body.text).as_deref(),
-        Some("正文")
-    );
-
-    // 物件「內部」型別不符仍是協定錯誤：可見的失敗，不得靜默吞掉。
-    let err =
-        deserialize_value::<Target>(serde_json::json!({ "data": { "text": 42 } }), "活动详情")
-            .expect_err("内部类型不符应失败");
-    let message = err.to_string();
-    assert!(message.contains("数据类型不符"), "{message}");
-    assert!(!message.contains("42"), "不应包含字段值：{message}");
-}
-
 /// 可選字串欄位：只接受字串，其餘型別一律視為「沒有這段內容」。
 ///
 /// 用於純展示用的文字欄位（活動說明）：型別異常時只應損失該段說明，不應讓整份

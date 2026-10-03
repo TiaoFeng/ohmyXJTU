@@ -166,25 +166,6 @@ where
     }
 }
 
-/// 缺欄位或內容不是物件時回傳 `None` 的可選物件欄位。
-///
-/// 伺服器對同一欄位的型別並不總是穩定（例如活動正文的 `data`）：把非物件的內容
-/// 一律視為「沒有這個區塊」，比讓整份回應解析失敗安全——詳情解析失敗會使該課程
-/// 的作業全部退回「待核实」，而此處損失的只是一段說明。
-pub(crate) fn optional_object<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: DeserializeOwned,
-{
-    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
-    match value {
-        Some(value @ serde_json::Value::Object(_)) => serde_json::from_value(value)
-            .map(Some)
-            .map_err(|_| serde::de::Error::custom("对象内容无法解析")),
-        _ => Ok(None),
-    }
-}
-
 /// 缺欄位或型別不符時回傳 `None` 的非負整數（接受數字與可解析的數字字串）。
 ///
 /// 用於純展示用的數量欄位（例如附件大小）：型別異常時只損失這個數字，不讓整份

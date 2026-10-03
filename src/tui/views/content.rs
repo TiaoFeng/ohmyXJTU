@@ -13,6 +13,7 @@ use ratatui::widgets::{Paragraph, Wrap};
 use crate::domain::homework::parse_time;
 use crate::sites::lms::{ActivityContent, ActivityKind, LmsUpload};
 use crate::text::{fit_display, wrap_display};
+use crate::tone::Tone;
 use crate::tui::app::{App, NavItem, ScrollState};
 use crate::tui::theme::THEME;
 
@@ -176,6 +177,16 @@ pub(super) fn push_description(
     }
     if !content.attachments.is_empty() {
         push_attachments(lines, &content.attachments, width);
+    }
+    // 來源欄位存在卻讀不出正文：讓「欄位假設與實際回應不符」看得見，而不是
+    // 看起來「這項活動沒有說明」。
+    if let Some(issue) = content.issue {
+        push_wrapped(
+            lines,
+            format!("（未取得说明正文：{issue}）"),
+            THEME.status_style(Tone::Warning),
+            width,
+        );
     }
     if let Some(hint) = description_hint(content) {
         push_wrapped(lines, hint, THEME.muted_style(), width);

@@ -27,7 +27,7 @@ fn envelope_business_error_keeps_code_and_message() {
         AppError::Server { code, message } => {
             assert_eq!(code, 12);
             assert!(message.contains("查询课表"), "应保留上下文：{message}");
-            assert!(message.contains("未登录"), "应保留服务端訊息：{message}");
+            assert!(message.contains("未登录"), "应保留服务端信息：{message}");
         }
         other => panic!("应为服务器业务错误，实际：{other}"),
     }
@@ -51,7 +51,7 @@ fn deserialize_error_does_not_include_field_values() {
     );
     assert!(
         !message.contains("示例课程名称"),
-        "不应包含欄位值：{message}"
+        "不应包含字段值：{message}"
     );
 }
 
@@ -68,10 +68,10 @@ fn tolerant_field_errors_describe_type_only() {
     let err = deserialize_value::<Target>(value, "课程").expect_err("应解析失败");
     let message = err.to_string();
     assert!(message.contains("课程"), "应保留上下文：{message}");
-    assert!(!message.contains("数组内容"), "不应包含欄位值：{message}");
+    assert!(!message.contains("数组内容"), "不应包含字段值：{message}");
     assert!(
         !message.contains("期望字符串或数字"),
-        "不应包含内部訊息：{message}"
+        "不应包含内部信息：{message}"
     );
 }
 
@@ -119,10 +119,10 @@ fn optional_object_tolerates_non_object_values() {
     // 物件「內部」型別不符仍是協定錯誤：可見的失敗，不得靜默吞掉。
     let err =
         deserialize_value::<Target>(serde_json::json!({ "data": { "text": 42 } }), "活动详情")
-            .expect_err("內部型別不符应失败");
+            .expect_err("内部类型不符应失败");
     let message = err.to_string();
     assert!(message.contains("数据类型不符"), "{message}");
-    assert!(!message.contains("42"), "不应包含欄位值：{message}");
+    assert!(!message.contains("42"), "不应包含字段值：{message}");
 }
 
 /// 可選字串欄位：只接受字串，其餘型別一律視為「沒有這段內容」。

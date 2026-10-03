@@ -16,8 +16,11 @@
 //! 所得的編輯器會把儲存格內容包在 `<p>` 裡，換行會讓同一列的欄位散開）。
 //!
 //! 連結（`<a href>`）只保留錨文字：`href` 目標在純文字裡無處可放，因此另外以
-//! `has_links` 標記，讓介面提示使用者開網頁查看。沒有可見文字時回傳空的 `text`
-//! （呼叫端據此隱藏整個描述區塊）。
+//! `has_links` 標記，讓介面提示使用者開網頁查看。
+//!
+//! 沒有可見文字時 `text` 為 `None`，但 `has_media`／`has_links` 仍可能為真（整份
+//! 說明只有一張圖片或一個連結）：是否顯示描述區塊由呼叫端依三者共同決定
+//! （見 `LmsActivity::body`）。
 
 use scraper::node::{Element, Node};
 use scraper::{ElementRef, Html};
@@ -101,7 +104,9 @@ pub(super) fn convert(html: &str) -> ActivityText {
     let mut raw = String::new();
     let mut has_media = false;
     let mut has_links = false;
-    // 片段根不是元素（`Node::Fragment`），直接走訪其子節點。
+    // 片段解析仍會把內容包進 `<html>`／`<body>` 包裝，區塊元素的換行因此由
+    // `walk_element` 在包裝底下產生（見 `paragraphs_are_separated_by_a_single_newline`）；
+    // 這裡只處置根的子節點，文字分支是防禦性的——目前的解析器不會讓文字成為根的直接子節點。
     for child in document.tree.root().children() {
         if child.value().is_element() {
             if let Some(element) = ElementRef::wrap(child) {

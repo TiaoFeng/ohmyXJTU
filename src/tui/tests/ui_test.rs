@@ -2090,10 +2090,10 @@ fn homework_detail_shows_activity_description() {
         crate::tui::views::draw(frame, &mut app)
     });
     let text = screen_text(terminal.backend());
-    assert!(text.contains("作业描述："), "應顯示描述區塊：\n{text}");
-    assert!(text.contains("第一章习题"), "應顯示描述內容：\n{text}");
-    assert!(text.contains("交到邮箱"), "描述換行應保留：\n{text}");
-    assert!(!text.contains("<p>"), "不應殘留 HTML 標籤：\n{text}");
+    assert!(text.contains("作业描述："), "应显示描述区块：\n{text}");
+    assert!(text.contains("第一章习题"), "应显示描述内容：\n{text}");
+    assert!(text.contains("交到邮箱"), "描述换行应保留：\n{text}");
+    assert!(!text.contains("<p>"), "不应残留 HTML 标签：\n{text}");
 }
 
 /// 沒有說明時不顯示描述區塊（不得把空值當成內容）。
@@ -2116,7 +2116,7 @@ fn homework_detail_hides_description_section_when_absent() {
     let text = screen_text(terminal.backend());
     assert!(
         !text.contains("作业描述"),
-        "沒有說明時不應顯示描述區塊：\n{text}"
+        "没有说明时不应显示描述区块：\n{text}"
     );
 }
 
@@ -2149,19 +2149,19 @@ fn homework_detail_scrolls_long_description() {
         crate::tui::views::draw(frame, &mut app)
     });
     let text = screen_text(terminal.backend());
-    assert!(text.contains("第1行"), "初始應顯示說明開頭：\n{text}");
-    assert!(!text.contains("第30行"), "初始不應顯示說明結尾：\n{text}");
-    assert!(app.homework_scroll.scrollable(), "內容超長時應可捲動");
+    assert!(text.contains("第1行"), "初始应显示说明开头：\n{text}");
+    assert!(!text.contains("第30行"), "初始不应显示说明结尾：\n{text}");
+    assert!(app.homework_scroll.scrollable(), "内容超长时应可滚动");
 
     app.homework_scroll.to_bottom();
     let terminal = draw(WIDTH, HEIGHT, |frame| {
         crate::tui::views::draw(frame, &mut app)
     });
     let text = screen_text(terminal.backend());
-    assert!(text.contains("第30行"), "捲到底應顯示說明結尾：\n{text}");
+    assert!(text.contains("第30行"), "滚到底应显示说明结尾：\n{text}");
     assert!(
         !text.contains("第1行"),
-        "捲到底後開頭應已離開畫面：\n{text}"
+        "滚到底后开头应已離开画面：\n{text}"
     );
 }
 
@@ -2190,11 +2190,11 @@ fn homework_detail_marks_image_only_description() {
         crate::tui::views::draw(frame, &mut app)
     });
     let text = screen_text(terminal.backend());
-    assert!(text.contains("作业描述："), "應顯示描述區塊：\n{text}");
-    assert!(text.contains("说明含图片"), "應標註說明含圖片：\n{text}");
+    assert!(text.contains("作业描述："), "应显示描述区块：\n{text}");
+    assert!(text.contains("说明含图片"), "应标注说明含图片：\n{text}");
     assert!(
-        text.contains("按 o 打开思源学堂查看"),
-        "應提示到思源學堂看原文：\n{text}"
+        text.contains("按 o 打开思源学堂后自行查看"),
+        "应提示到思源学堂看原文：\n{text}"
     );
 }
 
@@ -2223,11 +2223,11 @@ fn homework_detail_marks_link_only_description() {
         crate::tui::views::draw(frame, &mut app)
     });
     let text = screen_text(terminal.backend());
-    assert!(text.contains("下载附件"), "應顯示錨文字：\n{text}");
-    assert!(text.contains("说明含链接"), "應標註含連結：\n{text}");
+    assert!(text.contains("下载附件"), "应显示锚文字：\n{text}");
+    assert!(text.contains("说明含链接"), "应标注含链接：\n{text}");
     assert!(
-        text.contains("按 o 打开思源学堂查看"),
-        "應提示到思源學堂看原文：\n{text}"
+        text.contains("按 o 打开思源学堂后自行查看"),
+        "应提示到思源学堂看原文：\n{text}"
     );
 }
 
@@ -2258,7 +2258,7 @@ fn homework_detail_combines_media_and_link_hint() {
     let text = screen_text(terminal.backend());
     assert!(
         text.contains("说明含图片与链接"),
-        "圖片與連結並存時應合併提示：\n{text}"
+        "图片与链接并存时应合并提示：\n{text}"
     );
 }
 
@@ -2293,7 +2293,7 @@ fn footer_hints_scrolling_when_detail_is_scrollable() {
     let text = screen_text(terminal.backend());
     assert!(
         text.contains("PgUp/PgDn 滚动"),
-        "底欄應提示捲動鍵：\n{text}"
+        "底栏应提示滚动键：\n{text}"
     );
 }
 
@@ -2311,7 +2311,7 @@ fn footer_hides_scroll_hint_when_the_panel_is_not_drawn() {
     app.homework_detail = true;
     // 假裝上一幀的詳情很長（可捲動）。
     app.homework_scroll.sync(5, 20);
-    assert!(app.homework_scroll.scrollable(), "前置條件：上一幀可捲動");
+    assert!(app.homework_scroll.scrollable(), "前置条件：上一帧可滚动");
 
     let terminal = draw(200, HEIGHT, |frame| {
         crate::tui::views::draw(frame, &mut app)
@@ -2319,11 +2319,11 @@ fn footer_hides_scroll_hint_when_the_panel_is_not_drawn() {
     let text = screen_text(terminal.backend());
     assert!(
         text.contains("没有未完成的作业"),
-        "應顯示空分組提示：\n{text}"
+        "应显示空分组提示：\n{text}"
     );
     assert!(
         !text.contains("PgUp/PgDn 滚动"),
-        "沒有詳情面板時不應提示捲動：\n{text}"
+        "没有详情面板时不应提示滚动：\n{text}"
     );
 }
 
@@ -2357,19 +2357,19 @@ fn activity_detail_shows_description_and_scrolls() {
         crate::tui::views::draw(frame, &mut app)
     });
     let text = screen_text(terminal.backend());
-    assert!(text.contains("作业描述："), "應顯示描述區塊：\n{text}");
-    assert!(text.contains("第1行"), "初始應顯示說明開頭：\n{text}");
-    assert!(!text.contains("第30行"), "初始不應顯示說明結尾：\n{text}");
+    assert!(text.contains("作业描述："), "应显示描述区块：\n{text}");
+    assert!(text.contains("第1行"), "初始应显示说明开头：\n{text}");
+    assert!(!text.contains("第30行"), "初始不应显示说明结尾：\n{text}");
 
     app.lms.detail_scroll.to_bottom();
     let terminal = draw(WIDTH, HEIGHT, |frame| {
         crate::tui::views::draw(frame, &mut app)
     });
     let text = screen_text(terminal.backend());
-    assert!(text.contains("第30行"), "捲到底應顯示說明結尾：\n{text}");
+    assert!(text.contains("第30行"), "滚到底应显示说明结尾：\n{text}");
     assert!(
         !text.contains("第1行"),
-        "捲到底後開頭應已離開畫面：\n{text}"
+        "滚到底后开头应已離开画面：\n{text}"
     );
 }
 
@@ -2401,12 +2401,12 @@ fn activity_detail_labels_description_by_kind() {
     let text = screen_text(terminal.backend());
     assert!(
         text.contains("内容："),
-        "資料類型應使用「内容」標題：\n{text}"
+        "资料类型应使用「内容」标题：\n{text}"
     );
-    assert!(text.contains("课程介绍"), "應顯示正文：\n{text}");
-    assert!(text.contains("说明含图片"), "應標註說明含圖片：\n{text}");
+    assert!(text.contains("课程介绍"), "应显示正文：\n{text}");
+    assert!(text.contains("说明含图片"), "应标注说明含图片：\n{text}");
     assert!(
         !text.contains("作业描述"),
-        "非作業不得使用作業描述標題：\n{text}"
+        "非作业不得使用作业描述标题：\n{text}"
     );
 }

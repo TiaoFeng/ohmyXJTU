@@ -15,9 +15,9 @@ use crate::tui::ui::render_list;
 
 use super::columns::{GROUP_WIDTH, RowColumns, RowNeeds, homework_columns, homework_min_row_width};
 use super::{
-    deadline_cell, deadline_label, deadline_list_label, description_hint, description_label, empty,
-    group_label, panel_width, push_multiline, push_wrapped, row_width, scrolled_panel,
-    split_detail, too_narrow,
+    deadline_cell, deadline_label, deadline_list_label, description_label, empty, group_label,
+    panel_width, push_description, push_wrapped, row_width, scrolled_panel, split_detail,
+    too_narrow,
 };
 
 /// 展開詳情時的框高範圍：內容區一半，並限制在可讀區間。
@@ -270,19 +270,12 @@ fn homework_lines(item: &HomeworkItem, width: usize) -> Vec<Line<'static>> {
     }
     // 作業說明：讓使用者不必按 `o` 開網頁就能看完題目內容。
     if let Some(description) = &item.description {
-        push_wrapped(
+        push_description(
             &mut lines,
+            description,
             description_label(ActivityKind::Homework),
-            THEME.muted_style(),
             width,
         );
-        if let Some(text) = &description.text {
-            push_multiline(&mut lines, text, Style::default().fg(THEME.text), width);
-        }
-        // 圖片沒有任何文字、連結的目標也不在文字裡：必須明講，使用者才知道要開網頁。
-        if let Some(hint) = description_hint(description) {
-            push_wrapped(&mut lines, hint, THEME.muted_style(), width);
-        }
     }
     lines
 }

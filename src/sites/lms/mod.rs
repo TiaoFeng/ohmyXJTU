@@ -204,12 +204,6 @@ impl<'a> LmsApi<'a> {
         )
     }
 
-    /// 活動詳情；作業會一併抓取提交記錄。
-    pub fn activity(&mut self, activity_id: &str) -> AppResult<ActivityDetail> {
-        let activity = self.fetch_activity_detail(activity_id)?;
-        self.activity_from(activity)
-    }
-
     /// 以既有詳情組出活動詳情（作業會一併抓取提交記錄）。
     pub fn activity_from(&mut self, activity: LmsActivity) -> AppResult<ActivityDetail> {
         let mut note = None;
@@ -249,18 +243,11 @@ impl<'a> LmsApi<'a> {
         })
     }
 
-    /// 作業提交摘要：先取活動詳情確定小組，再依需要查詢提交記錄。
+    /// 以既有詳情計算作業提交摘要（個人作業可省一次提交列表請求）。
     ///
-    /// 個人作業優先採用詳情中的 `user_submit_count`（「当前用户提交次数」，
-    /// 有值時可省一次提交列表請求；語意待實網脫敏樣本核實，若語意有出入
-    /// 只需調整此處）；小組作業一律以詳情確認的 `group_id` 查詢小組提交
-    /// 記錄，缺 `group_id` 時保持「待核实」並說明原因。
-    pub fn submission_summary(&mut self, activity_id: &str) -> AppResult<SubmissionSummary> {
-        let detail = self.fetch_activity_detail(activity_id)?;
-        self.submission_summary_for(&detail)
-    }
-
-    /// 以既有詳情計算提交摘要（個人作業可省一次提交列表請求）。
+    /// 個人作業優先採用詳情中的 `user_submit_count`（「当前用户提交次数」，有值時
+    /// 可省一次提交列表請求；語意待實網脫敏樣本核實，若有出入只需調整此處）；
+    /// 小組作業一律以詳情確認的 `group_id` 查詢小組提交記錄。
     ///
     /// 詳情缺少 `submit_by_group` 時無法判定個人或小組，一律回報「待核实」
     /// 且不發出任何提交查詢（含不查 `/user/index`）。說明欄位與提交狀態同源

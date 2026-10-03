@@ -1274,18 +1274,18 @@ fn page_keys_scroll_detail_only_on_detail_pages() {
     // 未展開詳情：捲動鍵不動作。
     app.homework_scroll.sync(5, 20);
     press(&mut app, &jobs, KeyCode::PageDown);
-    assert_eq!(app.homework_scroll.offset(), 0, "未展開詳情時不應捲動");
+    assert_eq!(app.homework_scroll.offset(), 0, "未展开详情时不应滚动");
 
     // 展開詳情：PgDn／PgUp 以視窗為一步，End／Home 直達兩端。
     app.homework_detail = true;
     press(&mut app, &jobs, KeyCode::PageDown);
-    assert_eq!(app.homework_scroll.offset(), 5, "PgDn 應往下捲一頁");
+    assert_eq!(app.homework_scroll.offset(), 5, "PgDn 应往下滚一页");
     press(&mut app, &jobs, KeyCode::PageUp);
-    assert_eq!(app.homework_scroll.offset(), 0, "PgUp 應往上捲一頁");
+    assert_eq!(app.homework_scroll.offset(), 0, "PgUp 应往上滚一页");
     press(&mut app, &jobs, KeyCode::End);
-    assert_eq!(app.homework_scroll.offset(), 15, "End 應捲到底端");
+    assert_eq!(app.homework_scroll.offset(), 15, "End 应滚到底端");
     press(&mut app, &jobs, KeyCode::Home);
-    assert_eq!(app.homework_scroll.offset(), 0, "Home 應回到頂端");
+    assert_eq!(app.homework_scroll.offset(), 0, "Home 应回到顶端");
 
     // 換一筆作業（↓）：新的說明從頂端開始讀。
     let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00+08:00").expect("固定时间");
@@ -1322,19 +1322,19 @@ fn page_keys_scroll_detail_only_on_detail_pages() {
     });
     app.homework_scroll.sync(5, 20);
     app.homework_scroll.to_bottom();
-    assert_eq!(app.homework_scroll.offset(), 15, "前置條件：已捲到底端");
+    assert_eq!(app.homework_scroll.offset(), 15, "前置条件：已滚到底端");
     press(&mut app, &jobs, KeyCode::Down);
-    assert_eq!(app.homework_scroll.offset(), 0, "換作業後應回到頂端");
+    assert_eq!(app.homework_scroll.offset(), 0, "换作业后应回到顶端");
 
     // 思源學堂詳情層：捲動作用於活動詳情。
     app.nav = NavItem::Lms;
     app.lms.level = LmsLevel::Detail;
     app.lms.detail_scroll.sync(5, 20);
     press(&mut app, &jobs, KeyCode::PageDown);
-    assert_eq!(app.lms.detail_scroll.offset(), 5, "詳情層應捲動活動詳情");
+    assert_eq!(app.lms.detail_scroll.offset(), 5, "详情层应滚动活动详情");
 
     // 其他頁面：不影響任何捲動狀態。
     app.nav = NavItem::Schedule;
     press(&mut app, &jobs, KeyCode::PageDown);
-    assert_eq!(app.lms.detail_scroll.offset(), 5, "其他頁面不得捲動");
+    assert_eq!(app.lms.detail_scroll.offset(), 5, "其他页面不得滚动");
 }

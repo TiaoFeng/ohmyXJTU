@@ -1397,10 +1397,10 @@ fn detail_updates_reset_scroll() {
     assert_eq!(app.homework_scroll.offset(), 15);
 
     apply_event(&mut app, Event::Homework(homework_update(Some((1, 2)))));
-    assert_eq!(app.homework_scroll.offset(), 15, "部分結果不應打斷閱讀位置");
+    assert_eq!(app.homework_scroll.offset(), 15, "部分结果不应打断阅读位置");
 
     apply_event(&mut app, Event::Homework(homework_update(None)));
-    assert_eq!(app.homework_scroll.offset(), 0, "終態更新應回到頂端");
+    assert_eq!(app.homework_scroll.offset(), 0, "终态更新应回到顶端");
 
     app.lms.detail_activity = Some("1".to_owned());
     app.lms.detail_scroll.sync(5, 20);
@@ -1419,5 +1419,5 @@ fn detail_updates_reset_scroll() {
             note: None,
         })),
     );
-    assert_eq!(app.lms.detail_scroll.offset(), 0, "詳情更新應回到頂端");
+    assert_eq!(app.lms.detail_scroll.offset(), 0, "详情更新应回到顶端");
 }

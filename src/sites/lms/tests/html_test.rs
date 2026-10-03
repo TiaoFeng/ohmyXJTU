@@ -49,7 +49,7 @@ fn non_ascii_whitespace_is_preserved() {
     assert_eq!(
         plain("<p>\u{3000}\u{3000}第一章</p>").as_deref(),
         Some("\u{3000}\u{3000}第一章"),
-        "段首縮排應保留"
+        "段首缩进应保留"
     );
     assert_eq!(plain("a&nbsp;&nbsp;b").as_deref(), Some("a\u{a0}\u{a0}b"));
     // 整行只有空白（編輯器以 `&nbsp;` 表示空段落）仍然不算內容。
@@ -141,7 +141,7 @@ fn blank_content_returns_none() {
         "<p></p>",
         "<div><span></span></div>",
         "<br>",
-        "<!-- 註解 -->",
+        "<!-- 注解 -->",
     ] {
         assert_eq!(plain(html), None, "{html}");
     }
@@ -167,12 +167,12 @@ fn malformed_markup_does_not_panic() {
 #[test]
 fn long_content_is_truncated_with_an_ellipsis() {
     let long = "字".repeat(MAX_TEXT_CHARS + 10);
-    let text = plain(&long).expect("非空內容");
+    let text = plain(&long).expect("非空内容");
     assert_eq!(text.chars().count(), MAX_TEXT_CHARS + 1);
     assert!(text.ends_with('…'));
 
     let exact = "字".repeat(MAX_TEXT_CHARS);
-    let text = plain(&exact).expect("非空內容");
+    let text = plain(&exact).expect("非空内容");
     assert_eq!(text.chars().count(), MAX_TEXT_CHARS);
     assert!(!text.ends_with('…'));
 }
@@ -181,15 +181,15 @@ fn long_content_is_truncated_with_an_ellipsis() {
 #[test]
 fn image_only_body_reports_media_without_text() {
     let content = convert(r#"<p><img src="https://lms.xjtu.edu.cn/a.png" alt="题目"></p>"#);
-    assert_eq!(content.text, None, "圖片本身沒有可見文字");
-    assert!(content.has_media, "應標記含圖片");
+    assert_eq!(content.text, None, "图片本身没有可见文字");
+    assert!(content.has_media, "应标记含图片");
 }
 
 #[test]
 fn text_beside_media_reports_both() {
     let content = convert(r#"<p>题目如下：</p><p><img src="a.png"></p>"#);
     assert_eq!(content.text.as_deref(), Some("题目如下："));
-    assert!(content.has_media, "文字旁的圖片同樣要標記");
+    assert!(content.has_media, "文字旁的图片同样要标记");
 }
 
 #[test]
@@ -203,8 +203,8 @@ fn media_elements_are_counted() {
         r#"<audio src="a.mp3"></audio>"#,
     ] {
         let content = convert(html);
-        assert!(content.has_media, "{html} 應標記為含多媒體內容");
-        assert_eq!(content.text, None, "{html} 沒有可見文字");
+        assert!(content.has_media, "{html} 应标记为含多媒体内容");
+        assert_eq!(content.text, None, "{html} 没有可见文字");
     }
 }
 
@@ -213,10 +213,10 @@ fn media_elements_are_counted() {
 fn markup_inside_script_is_not_counted_as_media() {
     let content = convert(r#"<script>document.write('<img src="a.png">')</script>题目"#);
     assert_eq!(content.text.as_deref(), Some("题目"));
-    assert!(!content.has_media, "script 內的標籤不是元素");
+    assert!(!content.has_media, "script 内的标签不是元素");
 
     let content = convert("<p>图片见附件</p>");
-    assert!(!content.has_media, "純文字說明不得標記含圖片");
+    assert!(!content.has_media, "纯文字说明不得标记含图片");
 }
 
 /// 連結（`<a href>`）：錨文字保留，另以 `has_links` 標記目標（`href` 不會出現在
@@ -225,8 +225,8 @@ fn markup_inside_script_is_not_counted_as_media() {
 fn links_keep_their_text_and_are_flagged() {
     let content = convert(r#"<p>见<a href="https://lms.xjtu.edu.cn/a.pdf">下载附件</a></p>"#);
     assert_eq!(content.text.as_deref(), Some("见下载附件"));
-    assert!(content.has_links, "應標記含連結");
-    assert!(!content.has_media, "連結不是多媒體內容");
+    assert!(content.has_links, "应标记含链接");
+    assert!(!content.has_media, "链接不是多媒体内容");
 }
 
 /// 沒有實際目標的錨點（無 `href`、純 `#` 頁內錨點）不算連結。
@@ -239,7 +239,7 @@ fn anchors_without_a_target_are_not_flagged() {
         r#"<p><a name="top">命名锚点</a></p>"#,
     ] {
         let content = convert(html);
-        assert!(!content.has_links, "{html} 不應標記為含連結");
+        assert!(!content.has_links, "{html} 不应标记为含链接");
     }
     // 頁內錨點的文字仍要保留。
     assert_eq!(

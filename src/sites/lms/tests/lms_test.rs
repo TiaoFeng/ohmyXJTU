@@ -161,7 +161,7 @@ fn parses_activity_body_from_nested_data() {
     assert_eq!(
         body_text(&activity).as_deref(),
         Some("第一章习题\n交到邮箱"),
-        "說明應去除 HTML 標籤"
+        "说明应去除 HTML 标签"
     );
 
     // 頁面型活動：description 為空白時改用 content。
@@ -255,9 +255,9 @@ fn reports_media_only_body() {
         "data": {"description": "<p><img src=\"/a.png\"></p>"}
     });
     let activity: LmsActivity = crate::sites::deserialize_value(value, "查询活动详情").unwrap();
-    let body = activity.body().expect("純圖片說明仍應有正文");
-    assert_eq!(body.text, None, "圖片沒有可見文字");
-    assert!(body.has_media, "應標記含圖片");
+    let body = activity.body().expect("纯图片说明仍应有正文");
+    assert_eq!(body.text, None, "图片没有可见文字");
+    assert!(body.has_media, "应标记含图片");
 }
 
 #[test]

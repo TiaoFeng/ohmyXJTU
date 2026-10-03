@@ -2303,9 +2303,9 @@ fn activity_detail_for_material_skips_submission_request() {
             Event::ActivityDetail(detail) => Some(detail),
             _ => None,
         })
-        .expect("應回報活動詳情");
+        .expect("应回报活动详情");
     assert_eq!(detail.kind, lms::ActivityKind::Material);
-    assert!(detail.submissions.is_none(), "非作業不得帶提交狀態");
+    assert!(detail.submissions.is_none(), "非作业不得带提交状态");
     assert_eq!(
         description_text(&detail.description),
         Some("课程介绍"),
@@ -2355,13 +2355,13 @@ fn activity_detail_for_homework_queries_submission_list() {
             Event::ActivityDetail(detail) => Some(detail),
             _ => None,
         })
-        .expect("應回報活動詳情");
+        .expect("应回报活动详情");
     assert_eq!(detail.kind, lms::ActivityKind::Homework);
-    assert!(detail.submissions.is_some(), "作業詳情應帶提交記錄");
+    assert!(detail.submissions.is_some(), "作业详情应带提交记录");
     assert_eq!(
         description_text(&detail.description),
         Some("第一章习题"),
-        "作業說明應轉為純文字帶進詳情"
+        "作业说明应转为纯文字带进详情"
     );
 }
 
@@ -2467,9 +2467,9 @@ fn homework_marks_image_only_description() {
     let description = updates.last().expect("最终更新").items[0]
         .description
         .clone()
-        .expect("純圖片說明仍應保留正文（供介面標註）");
-    assert_eq!(description.text, None, "圖片沒有可見文字");
-    assert!(description.has_media, "應標記含圖片");
+        .expect("纯图片说明仍应保留正文（供界面标注）");
+    assert_eq!(description.text, None, "图片没有可见文字");
+    assert!(description.has_media, "应标记含图片");
 }
 
 /// 說明欄位型別異常時只損失該段說明，不得連帶把提交狀態打成「待核实」。
@@ -2514,16 +2514,16 @@ fn malformed_description_does_not_break_submission_status() {
     assert_eq!(last.items.len(), 1);
     assert!(
         last.items[0].description.is_none(),
-        "型別異常的說明應被忽略"
+        "类型异常的说明应被忽略"
     );
     assert_eq!(
         last.items[0].state,
         HomeworkState::Pending,
-        "提交狀態不得因說明欄位型別異常而退回「待核实」"
+        "提交状态不得因说明字段类型异常而退回「待核实」"
     );
     assert!(
         last.issues.is_empty(),
-        "不應產生待核实彙總：{:?}",
+        "不应产生待核实汇总：{:?}",
         last.issues
     );
 }

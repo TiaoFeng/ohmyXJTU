@@ -18,8 +18,8 @@ use crate::tui::ui::render_list;
 
 use super::columns::{GROUP_WIDTH, RowColumns, RowNeeds, activity_columns, activity_min_row_width};
 use super::{
-    deadline_cell, deadline_label, deadline_list_label, description_hint, description_label, empty,
-    empty_note, group_label, panel_width, push_multiline, push_wrapped, row_width, scrolled_panel,
+    deadline_cell, deadline_label, deadline_list_label, description_label, empty, empty_note,
+    group_label, panel_width, push_description, push_wrapped, row_width, scrolled_panel,
     submission_time_label, title_suffix, too_narrow,
 };
 
@@ -286,19 +286,12 @@ fn detail_lines(detail: &ActivityDetailView, width: usize) -> Vec<Line<'static>>
 
     // 活動說明（作業／資料說明、頁面正文）；沒有可顯示內容時整個區塊不顯示。
     if let Some(description) = &detail.description {
-        push_wrapped(
+        push_description(
             &mut lines,
+            description,
             description_label(detail.kind),
-            THEME.muted_style(),
             width,
         );
-        if let Some(text) = &description.text {
-            push_multiline(&mut lines, text, Style::default().fg(THEME.text), width);
-        }
-        // 圖片沒有任何文字、連結的目標也不在文字裡：必須明講，使用者才知道要開網頁。
-        if let Some(hint) = description_hint(description) {
-            push_wrapped(&mut lines, hint, THEME.muted_style(), width);
-        }
     }
 
     // 提交狀態只適用於作業；其他類型不顯示「待核实」。

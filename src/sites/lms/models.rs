@@ -234,14 +234,9 @@ impl LmsActivity {
 
     /// 活動正文（純文字＋是否含圖片等內容）；沒有正文時回 `None`。
     pub fn body(&self) -> Option<ActivityText> {
-        let content = html::convert(self.body_html()?);
-        if content.text.is_none() && !content.has_media {
-            return None;
-        }
-        Some(ActivityText {
-            text: content.text,
-            has_media: content.has_media,
-        })
+        let body = html::convert(self.body_html()?);
+        // 整份說明只有一張圖片時沒有可見文字，但仍要讓介面能標註「含圖片」。
+        (body.text.is_some() || body.has_media).then_some(body)
     }
 }
 

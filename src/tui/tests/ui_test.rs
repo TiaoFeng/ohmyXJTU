@@ -2065,7 +2065,7 @@ fn schedule_renders_notice_above_empty_state() {
     );
 }
 
-/// 作業說明显示於詳情框：純文字、保留換行、不留 HTML 標籤。
+/// 作業說明顯示於詳情框：純文字、保留換行、不留 HTML 標籤。
 #[test]
 fn homework_detail_shows_activity_description() {
     let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00+08:00").expect("固定时间");

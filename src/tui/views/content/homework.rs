@@ -7,6 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{ListItem, Paragraph, Wrap};
 
 use crate::domain::homework::{HomeworkGroup, HomeworkItem};
+use crate::sites::lms::ActivityKind;
 use crate::text::fit_display;
 use crate::tui::app::{App, HomeworkData, Page};
 use crate::tui::theme::THEME;
@@ -14,8 +15,9 @@ use crate::tui::ui::render_list;
 
 use super::columns::{GROUP_WIDTH, RowColumns, RowNeeds, homework_columns, homework_min_row_width};
 use super::{
-    MEDIA_HINT, deadline_cell, deadline_label, deadline_list_label, empty, group_label,
-    panel_width, push_wrapped, row_width, scrolled_panel, split_detail, too_narrow,
+    MEDIA_HINT, deadline_cell, deadline_label, deadline_list_label, description_label, empty,
+    group_label, panel_width, push_multiline, push_wrapped, row_width, scrolled_panel,
+    split_detail, too_narrow,
 };
 
 /// 展開詳情時的框高範圍：內容區一半，並限制在可讀區間。
@@ -94,9 +96,7 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
     };
     render_list(frame, list_area, &title, items, &mut app.homework_state);
     if let (Some(area), Some(lines)) = (detail_area, detail) {
-        app.homework_scroll
-            .sync(area.height.saturating_sub(2), lines.len());
-        scrolled_panel(frame, area, "作业详情", lines, app.homework_scroll.offset());
+        scrolled_panel(frame, area, "作业详情", lines, &mut app.homework_scroll);
     }
 }
 
@@ -270,16 +270,14 @@ fn homework_lines(item: &HomeworkItem, width: usize) -> Vec<Line<'static>> {
     }
     // 作業說明：讓使用者不必按 `o` 開網頁就能看完題目內容。
     if let Some(description) = &item.description {
-        push_wrapped(&mut lines, "作业描述：", THEME.muted_style(), width);
+        push_wrapped(
+            &mut lines,
+            description_label(ActivityKind::Homework),
+            THEME.muted_style(),
+            width,
+        );
         if let Some(text) = &description.text {
-            for line in text.split('\n') {
-                push_wrapped(
-                    &mut lines,
-                    line.to_owned(),
-                    Style::default().fg(THEME.text),
-                    width,
-                );
-            }
+            push_multiline(&mut lines, text, Style::default().fg(THEME.text), width);
         }
         // 說明可能就是一張圖片：文字轉換後什麼都不剩，必須明講。
         if description.has_media {

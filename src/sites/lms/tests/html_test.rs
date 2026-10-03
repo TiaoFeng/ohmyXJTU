@@ -33,7 +33,28 @@ fn source_whitespace_collapses_into_a_space() {
         plain("<p>第一行\n        第二行</p>").as_deref(),
         Some("第一行 第二行")
     );
-    assert_eq!(plain("a  &nbsp;&nbsp;  b").as_deref(), Some("a b"));
+    assert_eq!(plain("a  \t b").as_deref(), Some("a b"));
+}
+
+/// 非 ASCII 空白是作者排出的縮排（瀏覽器也照樣顯示），不得折成半形。
+///
+/// 這與 [`crate::text::wrap_display`] 的規則一致：說明先經這裡轉換，若在此折成
+/// 半形，繪製端再怎麼保留都已經來不及。
+#[test]
+fn non_ascii_whitespace_is_preserved() {
+    assert_eq!(
+        plain("<p>甲\u{3000}乙</p>").as_deref(),
+        Some("甲\u{3000}乙")
+    );
+    assert_eq!(
+        plain("<p>\u{3000}\u{3000}第一章</p>").as_deref(),
+        Some("\u{3000}\u{3000}第一章"),
+        "段首縮排應保留"
+    );
+    assert_eq!(plain("a&nbsp;&nbsp;b").as_deref(), Some("a\u{a0}\u{a0}b"));
+    // 整行只有空白（編輯器以 `&nbsp;` 表示空段落）仍然不算內容。
+    assert_eq!(plain("<p>&nbsp;</p>"), None);
+    assert_eq!(plain("<p>\u{3000}</p>"), None);
 }
 
 #[test]
@@ -81,6 +102,15 @@ fn tables_keep_rows_and_separate_cells() {
         plain("<table><tr><th>标题</th><td>值</td></tr></table>").as_deref(),
         Some("标题 值")
     );
+    // 所見即所得的編輯器會把儲存格內容包在 `<p>` 裡：仍須維持「同一列同一行」。
+    assert_eq!(
+        plain("<table><tr><td><p>题目</p></td><td><p>分值</p></td></tr></table>").as_deref(),
+        Some("题目 分值")
+    );
+    assert_eq!(
+        plain("<table><tr><td><p>第一题</p></td><td>10</td></tr></table>").as_deref(),
+        Some("第一题 10")
+    );
 }
 
 #[test]
@@ -91,6 +121,15 @@ fn script_and_style_are_skipped() {
         )
         .as_deref(),
         Some("说明\n结尾")
+    );
+}
+
+/// 片段解析會建出 head／body：`<title>` 的文字不得混進正文。
+#[test]
+fn document_title_is_skipped() {
+    assert_eq!(
+        plain("<title>秘密标题</title><p>正文</p>").as_deref(),
+        Some("正文")
     );
 }
 

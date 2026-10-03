@@ -18,9 +18,9 @@ use crate::tui::ui::render_list;
 
 use super::columns::{GROUP_WIDTH, RowColumns, RowNeeds, activity_columns, activity_min_row_width};
 use super::{
-    MEDIA_HINT, deadline_cell, deadline_label, deadline_list_label, empty, empty_note, group_label,
-    panel_width, push_wrapped, row_width, scrolled_panel, submission_time_label, title_suffix,
-    too_narrow,
+    MEDIA_HINT, deadline_cell, deadline_label, deadline_list_label, description_label, empty,
+    empty_note, group_label, panel_width, push_multiline, push_wrapped, row_width, scrolled_panel,
+    submission_time_label, title_suffix, too_narrow,
 };
 
 /// 詳情面板最多列出的提交記錄筆數（總數仍顯示於摘要行）。
@@ -121,10 +121,7 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
                 ),
                 Some(detail) => {
                     let lines = detail_lines(detail, panel_width(area));
-                    app.lms
-                        .detail_scroll
-                        .sync(area.height.saturating_sub(2), lines.len());
-                    scrolled_panel(frame, area, &title, lines, app.lms.detail_scroll.offset());
+                    scrolled_panel(frame, area, &title, lines, &mut app.lms.detail_scroll);
                 }
             }
         }
@@ -296,14 +293,7 @@ fn detail_lines(detail: &ActivityDetailView, width: usize) -> Vec<Line<'static>>
             width,
         );
         if let Some(text) = &description.text {
-            for line in text.split('\n') {
-                push_wrapped(
-                    &mut lines,
-                    line.to_owned(),
-                    Style::default().fg(THEME.text),
-                    width,
-                );
-            }
+            push_multiline(&mut lines, text, Style::default().fg(THEME.text), width);
         }
         // 說明可能就是一張圖片：文字轉換後什麼都不剩，必須明講。
         if description.has_media {
@@ -380,13 +370,4 @@ fn detail_lines(detail: &ActivityDetailView, width: usize) -> Vec<Line<'static>>
         push_wrapped(&mut lines, note.clone(), THEME.error_style(), width);
     }
     lines
-}
-
-/// 說明區塊的標題：作業為「作业描述」，其他活動為「内容」。
-fn description_label(kind: ActivityKind) -> &'static str {
-    if kind == ActivityKind::Homework {
-        "作业描述："
-    } else {
-        "内容："
-    }
 }

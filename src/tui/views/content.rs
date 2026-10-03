@@ -11,8 +11,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::domain::homework::parse_time;
+use crate::sites::lms::ActivityKind;
 use crate::text::{fit_display, wrap_display};
-use crate::tui::app::{App, NavItem};
+use crate::tui::app::{App, NavItem, ScrollState};
 use crate::tui::theme::THEME;
 
 mod columns;
@@ -47,6 +48,17 @@ const DETAIL_HEIGHT: u16 = 7;
 /// 用詞刻意只寫「打开思源学堂」：`o` 對資料等活動只會開啟思源學堂首頁
 /// （見 `Worker::open_activity_url`），並非該活動的頁面。
 const MEDIA_HINT: &str = "（说明含图片，按 o 打开思源学堂查看）";
+
+/// 說明區塊的標題：作業為「作业描述」，其他活動為「内容」。
+///
+/// 作業頁與思源學堂詳情頁共用同一份文案，避免兩處各寫一次而悄悄分歧。
+pub(super) fn description_label(kind: ActivityKind) -> &'static str {
+    if kind == ActivityKind::Homework {
+        "作业描述："
+    } else {
+        "内容："
+    }
+}
 
 /// 清單列的可用顯示寬度：扣除外框左右欄線與選取列的高亮符號。
 ///
@@ -107,19 +119,40 @@ fn push_wrapped(
     }
 }
 
-/// 繪製可捲動的內容面板：內容已預先換行，`offset` 為起始列。
+/// 依顯示寬度把多行文字逐行換行後加入內容列。
+///
+/// `\n` 是來源切好的硬換行，必須逐行排版：`wrap_display` 會把 `\n` 當成一般
+/// 空白，整段一次送進去會被折成一行。
+pub(super) fn push_multiline(
+    lines: &mut Vec<Line<'static>>,
+    text: &str,
+    style: Style,
+    width: usize,
+) {
+    for line in text.split('\n') {
+        push_wrapped(lines, line, style, width);
+    }
+}
+
+/// 繪製可捲動的內容面板。
+///
+/// 內容已預先換行；視窗高度與總列數由這裡統一回寫（見 [`ScrollState::sync`]），
+/// 呼叫端不得自行計算——兩者不一致時捲動位移會夾不住。回寫後才取位移，因此
+/// 內容變短時不會停在畫面外。
 fn scrolled_panel(
     frame: &mut Frame,
     area: Rect,
     title: &str,
     lines: Vec<Line<'static>>,
-    offset: u16,
+    scroll: &mut ScrollState,
 ) {
-    let viewport = usize::from(area.height.saturating_sub(2));
+    // 外框上下各佔一列。
+    let viewport = area.height.saturating_sub(2);
+    scroll.sync(viewport, lines.len());
     let visible = lines
         .into_iter()
-        .skip(usize::from(offset))
-        .take(viewport)
+        .skip(usize::from(scroll.offset()))
+        .take(usize::from(viewport))
         .collect::<Vec<_>>();
     frame.render_widget(
         Paragraph::new(visible)

@@ -15,9 +15,8 @@ use crate::tui::ui::render_list;
 
 use super::columns::{GROUP_WIDTH, RowColumns, RowNeeds, homework_columns, homework_min_row_width};
 use super::{
-    deadline_cell, deadline_label, deadline_list_label, description_label, empty, group_label,
-    panel_width, push_description, push_wrapped, row_width, scrolled_panel, split_detail,
-    too_narrow,
+    deadline_cell, deadline_label, deadline_list_label, empty, group_label, panel_width,
+    push_description, push_wrapped, row_width, scrolled_panel, split_detail, too_narrow,
 };
 
 /// 展開詳情時的框高範圍：內容區一半，並限制在可讀區間。
@@ -248,7 +247,9 @@ fn homework_lines(item: &HomeworkItem, width: usize) -> Vec<Line<'static>> {
         width,
     );
     // 狀態列由多個樣式組成（狀態色隨語意變），且短於最小面板寬度，因此不換行。
-    lines.push(Line::from(vec![
+    // 詳情面板用的是無 `Wrap` 的 `Paragraph`：這一列一旦超寬就會被直接裁掉，
+    // 故以下斷言鎖住「一定放得下」的假設（面板最小寬度見 `too_narrow`）。
+    let status = Line::from(vec![
         Span::styled("状态：", THEME.muted_style()),
         Span::styled(item.state.label(), THEME.status_style(item.state.tone())),
         Span::styled(
@@ -259,7 +260,13 @@ fn homework_lines(item: &HomeworkItem, width: usize) -> Vec<Line<'static>> {
             },
             THEME.muted_style(),
         ),
-    ]));
+    ]);
+    debug_assert!(
+        status.width() <= width,
+        "作业状态列宽度 {} 超过面板宽度 {width}",
+        status.width()
+    );
+    lines.push(status);
     if let Some(note) = &item.note {
         push_wrapped(
             &mut lines,
@@ -270,12 +277,7 @@ fn homework_lines(item: &HomeworkItem, width: usize) -> Vec<Line<'static>> {
     }
     // 作業說明：讓使用者不必按 `o` 開網頁就能看完題目內容。
     if let Some(description) = &item.description {
-        push_description(
-            &mut lines,
-            description,
-            description_label(ActivityKind::Homework),
-            width,
-        );
+        push_description(&mut lines, description, ActivityKind::Homework, width);
     }
     lines
 }

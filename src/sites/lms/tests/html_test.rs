@@ -111,6 +111,15 @@ fn tables_keep_rows_and_separate_cells() {
         plain("<table><tr><td><p>第一题</p></td><td>10</td></tr></table>").as_deref(),
         Some("第一题 10")
     );
+    // 儲存格內的 `<br>` 同樣不得拆開同一列（多行儲存格很常見）。
+    assert_eq!(
+        plain("<table><tr><td>a<br>b</td><td>c</td></tr></table>").as_deref(),
+        Some("a b c")
+    );
+    assert_eq!(
+        plain("<table><tr><td>第一题<br>第二题</td><td>10</td></tr></table>").as_deref(),
+        Some("第一题 第二题 10")
+    );
 }
 
 #[test]

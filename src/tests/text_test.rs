@@ -128,3 +128,29 @@ fn wrap_display_keeps_non_ascii_whitespace() {
     assert_eq!(wrap_display("a \t b", 40), vec!["a b"]);
     assert_eq!(wrap_display("alpha beta", 6), vec!["alpha", "beta"]);
 }
+
+/// 兩條換行路徑（空白處斷行與硬切）的修剪語意必須一致，且整列空白的緩衝不輸出。
+///
+/// 這些都是「縮排剛好落在換行邊界」的邊界情形：斷行路徑若用預設（所有 Unicode
+/// 空白）語意修剪，會把緊鄰斷行點的全形空格或 `&nbsp;` 吃掉；硬切路徑若完全不
+/// 修剪，則會產生整列只有空白的列。
+#[test]
+fn wrap_display_trims_only_ascii_whitespace() {
+    // 全形空格緊鄰 ASCII 斷行點：不得被當成可修剪的空白丟掉。
+    assert_eq!(wrap_display("ab\u{3000} cd", 6), vec!["ab\u{3000}", "cd"]);
+    // 縮排剛好填滿一列：該列不輸出（否則白佔一列），文字另起新列。
+    assert_eq!(
+        wrap_display("\u{3000}\u{3000}第一章", 4),
+        vec!["第一", "章"]
+    );
+    // 斷行路徑同樣不得輸出整列空白的列。
+    assert_eq!(
+        wrap_display("\u{3000}\u{3000} 第一章", 4),
+        vec!["第一", "章"]
+    );
+    // 硬切路徑保留續列行首的非 ASCII 空白：那是內容，不是可折疊的空白。
+    assert_eq!(wrap_display("分数\u{a0}10", 4), vec!["分数", "\u{a0}10"]);
+    // 整份只有空白時回傳單一空行——非 ASCII 空白與 ASCII 空白行為一致。
+    assert_eq!(wrap_display("\u{3000}\u{3000}", 10), vec![""]);
+    assert_eq!(wrap_display("   ", 10), vec![""]);
+}

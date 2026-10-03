@@ -88,13 +88,19 @@ pub fn fit_display_start(text: &str, width: usize) -> String {
 
 /// 依顯示寬度貪婪換行（空白處斷行優先，過長的詞逐字素硬切）。
 ///
-/// 行首與行尾不留空白、連續空白視為一個空格；`width` 為 0 時回傳空 vec
+/// 連續空白視為一個空格、行尾不留 **ASCII** 空白；`width` 為 0 時回傳空 vec
 /// （沒有可顯示的欄位）。沒有內容時（空字串或只有空白）回傳單一空行，讓呼叫端
 /// 維持固定的列數。
 ///
 /// 只有 ASCII 空白會被折疊成斷行點：其他 Unicode 空白（全形空格 `\u{3000}`、
 /// 不斷行空格等）視為一般字元，依實際顯示寬度計算——中文排版常以它們做縮排與
-/// 對齊，折成半形會使版面走樣。
+/// 對齊，折成半形會使版面走樣。兩條換行路徑（空白處斷行與硬切）適用同一套規則，
+/// 因此行尾的非 ASCII 空白同樣保留（行尾空白在終端上不可見，保留不影響畫面，
+/// 但語意一致才不會出現「折行時吃掉、硬切時保留」的分歧）。
+///
+/// 唯一例外是**整列皆空白**的緩衝：那代表輸入的縮排剛好填滿一列（例如寬度 4 的
+/// 「`\u{3000}\u{3000}第一章`」），輸出它只會白佔一列，因此直接丟棄，讓後續文字
+/// 另起新列。
 ///
 /// 這是預先排版用的工具：需要精確控制「內容佔幾列」（例如可捲動的詳情面板）
 /// 時，必須自行換行，不能依賴繪製端的 `Wrap`——後者無法回報實際列數。
@@ -130,13 +136,13 @@ pub fn wrap_display(text: &str, width: usize) -> Vec<String> {
                 Some(index) => {
                     // 斷點之後的部分（含詞間空格）移到下一行。
                     let tail = current.split_off(index);
-                    lines.push(current.trim_end().to_owned());
-                    current = tail.trim_start().to_owned();
+                    flush_line(&mut lines, &mut current);
+                    current = trim_ascii_start(&tail).to_owned();
                     current_width = display_width(&current);
                 }
                 None => {
                     // 單一詞超出一列：硬切（不切開字素）。
-                    lines.push(std::mem::take(&mut current));
+                    flush_line(&mut lines, &mut current);
                     current_width = 0;
                 }
             }
@@ -153,13 +159,32 @@ pub fn wrap_display(text: &str, width: usize) -> Vec<String> {
         current_width += grapheme_width;
     }
 
-    if !current.is_empty() {
-        lines.push(current);
-    }
+    flush_line(&mut lines, &mut current);
     if lines.is_empty() {
         lines.push(String::new());
     }
     lines
+}
+
+/// 收下一列並清空緩衝；**整列皆空白**的緩衝直接丟棄。
+///
+/// 緩衝不會以 ASCII 空白結尾（詞間只補一個半形空格，其後必定緊接非空白字素），
+/// 所以「整列皆空白」只可能由非 ASCII 空白（全形空格、`&nbsp;`…）組成——那正是
+/// 縮排剛好填滿一列的情形。空緩衝也視為無內容。
+fn flush_line(lines: &mut Vec<String>, current: &mut String) {
+    if current.chars().all(char::is_whitespace) {
+        current.clear();
+        return;
+    }
+    lines.push(std::mem::take(current));
+}
+
+/// 只去掉首端的 ASCII 空白（非 ASCII 空白是排版內容，必須保留）。
+///
+/// 與 [`crate::sites::lms`] 的 HTML 轉換共用同一套空白政策：全形空格與 `&nbsp;`
+/// 不是可折疊的空白。
+fn trim_ascii_start(text: &str) -> &str {
+    text.trim_start_matches(|character: char| character.is_ascii_whitespace())
 }
 
 #[cfg(test)]

@@ -12,8 +12,9 @@
 //! 常以它們做縮排，因此原樣保留——與 [`crate::text::wrap_display`] 的規則一致。
 //!
 //! 表格以「列」為單位換行，同一列的各儲存格之間補一個空白（否則會出現
-//! 「第一题10」這種黏在一起的內容）；儲存格內的區塊元素同樣降級成空白（所見即
-//! 所得的編輯器會把儲存格內容包在 `<p>` 裡，換行會讓同一列的欄位散開）。
+//! 「第一题10」這種黏在一起的內容）；儲存格內的區塊元素與 `<br>` 同樣降級成空白
+//! （所見即所得的編輯器會把儲存格內容包在 `<p>` 裡、多行儲存格也很常見，換行會
+//! 讓同一列的欄位散開）。
 //!
 //! 連結（`<a href>`）只保留錨文字：`href` 目標在純文字裡無處可放，因此另外以
 //! `has_links` 標記，讓介面提示使用者開網頁查看。
@@ -127,7 +128,7 @@ pub(super) fn convert(html: &str) -> ActivityText {
 /// 表格儲存格之間補一個空白（保留同一列的欄位對應）。
 ///
 /// `in_cell` 表示目前位於表格儲存格內：儲存格裡的換行會讓同一列的欄位散開，
-/// 因此把區塊元素降級成空白分隔。
+/// 因此把區塊元素與 `<br>` 都降級成空白分隔。
 fn walk_element(
     element: ElementRef<'_>,
     out: &mut String,
@@ -166,7 +167,15 @@ fn walk_element(
                     push_text(&text.text, out);
                 }
             }
-            Step::Break => out.push('\n'),
+            Step::Break => {
+                // 儲存格內的 `<br>` 與區塊元素同等處理（見 `in_cell`）：換行會讓
+                // 同一列的欄位散開。
+                if in_cell {
+                    push_separator(out);
+                } else {
+                    out.push('\n');
+                }
+            }
             Step::Skip => {}
             Step::Media => *has_media = true,
             Step::Nested { block, cell } => {

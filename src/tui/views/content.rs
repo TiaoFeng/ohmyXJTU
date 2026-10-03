@@ -68,8 +68,9 @@ fn description_hint(text: &ActivityText) -> Option<&'static str> {
 
 /// 說明區塊的標題：作業為「作业描述」，其他活動為「内容」。
 ///
-/// 作業頁與思源學堂詳情頁共用同一份文案，避免兩處各寫一次而悄悄分歧。
-pub(super) fn description_label(kind: ActivityKind) -> &'static str {
+/// 由 [`push_description`] 依活動類型推導，呼叫端不必自行挑選文案，也就不會出現
+/// 「類型是資料、標題卻寫作业描述」這種不一致。
+fn description_label(kind: ActivityKind) -> &'static str {
     if kind == ActivityKind::Homework {
         "作业描述："
     } else {
@@ -155,13 +156,14 @@ pub(super) fn push_multiline(
 ///
 /// 作業頁與思源學堂詳情頁共用同一套規則：有說明才顯示標題，且圖片、連結的目標
 /// 都不在純文字裡，必須明講使用者才知道要開網頁（見 [`description_hint`]）。
+/// 標題由 `kind` 推導（見 [`description_label`]），呼叫端不必自行挑選文案。
 pub(super) fn push_description(
     lines: &mut Vec<Line<'static>>,
     description: &ActivityText,
-    label: &str,
+    kind: ActivityKind,
     width: usize,
 ) {
-    push_wrapped(lines, label, THEME.muted_style(), width);
+    push_wrapped(lines, description_label(kind), THEME.muted_style(), width);
     if let Some(text) = &description.text {
         push_multiline(lines, text, Style::default().fg(THEME.text), width);
     }

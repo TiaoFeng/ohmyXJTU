@@ -150,6 +150,58 @@ where
     }
 }
 
+/// 缺欄位或型別不符時回傳 `None` 的可選字串。
+///
+/// 只接受字串：非字串（數字、物件、陣列…）一律視為「沒有這段內容」。用於純展示
+/// 用的文字欄位（例如活動說明）：這些欄位型別異常時只應損失該段說明，不應讓整份
+/// 回應解析失敗——詳情解析失敗會使該課程的作業全部退回「待核实」。
+pub(crate) fn optional_string_lenient<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    match value {
+        Some(serde_json::Value::String(text)) => Ok(Some(text)),
+        _ => Ok(None),
+    }
+}
+
+/// 缺欄位或型別不符時回傳 `None` 的非負整數（接受數字與可解析的數字字串）。
+///
+/// 用於純展示用的數量欄位（例如附件大小）：型別異常時只損失這個數字，不讓整份
+/// 回應解析失敗。
+pub(crate) fn optional_u64_lenient<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    let number = match value {
+        Some(serde_json::Value::Number(number)) => number.as_u64(),
+        Some(serde_json::Value::String(text)) => text.trim().parse::<u64>().ok(),
+        _ => None,
+    };
+    Ok(number)
+}
+
+/// 缺欄位、不是陣列或個別項目解析失敗時都不報錯的列表欄位。
+///
+/// 逐項解析並跳過失敗的項目（與 [`parse_lenient`] 同精神）：附件清單異常不該讓
+/// 整份活動詳情失敗——詳情失敗會使該課程的作業全部退回「待核实」。
+pub(crate) fn lenient_array<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: DeserializeOwned,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    let Some(serde_json::Value::Array(items)) = value else {
+        return Ok(Vec::new());
+    };
+    Ok(items
+        .into_iter()
+        .filter_map(|item| serde_json::from_value(item).ok())
+        .collect())
+}
+
 #[cfg(test)]
 #[path = "tests/mod_test.rs"]
 mod mod_test;

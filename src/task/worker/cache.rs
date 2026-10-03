@@ -7,13 +7,22 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
+use crate::http::HttpRequest;
+use crate::session::SiteKind;
 use crate::sites::lms::{LmsActivity, LmsApi, LmsCourse, SubmissionSummary};
 
 use super::Worker;
+use super::timing::Phase;
 
 /// 思源學堂課程／活動快取的有效時間。
 const LMS_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+
+/// 單門課程的活動查詢結果（活動清單＋被跳過的項目數）。
+pub(super) type ActivitiesOutcome = AppResult<(Vec<LmsActivity>, usize)>;
+
+/// 單項活動詳情的查詢結果。
+pub(super) type DetailOutcome = AppResult<LmsActivity>;
 
 /// 思源學堂課程／活動快取（記憶體、有效期五分鐘）。
 #[derive(Default)]
@@ -99,6 +108,7 @@ impl Worker {
     /// 課程清單（含被跳過的項目數）；有效期內重用快取。
     pub(super) fn lms_courses(&mut self, force: bool) -> AppResult<(Vec<LmsCourse>, usize)> {
         if let Some(cached) = self.cache.courses(force) {
+            self.timing.note_hit();
             return Ok(cached);
         }
         let session = self.session_mut()?;
@@ -115,6 +125,7 @@ impl Worker {
         force: bool,
     ) -> AppResult<(Vec<LmsActivity>, usize)> {
         if let Some(cached) = self.cache.activities(course_id, force) {
+            self.timing.note_hit();
             return Ok(cached);
         }
         let session = self.session_mut()?;
@@ -124,6 +135,56 @@ impl Worker {
         Ok((activities, skipped))
     }
 
+    /// 一次取回多門課程的活動（併發；有效期內重用快取）。
+    ///
+    /// 回傳與 `course_ids` **同序**的結果。外層 `Err` 代表整批無法進行
+    ///（例如登入態失效，交由呼叫端走統一重登）；內層 `Err` 只代表該門課程
+    /// 失敗，呼叫端可以只略過那一門。
+    ///
+    /// 快取命中的課程不發請求；其餘以一批併發送出，因此這一輪只會佔用工作
+    /// 執行緒一次往返的時間，而不是逐門累加。
+    pub(super) fn lms_activities_batch(
+        &mut self,
+        course_ids: &[String],
+        force: bool,
+    ) -> AppResult<Vec<ActivitiesOutcome>> {
+        let mut slots: Vec<Option<ActivitiesOutcome>> =
+            (0..course_ids.len()).map(|_| None).collect();
+        let mut pending: Vec<(usize, HttpRequest)> = Vec::new();
+
+        for (index, course_id) in course_ids.iter().enumerate() {
+            if let Some(cached) = self.cache.activities(course_id, force) {
+                self.timing.note_hit();
+                slots[index] = Some(Ok(cached));
+                continue;
+            }
+            match LmsApi::course_activities_request(course_id) {
+                Ok(request) => pending.push((index, request)),
+                // 識別碼不合法：只影響這一門課程，不是整批失敗。
+                Err(err) => slots[index] = Some(Err(err)),
+            }
+        }
+
+        if !pending.is_empty() {
+            let requests = pending.iter().map(|(_, request)| request.clone()).collect();
+            let responses = self.session_mut()?.send_batch(SiteKind::Lms, requests)?;
+            for ((index, _), response) in pending.iter().zip(responses) {
+                let parsed =
+                    response.and_then(|response| LmsApi::parse_course_activities(&response));
+                if let Ok((activities, skipped)) = parsed.as_ref() {
+                    self.cache
+                        .store_activities(&course_ids[*index], activities, *skipped);
+                }
+                slots[*index] = Some(parsed);
+            }
+        }
+
+        Ok(slots
+            .into_iter()
+            .map(|slot| slot.unwrap_or_else(|| Err(AppError::protocol("课程活动的查询结果不完整"))))
+            .collect())
+    }
+
     /// 活動詳情（記憶體內快取先行）。
     pub(super) fn lms_activity_detail(
         &mut self,
@@ -131,6 +192,7 @@ impl Worker {
         force: bool,
     ) -> AppResult<LmsActivity> {
         if let Some(cached) = self.cache.detail(activity_id, force) {
+            self.timing.note_hit();
             return Ok(cached);
         }
         let session = self.session_mut()?;
@@ -140,20 +202,72 @@ impl Worker {
         Ok(detail)
     }
 
-    /// 作業提交摘要（快取先行；詳情先行確定小組）。
-    pub(super) fn lms_submission_summary(
+    /// 一次取回多項活動的詳情（併發；有效期內重用快取）。
+    ///
+    /// 回傳與 `activity_ids` **同序**的結果。外層 `Err` 代表整批無法進行
+    ///（例如登入態失效，交由呼叫端走統一重登）；內層 `Err` 只代表該項失敗。
+    pub(super) fn lms_detail_batch(
+        &mut self,
+        activity_ids: &[String],
+        force: bool,
+    ) -> AppResult<Vec<DetailOutcome>> {
+        let mut slots: Vec<Option<DetailOutcome>> = (0..activity_ids.len()).map(|_| None).collect();
+        let mut pending: Vec<(usize, HttpRequest)> = Vec::new();
+
+        for (index, activity_id) in activity_ids.iter().enumerate() {
+            if let Some(cached) = self.cache.detail(activity_id, force) {
+                self.timing.note_hit();
+                slots[index] = Some(Ok(cached));
+                continue;
+            }
+            match LmsApi::activity_detail_request(activity_id) {
+                Ok(request) => pending.push((index, request)),
+                // 識別碼不合法：只影響這一項，不是整批失敗。
+                Err(err) => slots[index] = Some(Err(err)),
+            }
+        }
+
+        if !pending.is_empty() {
+            let requests = pending.iter().map(|(_, request)| request.clone()).collect();
+            let responses = self.session_mut()?.send_batch(SiteKind::Lms, requests)?;
+            for ((index, _), response) in pending.iter().zip(responses) {
+                let parsed = response.and_then(|response| LmsApi::parse_activity_detail(&response));
+                if let Ok(detail) = parsed.as_ref() {
+                    self.cache.store_detail(&activity_ids[*index], detail);
+                }
+                slots[*index] = Some(parsed);
+            }
+        }
+
+        Ok(slots
+            .into_iter()
+            .map(|slot| slot.unwrap_or_else(|| Err(AppError::protocol("活动详情的查询结果不完整"))))
+            .collect())
+    }
+
+    /// 作業提交摘要（快取先行；詳情已由呼叫端取得）。
+    pub(super) fn lms_submission_summary_from_detail(
         &mut self,
         activity_id: &str,
+        detail: &LmsActivity,
         force: bool,
     ) -> AppResult<SubmissionSummary> {
         if let Some(cached) = self.cache.summary(activity_id, force) {
+            self.timing.note_hit();
             return Ok(cached);
         }
-        let detail = self.lms_activity_detail(activity_id, force)?;
-        let session = self.session_mut()?;
-        let mut api = LmsApi::new(session);
-        let summary = api.submission_summary_for(&detail)?;
+        let started = self.timing.mark();
+        let summary = self.fetch_submission_summary(detail);
+        self.timing.record(Phase::Submission, started, 1);
+        let summary = summary?;
         self.cache.store_summary(activity_id, &summary);
         Ok(summary)
+    }
+
+    /// 向伺服器查詢提交摘要（詳情已取得）。
+    fn fetch_submission_summary(&mut self, detail: &LmsActivity) -> AppResult<SubmissionSummary> {
+        let session = self.session_mut()?;
+        let mut api = LmsApi::new(session);
+        api.submission_summary_for(detail)
     }
 }

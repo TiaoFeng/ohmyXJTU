@@ -15,7 +15,7 @@ fn table(headers: &[&str], rows: &[&[&str]]) -> Table {
 
 /// 子字串在該列中的起始顯示欄。
 fn column_start(line: &str, needle: &str) -> usize {
-    let offset = line.find(needle).expect("子字串应存在于该列");
+    let offset = line.find(needle).expect("子字符串应存在于该列");
     display_width(&line[..offset])
 }
 
@@ -39,7 +39,7 @@ fn short_table_is_rendered_as_an_aligned_grid() {
     );
     let lines = table.layout(60);
 
-    assert_eq!(lines.len(), 4, "標頭＋細線＋兩列：{lines:?}");
+    assert_eq!(lines.len(), 4, "标头＋细线＋两列：{lines:?}");
     assert_eq!(lines[0].kind, LineKind::TableHeader);
     assert_eq!(lines[1].kind, LineKind::TableRule);
     assert_eq!(lines[2].kind, LineKind::TableRow);
@@ -49,7 +49,7 @@ fn short_table_is_rendered_as_an_aligned_grid() {
     assert_eq!(column_start(&lines[0].text, "目录"), 8);
     assert_eq!(column_start(&lines[2].text, "~/.local/share/"), 8);
     assert_eq!(column_start(&lines[3].text, "~/Library/"), 8);
-    assert_eq!(display_width(&lines[1].text), 8 + 15, "細線應等於表格寬");
+    assert_eq!(display_width(&lines[1].text), 8 + 15, "细线应等于表格宽");
     assert!(lines.iter().all(|line| line.label_len == 0));
 }
 
@@ -62,7 +62,7 @@ fn boundary_switches_between_grid_and_cards() {
     let narrow = table.layout(22);
     assert_eq!(narrow[0].kind, LineKind::TableTitle);
     assert_eq!(narrow[0].text, "▸ Linux");
-    assert_eq!(narrow[0].label_len, 2, "標題符號以標籤樣式呈現");
+    assert_eq!(narrow[0].label_len, 2, "标题符号以标签样式呈现");
     assert!(narrow[1].text.starts_with("  目录：~/.local/share"));
     assert!(narrow.iter().all(|line| display_width(&line.text) <= 22));
 }
@@ -91,12 +91,12 @@ fn wide_table_becomes_cards_with_aligned_labels() {
     assert_eq!(lines[2].label_len, 16);
     assert!(
         lines[2..].iter().all(|line| line.label_len >= 16),
-        "續行必須維持懸掛縮排：{lines:?}"
+        "续行必须维持悬挂缩进：{lines:?}"
     );
     for line in &lines {
         assert!(
             display_width(&line.text) <= 40,
-            "不得超出可用寬度：{line:?}"
+            "不得超出可用宽度：{line:?}"
         );
     }
 }
@@ -126,11 +126,11 @@ fn long_labels_stand_alone_when_space_is_tight() {
 
     assert!(
         lines.iter().any(|line| line.text == "  内容    ："),
-        "標籤應獨立成列：{lines:?}"
+        "标签应独立成列：{lines:?}"
     );
     assert!(
         lines.iter().any(|line| line.text == "账号与密码"),
-        "值應由列首開始，不被標籤欄擠壓：{lines:?}"
+        "值应由列首开始，不被标签栏挤压：{lines:?}"
     );
 }
 
@@ -149,16 +149,16 @@ fn card_text_survives_every_width() {
 
     for width in [24, 32, 40, 64] {
         let lines = table.layout(width);
-        assert!(!lines.is_empty(), "{width} 欄時不應排成空白");
+        assert!(!lines.is_empty(), "{width} 栏时不应排成空白");
         for line in &lines {
             assert!(
                 display_width(&line.text) <= width,
-                "{width} 欄時超寬：{line:?}"
+                "{width} 栏时超宽：{line:?}"
             );
         }
         assert!(
             compact_text(&lines).contains(&needle),
-            "{width} 欄排版後內容遺失：{lines:?}"
+            "{width} 栏排版后内容遗失：{lines:?}"
         );
     }
 }
@@ -171,7 +171,7 @@ fn headerless_table_renders_rows_without_a_header_line() {
     );
     let lines = table.layout(60);
 
-    assert_eq!(lines.len(), 2, "沒有標頭就沒有標頭列與細線：{lines:?}");
+    assert_eq!(lines.len(), 2, "没有标头就没有标头列与细线：{lines:?}");
     assert_eq!(lines[0].text, "Linux │ ~/.local/share/");
     assert_eq!(lines[1].text, "macOS │ ~/Library/");
 }
@@ -194,7 +194,7 @@ fn parse_without_alignment_row_keeps_every_row_as_data() {
     let lines = ["| a | b |", "| 1 | 2 |"];
     let table = Table::parse(&lines).expect("应解析为表格");
 
-    assert!(table.headers().is_empty(), "沒有對齊列就沒有標頭");
+    assert!(table.headers().is_empty(), "没有对齐列就没有标头");
     assert_eq!(
         table.rows(),
         vec![

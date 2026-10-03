@@ -66,3 +66,91 @@ fn split_at_display_never_cuts_a_grapheme() {
     let text = "e\u{301}xyz";
     assert_eq!(split_at_display(text, 1), ("e\u{301}", "xyz"));
 }
+
+#[test]
+fn wraps_at_spaces_by_display_width() {
+    assert_eq!(
+        wrap_display("alpha beta gamma", 11),
+        vec!["alpha beta", "gamma"]
+    );
+    // 連續空白折成一個空格；行首與行尾不留空白。
+    assert_eq!(wrap_display("  a   b  ", 3), vec!["a b"]);
+    assert_eq!(wrap_display("a b", 3), vec!["a b"]);
+    assert_eq!(wrap_display("aa bbbb", 6), vec!["aa", "bbbb"]);
+}
+
+#[test]
+fn wraps_long_words_by_grapheme() {
+    // 沒有空白可斷：逐字素硬切。
+    assert_eq!(wrap_display("abcdef", 3), vec!["abc", "def"]);
+    // 組合字元不被拆開。
+    assert_eq!(wrap_display("e\u{301}xyz", 2), vec!["e\u{301}x", "yz"]);
+}
+
+#[test]
+fn wraps_cjk_by_display_width() {
+    // 「中文」各佔 2 欄：寬度 4 只放得下兩個字。
+    assert_eq!(
+        wrap_display("中文中文中文", 4),
+        vec!["中文", "中文", "中文"]
+    );
+    assert_eq!(wrap_display("中文 abc", 6), vec!["中文", "abc"]);
+    // 單一字素就超過欄寬時仍自成一列（不得無窮迴圈）。
+    assert_eq!(wrap_display("中文", 1), vec!["中", "文"]);
+}
+
+#[test]
+fn wrap_display_keeps_line_count_stable() {
+    assert_eq!(wrap_display("", 10), vec![""]);
+    assert_eq!(wrap_display("   ", 10), vec![""]);
+    assert_eq!(wrap_display("abcd", 10), vec!["abcd"]);
+    assert_eq!(wrap_display("abcd", 4), vec!["abcd"]);
+    assert!(wrap_display("abcd", 0).is_empty());
+}
+
+/// 非 ASCII 空白（全形空格、不斷行空格）是排版用的可見字元，不得折成半形空白。
+///
+/// 中文排版常以全形空格做縮排與對齊；折成半形會讓「类型：作业\u{3000}截止：…」
+/// 這類由介面自行拼出的文字走樣。
+#[test]
+fn wrap_display_keeps_non_ascii_whitespace() {
+    assert_eq!(
+        wrap_display("类型：作业\u{3000}截止：2026-10-12 23:59", 60),
+        vec!["类型：作业\u{3000}截止：2026-10-12 23:59"]
+    );
+    assert_eq!(
+        wrap_display("\u{3000}\u{3000}第一章", 60),
+        vec!["\u{3000}\u{3000}第一章"]
+    );
+    // 不斷行空格也不得成為斷行點。
+    assert_eq!(wrap_display("分数\u{a0}10", 40), vec!["分数\u{a0}10"]);
+    // ASCII 空白照舊折疊與斷行。
+    assert_eq!(wrap_display("a \t b", 40), vec!["a b"]);
+    assert_eq!(wrap_display("alpha beta", 6), vec!["alpha", "beta"]);
+}
+
+/// 兩條換行路徑（空白處斷行與硬切）的修剪語意必須一致，且整列空白的緩衝不輸出。
+///
+/// 這些都是「縮排剛好落在換行邊界」的邊界情形：斷行路徑若用預設（所有 Unicode
+/// 空白）語意修剪，會把緊鄰斷行點的全形空格或 `&nbsp;` 吃掉；硬切路徑若完全不
+/// 修剪，則會產生整列只有空白的列。
+#[test]
+fn wrap_display_trims_only_ascii_whitespace() {
+    // 全形空格緊鄰 ASCII 斷行點：不得被當成可修剪的空白丟掉。
+    assert_eq!(wrap_display("ab\u{3000} cd", 6), vec!["ab\u{3000}", "cd"]);
+    // 縮排剛好填滿一列：該列不輸出（否則白佔一列），文字另起新列。
+    assert_eq!(
+        wrap_display("\u{3000}\u{3000}第一章", 4),
+        vec!["第一", "章"]
+    );
+    // 斷行路徑同樣不得輸出整列空白的列。
+    assert_eq!(
+        wrap_display("\u{3000}\u{3000} 第一章", 4),
+        vec!["第一", "章"]
+    );
+    // 硬切路徑保留續列行首的非 ASCII 空白：那是內容，不是可折疊的空白。
+    assert_eq!(wrap_display("分数\u{a0}10", 4), vec!["分数", "\u{a0}10"]);
+    // 整份只有空白時回傳單一空行——非 ASCII 空白與 ASCII 空白行為一致。
+    assert_eq!(wrap_display("\u{3000}\u{3000}", 10), vec![""]);
+    assert_eq!(wrap_display("   ", 10), vec![""]);
+}

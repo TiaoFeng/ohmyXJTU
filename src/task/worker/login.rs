@@ -4,12 +4,15 @@
 //! 再繼續；登入態失效時由調度核心自動重新登入並重試原本的任務。失敗計數以
 //!（帳號, 後端）為鍵保存，伺服器要求的驗證碼門檻才能跨驅動器累計。
 
+use std::time::Instant;
+
 use crate::auth::{AccountType, LoginDriver, LoginReply};
 use crate::credentials::{Credentials, Secret};
 use crate::error::{AppError, AppResult};
 use crate::session::{AccessMode, LoginStage, SiteKind};
 use crate::task::protocol::{Event, Job, failed_target_of};
 
+use super::timing::Phase;
 use super::{LoginFlow, PendingVault, Worker};
 
 impl Worker {
@@ -46,6 +49,19 @@ impl Worker {
         }
     }
 
+    /// 結束一次登入的計時（登入成功、憑證被拒或取消時）。
+    ///
+    /// 只有作業載入計時進行中才納入：其他頁面的登入時間不屬於那一次載入。
+    fn record_login(&mut self) {
+        if self.timing.is_idle() {
+            self.login_started = None;
+            return;
+        }
+        if let Some(started) = self.login_started.take() {
+            self.timing.record(Phase::Login, started, 1);
+        }
+    }
+
     /// 取消進行中的登入流程（介面關閉登入覆蓋層時）。
     ///
     /// 丟棄登入驅動器、待存憑證、待重試任務與暫存的驗證碼圖片：登入互動期間
@@ -54,6 +70,7 @@ impl Worker {
     /// 這種情況下不覆蓋介面已顯示的提示。結束時一律發送
     /// [`Event::LoginCancelled`]，作為介面清除「等待取消」狀態的依據。
     pub(super) fn cancel_login(&mut self) -> AppResult<()> {
+        self.record_login();
         // 即使登入流程本身已經結束，等待重登的資料任務仍可能留著：例如憑證
         // 被拒時流程與待存憑證都已丟棄（`flow`、`pending_vault` 皆為 `None`），
         // 但 `retry` 還握著原任務。不收拾它的話，該頁會永遠停在「載入中」
@@ -99,6 +116,8 @@ impl Worker {
             .ok_or_else(|| AppError::config("尚未解锁凭证"))?;
         // 記下本次登入的站點：失敗訊息與介面重試都要能指出是哪個站點。
         self.login_site = Some(site);
+        // 本次登入的計時起點（診斷用；登入成功或結束時結算）。
+        self.login_started = Some(Instant::now());
         // 新的一輪登入：重新觀察是否真的提交過帳密。
         self.login_submitted_credentials = false;
         // 重新開始登入時丟棄上一個（多半已失敗的）流程與其驗證碼圖片。
@@ -183,6 +202,7 @@ impl Worker {
                     return Ok(());
                 }
                 // 憑證被拒：丟棄待存憑證（並還原舊憑證），不覆蓋保險庫中的舊憑證。
+                self.record_login();
                 self.flow = None;
                 self.discard_pending_vault();
                 self.clear_captcha();
@@ -227,6 +247,9 @@ impl Worker {
 
     /// 登入成功收尾：回報結果、保存憑證並續跑等待中的任務。
     pub(super) fn finish_login(&mut self, site: SiteKind, retry: Option<Job>) -> AppResult<()> {
+        // 登入流程結束：先結算登入計時，再收尾（收尾會續跑等待中的任務，
+        // 那是下一次載入的工作，不屬於登入）。
+        self.record_login();
         // 登入成功：驗證碼圖片不再需要，立即清除。
         self.clear_captcha();
         // 換帳號時若整個流程都沒有提交帳密，代表伺服器端仍有舊帳號的登入態，

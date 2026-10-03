@@ -183,7 +183,7 @@ fn parse_failure_message_does_not_leak_plaintext() {
     let message = err.to_string();
     assert!(
         !message.contains(PLAINTEXT),
-        "訊息不得夾帶解密內容：{message}"
+        "信息不得夹带解密内容：{message}"
     );
     assert!(matches!(err, AppError::VaultFile(_)), "实际错误：{err}");
 }

@@ -20,7 +20,7 @@ mod table;
 pub use table::Table;
 
 /// 本版本要求的協議版本（對應 `PRIVACY.md` 標頭的「版本」）。
-pub const VERSION: &str = "1.2";
+pub const VERSION: &str = "1.3";
 
 /// 內嵌的協議全文（Markdown 原始內容）。
 pub const TEXT: &str = include_str!("../PRIVACY.md");

@@ -107,7 +107,7 @@ fn chosen_term_wins_over_attendance_and_remembered() {
         TermResolution::NeedsChoice {
             suggestion: TermCode::parse("2026-2027-1"),
         },
-        "都無法判定時提供建議但不得自行採用"
+        "都无法判定时提供建议但不得自行采用"
     );
 }
 
@@ -155,7 +155,7 @@ fn extracts_course_terms() {
             TermCode::parse("2026-2027-1").unwrap(),
             TermCode::parse("2025-2026-2").unwrap(),
         ],
-        "去重並由新到舊"
+        "去重并由新到旧"
     );
 }
 
@@ -203,7 +203,7 @@ fn splits_courses_by_term_and_counts_missing_semesters() {
             .map(|course| course.id.as_str())
             .collect::<Vec<_>>(),
         vec!["1", "5"],
-        "只納入目標學期的課程"
+        "只纳入目标学期的课程"
     );
-    assert_eq!(skipped, 2, "缺少或無法解析學期的課程計入跳過數");
+    assert_eq!(skipped, 2, "缺少或无法解析学期的课程计入跳过数");
 }

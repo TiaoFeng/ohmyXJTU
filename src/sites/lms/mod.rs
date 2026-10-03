@@ -4,16 +4,20 @@
 //! 課程活動為 `GET /api/courses/{id}/activities`，活動詳情為
 //! `GET /api/activities/{id}`（作業會附帶提交記錄）。
 
+mod html;
 mod js_object;
 pub mod models;
 
-pub use models::{ActivityKind, LmsActivity, LmsCourse, LmsSubmission, LmsSubmissionList};
+pub use models::{
+    ActivityContent, ActivityKind, BODY_FIELD_TYPE_NOTE, BODY_NOT_OBJECT_NOTE, LmsActivity,
+    LmsCourse, LmsSubmission, LmsSubmissionList, LmsUpload, TOP_LEVEL_BODY_NOTE,
+};
 
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::error::{AppError, AppResult};
-use crate::http::HttpRequest;
+use crate::http::{HttpRequest, HttpResponse};
 use crate::session::{PostLogin, SessionManager, SiteAdapter, SiteKind, SiteLogin, SitePolicy};
 use crate::sites::{ensure_authenticated, parse_json, parse_lenient};
 
@@ -59,6 +63,23 @@ fn safe_identifier(value: &str) -> Option<&str> {
 /// 檢查識別碼可安全拼接進路徑；失敗時回傳描述階段的協定錯誤（不含原值）。
 fn checked_id<'a>(value: &'a str, what: &str) -> AppResult<&'a str> {
     safe_identifier(value).ok_or_else(|| AppError::protocol(what))
+}
+
+/// 取出回應中的清單欄位（缺欄位視為空清單、逐項寬容解析）。
+///
+/// 與 [`LmsApi::send_json_list`] 共用：批次抓取時請求與回應分開處理，
+/// 解析必須能獨立於連線物件執行。
+fn parse_json_list<T: DeserializeOwned>(
+    response: &HttpResponse,
+    what: &str,
+    key: &str,
+) -> AppResult<(Vec<T>, usize)> {
+    let value: Value = parse_json(response, what)?;
+    let items = value
+        .get(key)
+        .cloned()
+        .unwrap_or_else(|| Value::Array(Vec::new()));
+    parse_lenient(items, what)
 }
 
 /// 站點擴充點。
@@ -107,6 +128,8 @@ pub struct SubmissionSummary {
     pub count: Option<usize>,
     /// 無法確認的原因。
     pub note: Option<String>,
+    /// 作業說明與附件（正文＋附件）；`None` 代表詳情沒有可顯示的內容。
+    pub description: Option<ActivityContent>,
 }
 
 /// 活動詳情缺少 `submit_by_group` 時的說明。
@@ -141,12 +164,8 @@ impl<'a> LmsApi<'a> {
         what: &str,
         key: &str,
     ) -> AppResult<(Vec<T>, usize)> {
-        let value: Value = self.send_json(request, what)?;
-        let items = value
-            .get(key)
-            .cloned()
-            .unwrap_or_else(|| Value::Array(Vec::new()));
-        parse_lenient(items, what)
+        let response = self.session.send(SiteKind::Lms, request)?;
+        parse_json_list(&response, what, key)
     }
 
     /// 目前登入者的使用者 ID。
@@ -191,18 +210,24 @@ impl<'a> LmsApi<'a> {
 
     /// 課程活動列表（附帶被跳過的項目數）。
     pub fn course_activities(&mut self, course_id: &str) -> AppResult<(Vec<LmsActivity>, usize)> {
-        let course_id = checked_id(course_id, "课程识别码不符合预期格式")?;
-        self.send_json_list(
-            HttpRequest::get(format!("{BASE_URL}/api/courses/{course_id}/activities")),
-            "查询课程活动",
-            "activities",
-        )
+        let request = Self::course_activities_request(course_id)?;
+        let response = self.session.send(SiteKind::Lms, request)?;
+        Self::parse_course_activities(&response)
     }
 
-    /// 活動詳情；作業會一併抓取提交記錄。
-    pub fn activity(&mut self, activity_id: &str) -> AppResult<ActivityDetail> {
-        let activity = self.fetch_activity_detail(activity_id)?;
-        self.activity_from(activity)
+    /// 課程活動列表的請求（供批次抓取使用）。
+    pub fn course_activities_request(course_id: &str) -> AppResult<HttpRequest> {
+        let course_id = checked_id(course_id, "课程识别码不符合预期格式")?;
+        Ok(HttpRequest::get(format!(
+            "{BASE_URL}/api/courses/{course_id}/activities"
+        )))
+    }
+
+    /// 解析課程活動列表的回應。
+    pub fn parse_course_activities(
+        response: &HttpResponse,
+    ) -> AppResult<(Vec<LmsActivity>, usize)> {
+        parse_json_list(response, "查询课程活动", "activities")
     }
 
     /// 以既有詳情組出活動詳情（作業會一併抓取提交記錄）。
@@ -244,27 +269,24 @@ impl<'a> LmsApi<'a> {
         })
     }
 
-    /// 作業提交摘要：先取活動詳情確定小組，再依需要查詢提交記錄。
+    /// 以既有詳情計算作業提交摘要（個人作業可省一次提交列表請求）。
     ///
-    /// 個人作業優先採用詳情中的 `user_submit_count`（「当前用户提交次数」，
-    /// 有值時可省一次提交列表請求；語意待實網脫敏樣本核實，若語意有出入
-    /// 只需調整此處）；小組作業一律以詳情確認的 `group_id` 查詢小組提交
-    /// 記錄，缺 `group_id` 時保持「待核实」並說明原因。
-    pub fn submission_summary(&mut self, activity_id: &str) -> AppResult<SubmissionSummary> {
-        let detail = self.fetch_activity_detail(activity_id)?;
-        self.submission_summary_for(&detail)
-    }
-
-    /// 以既有詳情計算提交摘要（個人作業可省一次提交列表請求）。
+    /// 個人作業優先採用詳情中的 `user_submit_count`（「当前用户提交次数」，有值時
+    /// 可省一次提交列表請求；語意待實網脫敏樣本核實，若有出入只需調整此處）；
+    /// 小組作業一律以詳情確認的 `group_id` 查詢小組提交記錄。
     ///
     /// 詳情缺少 `submit_by_group` 時無法判定個人或小組，一律回報「待核实」
-    /// 且不發出任何提交查詢（含不查 `/user/index`）。
+    /// 且不發出任何提交查詢（含不查 `/user/index`）。說明欄位與提交狀態同源
+    /// （同一次詳情請求），因此所有分支都一併帶上。
     pub fn submission_summary_for(&mut self, detail: &LmsActivity) -> AppResult<SubmissionSummary> {
+        let description = detail.body();
+
         let Some(submit_by_group) = detail.submit_by_group else {
             return Ok(SubmissionSummary {
                 submit_by_group: None,
                 count: None,
                 note: Some(MISSING_SUBMIT_BY_GROUP_NOTE.to_owned()),
+                description,
             });
         };
 
@@ -275,6 +297,7 @@ impl<'a> LmsApi<'a> {
                 // 「未提交」；超出範圍時視為無法確認（`None`）。
                 count: usize::try_from(count).ok(),
                 note: None,
+                description,
             });
         }
 
@@ -283,6 +306,7 @@ impl<'a> LmsApi<'a> {
                 submit_by_group: Some(submit_by_group),
                 count: Some(list.effective_count()),
                 note: None,
+                description,
             }),
             // 登入態失效必須向上傳播，交由統一重登流程處理。
             Err(err) if err.needs_relogin() => Err(err),
@@ -291,6 +315,7 @@ impl<'a> LmsApi<'a> {
                 submit_by_group: Some(submit_by_group),
                 count: None,
                 note: Some(submission_failure_note(&err)),
+                description,
             }),
         }
     }
@@ -317,11 +342,22 @@ impl<'a> LmsApi<'a> {
 
     /// 取得活動詳情（不含提交記錄）；供需要自行快取的呼叫端使用。
     pub fn fetch_activity_detail(&mut self, activity_id: &str) -> AppResult<LmsActivity> {
+        let request = Self::activity_detail_request(activity_id)?;
+        let response = self.session.send(SiteKind::Lms, request)?;
+        Self::parse_activity_detail(&response)
+    }
+
+    /// 活動詳情的請求（供批次抓取使用）。
+    pub fn activity_detail_request(activity_id: &str) -> AppResult<HttpRequest> {
         let activity_id = checked_id(activity_id, "活动识别码不符合预期格式")?;
-        self.send_json(
-            HttpRequest::get(format!("{BASE_URL}/api/activities/{activity_id}")),
-            "查询活动详情",
-        )
+        Ok(HttpRequest::get(format!(
+            "{BASE_URL}/api/activities/{activity_id}"
+        )))
+    }
+
+    /// 解析活動詳情的回應。
+    pub fn parse_activity_detail(response: &HttpResponse) -> AppResult<LmsActivity> {
+        parse_json(response, "查询活动详情")
     }
 
     /// 查詢個人或小組的提交記錄。

@@ -12,7 +12,7 @@ fn parses_loose_javascript_objects() {
     // 未加引號的鍵、None、尾逗號（真實頁面的 globalData 形態）。
     let page = "{ user: { id: 7788, name: \"张三\", role: Student, dept: None, }, \
                 dept: { id: 7 }, locale: \"zh\" }";
-    let user = parse_js_object(page, "user", "dept").expect("应解析 user 子物件");
+    let user = parse_js_object(page, "user", "dept").expect("应解析 user 子对象");
     assert_eq!(user["id"], json!(7788));
     assert_eq!(user["name"], json!("张三"));
     assert_eq!(user["role"], json!("Student"));

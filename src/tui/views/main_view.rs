@@ -94,6 +94,18 @@ fn loading_dots(tick: u64) -> &'static str {
     LOADING_DOTS_FRAMES[phase]
 }
 
+/// 底部提示列的前置空白（訊息與提示都以此縮排）。
+const FOOTER_INDENT: u16 = 1;
+
+/// 提示片段之間的間隔。
+const HINT_SEPARATOR: &str = "  ";
+
+/// 提示放不下時補的省略號。
+const HINT_ELLIPSIS: &str = " …";
+
+/// 詳情面板的捲動提示（終端不夠寬時最先保留的片段之一）。
+const SCROLL_HINT: &str = "PgUp/PgDn 滚动";
+
 fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
     let line = match app.message_text() {
         Some(message) => Line::from(Span::styled(
@@ -101,44 +113,137 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
             THEME.error_style().add_modifier(Modifier::BOLD),
         )),
         None => Line::from(Span::styled(
-            format!(" {}", hints(app)),
+            format!(" {}", hints(app, area.width.saturating_sub(FOOTER_INDENT))),
             THEME.muted_style(),
         )),
     };
     frame.render_widget(Paragraph::new(line).style(THEME.base_style()), area);
 }
 
-fn hints(app: &App) -> String {
-    let mut text = format!(
-        "[{} {}]  q 退出  ←/→ 切换页面  ↑/↓ 选择  r 刷新  ^P 账户设置",
+/// 底部提示：依重要度排列——登入狀態、當下可捲動的詳情、當前頁面操作、通用按鍵。
+///
+/// 終端不夠寬時由後往前整段捨棄並補上省略號（見 [`fit_hints`]）。順序即重要度：
+/// 通用按鍵在所有頁面都一樣、也最快記住，因此排在最後；畫面專屬的操作（尤其
+/// 「這份說明還能往下讀」）才是使用者當下需要的，不會被固定的長前綴擠掉。
+fn hints(app: &App, width: u16) -> String {
+    let mut segments = vec![format!(
+        "[{} {}]",
         app.session_label(),
         app.access_policy.label()
+    )];
+    if scrollable_panel(app) {
+        segments.push(SCROLL_HINT.to_owned());
+    }
+    segments.extend(page_hints(app));
+    segments.extend(
+        [
+            "q 退出",
+            "r 刷新",
+            "←/→ 切换页面",
+            "↑/↓ 选择",
+            "^P 账户设置",
+        ]
+        .map(str::to_owned),
     );
+    fit_hints(&segments, width)
+}
 
+/// 目前畫面上的詳情面板是否可捲動（決定是否提示 `PgUp/PgDn`）。
+///
+/// 視窗資訊由繪製端回寫（見 `content` 的 `scrolled_panel`），而提示列在內容之後
+/// 繪製，因此讀到的是本幀的值。
+fn scrollable_panel(app: &App) -> bool {
     match app.nav {
-        NavItem::Attendance => text.push_str("  n/p 翻页"),
+        NavItem::Homework => app.homework_detail && app.homework_scroll.scrollable(),
+        NavItem::Lms => app.lms.level == LmsLevel::Detail && app.lms.detail_scroll.scrollable(),
+        NavItem::Schedule | NavItem::Attendance => false,
+    }
+}
+
+/// 當前頁面的操作提示（依重要度排序，排在前面者優先保留）。
+fn page_hints(app: &App) -> Vec<String> {
+    let mut hints = Vec::new();
+    match app.nav {
+        NavItem::Attendance => hints.push("n/p 翻页".to_owned()),
         NavItem::Homework => {
-            text.push_str("  [ ] 分组  s 学期  o 打开网页");
-            if app.homework_detail {
-                text.push_str("  enter 收起详情");
-            } else {
-                text.push_str("  enter 查看详情");
-            }
+            hints.push("[ ] 分组".to_owned());
+            hints.push("s 学期".to_owned());
+            hints.push("o 打开网页".to_owned());
+            hints.push(
+                if app.homework_detail {
+                    "enter 收起详情"
+                } else {
+                    "enter 查看详情"
+                }
+                .to_owned(),
+            );
         }
         NavItem::Lms => match app.lms.level {
-            LmsLevel::Courses => text.push_str("  enter 进入课程"),
+            LmsLevel::Courses => hints.push("enter 进入课程".to_owned()),
             LmsLevel::Activities => {
-                text.push_str("  [ ] 分组  enter 查看详情  o 打开网页  esc 返回课程");
+                hints.push("[ ] 分组".to_owned());
+                hints.push("enter 查看详情".to_owned());
+                hints.push("o 打开网页".to_owned());
+                hints.push("esc 返回课程".to_owned());
             }
-            LmsLevel::Detail => text.push_str("  o 打开网页  esc 返回活动"),
+            LmsLevel::Detail => {
+                hints.push("o 打开网页".to_owned());
+                hints.push("esc 返回活动".to_owned());
+            }
         },
-        _ => {
+        NavItem::Schedule => hints.push(
             if app.schedule_detail {
-                text.push_str("  enter 收起详情");
+                "enter 收起详情"
             } else {
-                text.push_str("  enter 查看详情");
+                "enter 查看详情"
             }
+            .to_owned(),
+        ),
+    }
+    hints
+}
+
+/// 依可用寬度挑選提示片段：由前往後加入，放不下的整段捨棄並以省略號收尾。
+///
+/// 逐段判斷（而非事後截斷字串）才不會把片段切成半句；加入非最後一段時會預留
+/// 省略號的寬度，避免「剩下的放不下、省略號又被裁掉」。連第一段都放不下時
+/// （正常情況下 `ui::too_small` 已先擋住）原樣輸出，交由繪製端裁切。
+fn fit_hints(segments: &[String], width: u16) -> String {
+    let width = usize::from(width);
+    let mut text = String::new();
+    let mut used = 0_usize;
+    let mut shown = 0_usize;
+    for (index, segment) in segments.iter().enumerate() {
+        let separator = if shown == 0 {
+            0
+        } else {
+            display_width(HINT_SEPARATOR)
+        };
+        let reserve = if index + 1 < segments.len() {
+            display_width(HINT_ELLIPSIS)
+        } else {
+            0
+        };
+        let segment_width = display_width(segment);
+        if used + separator + segment_width + reserve > width {
+            break;
         }
+        if shown > 0 {
+            text.push_str(HINT_SEPARATOR);
+        }
+        text.push_str(segment);
+        used += separator + segment_width;
+        shown += 1;
+    }
+    if shown == 0 {
+        return segments.first().cloned().unwrap_or_default();
+    }
+    if shown < segments.len() {
+        text.push_str(HINT_ELLIPSIS);
     }
     text
 }
+
+#[cfg(test)]
+#[path = "tests/main_view_test.rs"]
+mod main_view_test;

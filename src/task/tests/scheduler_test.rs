@@ -96,6 +96,8 @@ impl ThreadWorker {
             cache: LmsCache::default(),
             known_term: None,
             chosen_term: None,
+            timing: LoadTiming::default(),
+            login_started: None,
             shutdown: false,
         };
 
@@ -111,6 +113,16 @@ impl ThreadWorker {
 
     fn send(&self, job: Job) {
         let _ = self.jobs.send(job);
+    }
+
+    /// 送出結束指令並等待工作執行緒真的結束。
+    ///
+    /// 用來確定「該送的請求都送完了」：若載入仍在進行，`run` 不會返回。
+    fn shutdown_and_join(&mut self) {
+        let _ = self.jobs.send(Job::Shutdown);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
     }
 
     /// 等待符合條件的事件（會依序消耗事件）。
@@ -221,7 +233,15 @@ fn control_jobs_interrupt_homework_between_steps() {
         site_seen.lock().expect("lock").push(url.clone());
 
         if url.ends_with("/api/my-courses") {
-            return courses_response();
+            // 六門課程：一批只抓前三門，第四門之後屬於下一批。
+            return Ok(json(serde_json::json!({ "courses": [
+                { "id": "1", "name": "编译原理", "semester": { "code": "2026-1" } },
+                { "id": "2", "name": "操作系统", "semester": { "code": "2026-1" } },
+                { "id": "3", "name": "计算机网络", "semester": { "code": "2026-1" } },
+                { "id": "4", "name": "数据库原理", "semester": { "code": "2026-1" } },
+                { "id": "5", "name": "软件工程", "semester": { "code": "2026-1" } },
+                { "id": "6", "name": "数字逻辑", "semester": { "code": "2026-1" } },
+            ]})));
         }
         if url.ends_with("/timetable/semesters") {
             return semester_response();
@@ -236,7 +256,8 @@ fn control_jobs_interrupt_homework_between_steps() {
             release_rx.lock().expect("lock").recv().expect("等待释放");
             return Ok(json(serde_json::json!({ "activities": [] })));
         }
-        if url.ends_with("/courses/2/activities") {
+        if url.ends_with("/courses/2/activities") || url.ends_with("/courses/3/activities") {
+            // 同一批內的其餘課程（與第一門同時送出）。
             return Ok(json(serde_json::json!({ "activities": [] })));
         }
         panic!("未预期的请求：{url}");
@@ -264,15 +285,87 @@ fn control_jobs_interrupt_homework_between_steps() {
                 target: FailedTarget::Homework
             }
         )),
-        "取消后应通知介面解除载入中状态"
+        "取消后应通知界面解除加载中状态"
     );
 
+    // 活動查詢以「一批（並行上限）門課程」為單位送出：取消發生在批次之後，
+    // 因此在途的請求可能已經送出（結果一律丟棄），但**不得再啟動下一批**。
     let seen = seen.lock().expect("lock").clone();
     assert!(
         !seen
             .iter()
-            .any(|url| url.ends_with("/courses/2/activities")),
-        "取消后不应继续查询下一门课程：{seen:?}"
+            .any(|url| url.ends_with("/courses/4/activities")),
+        "取消后不得再启动下一批查询：{seen:?}"
+    );
+}
+
+#[test]
+fn detail_prefetch_does_not_starve_control_jobs() {
+    // 一門課程含多項作業時，詳情預取必須以「一個波次（並行上限）」為界：
+    // 第一個詳情請求被擋住期間送出結束指令，不得把整門課程的詳情全部抓完
+    // 才處理。維持有界並行（一批最多 3 項），但不讓波次隨作業數成長。
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let (started_tx, started_rx) = std_channel::<()>();
+    let (release_tx, release_rx) = std_channel::<()>();
+    let started = Mutex::new(started_tx);
+    let release_rx = Mutex::new(release_rx);
+
+    let site_seen = Arc::clone(&seen);
+    let mut worker = ThreadWorker::new(move |request: &HttpRequest| {
+        let url = request.url.clone();
+        site_seen.lock().expect("lock").push(url.clone());
+
+        if url.ends_with("/api/my-courses") {
+            return Ok(json(serde_json::json!({ "courses": [
+                { "id": "1", "name": "编译原理", "semester": { "code": "2026-1" } },
+            ]})));
+        }
+        if url.ends_with("/timetable/semesters") {
+            return semester_response();
+        }
+        if url.ends_with("/courses/1/activities") {
+            // 六項作業：一批詳情就會是兩個波次。
+            return Ok(json(serde_json::json!({ "activities": (11..=16).map(|id| {
+                serde_json::json!({
+                    "id": id.to_string(), "type": "homework",
+                    "title": format!("作业{id}"),
+                    "end_time": "2099-12-31 23:59:59",
+                })
+            }).collect::<Vec<_>>() })));
+        }
+        if url.contains("/api/activities/") {
+            if url.ends_with("/api/activities/11") {
+                // 第一個詳情請求：擋住，讓測試有機會插入結束指令。
+                started
+                    .lock()
+                    .expect("lock")
+                    .send(())
+                    .expect("发送开始信号");
+                release_rx.lock().expect("lock").recv().expect("等待释放");
+            }
+            return Ok(json(serde_json::json!({
+                "id": "11", "type": "homework", "title": "作业",
+                "end_time": "2099-12-31 23:59:59",
+                "submit_by_group": false, "user_submit_count": 0,
+            })));
+        }
+        panic!("未预期的请求：{url}");
+    });
+
+    worker.send(Job::LoadHomework { force: false });
+    started_rx.recv_timeout(WAIT).expect("应开始查询详情");
+    worker.send(Job::Shutdown);
+    release_tx.send(()).expect("释放请求");
+    worker.shutdown_and_join();
+
+    let requested = seen.lock().expect("lock").clone();
+    let details = requested
+        .iter()
+        .filter(|url| url.contains("/api/activities/"))
+        .count();
+    assert!(
+        details <= 3,
+        "结束指令后不得继续抓取剩余详情（预取应以一个波次为界）：{requested:?}"
     );
 }
 
@@ -392,17 +485,17 @@ fn forced_refresh_during_non_forced_homework_load_is_not_swallowed() {
     // 第二次，即代表重載確實執行完畢。
     assert!(
         wait_settled(|| count(&seen, "/courses/2/activities"), 2),
-        "強制刷新必須再執行一次完整載入"
+        "强制刷新必须再执行一次完整加载"
     );
     assert_eq!(
         count(&seen, "/api/my-courses"),
         2,
-        "強制刷新必須重新查詢課程"
+        "强制刷新必须重新查询课程"
     );
     assert_eq!(
         count(&seen, "/courses/1/activities"),
         2,
-        "強制刷新必須繞過活動快取"
+        "强制刷新必须绕过活动缓存"
     );
     assert_eq!(count(&seen, "/courses/2/activities"), 2);
 }
@@ -451,7 +544,7 @@ fn forced_refresh_upgrades_a_queued_non_forced_load() {
     worker.send(Job::LoadCourses { force: false });
     assert!(
         worker.wait_event(|event| matches!(event, Event::Courses(_))),
-        "預熱載入應完成"
+        "预热加载应完成"
     );
 
     // 作業載入進行中（第一門課程的活動查詢阻塞），同時排入非強制與強制課程載入。
@@ -463,9 +556,9 @@ fn forced_refresh_upgrades_a_queued_non_forced_load() {
 
     assert!(
         wait_settled(|| count(&seen, "/api/my-courses"), 2),
-        "佇列中的非強制載入應升級為強制並繞過快取"
+        "队列中的非强制加载应升级为强制并绕过缓存"
     );
-    assert_eq!(count(&seen, "/api/my-courses"), 2, "最多一次重載");
+    assert_eq!(count(&seen, "/api/my-courses"), 2, "最多一次重载");
 }
 /// 切換學期必須使進行中的作業載入失效，不得再回填舊學期的進度與結果。
 #[test]
@@ -517,7 +610,7 @@ fn switching_term_cancels_the_running_load_without_old_results() {
 
     assert!(
         wait_settled(|| count(&seen, "/api/my-courses"), 2),
-        "切換學期後應再執行一次強制重載"
+        "切换学期后应再执行一次强制重载"
     );
 
     // 舊學期的載入必須在切換後立即中止：切換後不得再出現任何舊學期的進度
@@ -529,13 +622,13 @@ fn switching_term_cancels_the_running_load_without_old_results() {
     let switch_at = events
         .iter()
         .position(|event| matches!(event, Event::CoursesTerm(Some(term)) if *term == new_term))
-        .expect("應收到學期切換事件");
+        .expect("应收到学期切换事件");
     assert!(
         !events[switch_at..].iter().any(|event| matches!(
             event,
             Event::Homework(update) if update.term_label.as_deref() == Some(old_label.as_str())
         )),
-        "切換學期後不得再回填舊學期的進度或結果：{:?}",
+        "切换学期后不得再回填旧学期的进度或结果：{:?}",
         &events[switch_at..]
     );
     assert!(
@@ -544,7 +637,7 @@ fn switching_term_cancels_the_running_load_without_old_results() {
             Event::Homework(update) if update.progress.is_none()
                 && update.term_label.as_deref() == Some(new_label.as_str())
         )),
-        "應得到新學期的完成結果：{events:?}"
+        "应得到新学期的完成结果：{events:?}"
     );
 }
 /// 課程單步載入進行中收到強制刷新：排隊的下一筆必須是強制（不得被吞或降級）。
@@ -587,9 +680,9 @@ fn forced_refresh_is_kept_behind_a_running_non_forced_course_load() {
 
     assert!(
         wait_settled(|| count(&seen, "/api/my-courses"), 2),
-        "排隊的課程載入應被升級為強制並重新查詢"
+        "排队的课程加载应被升级为强制并重新查询"
     );
-    assert_eq!(count(&seen, "/api/my-courses"), 2, "最多一次重載");
+    assert_eq!(count(&seen, "/api/my-courses"), 2, "最多一次重载");
 }
 
 /// 活動單步載入進行中收到強制刷新：同樣必須保留強制任務。
@@ -640,9 +733,9 @@ fn forced_refresh_is_kept_behind_a_running_non_forced_activity_load() {
 
     assert!(
         wait_settled(|| count(&seen, "/courses/1/activities"), 2),
-        "排隊的活動載入應被升級為強制並重新查詢"
+        "排队的活动加载应被升级为强制并重新查询"
     );
-    assert_eq!(count(&seen, "/courses/1/activities"), 2, "最多一次重載");
+    assert_eq!(count(&seen, "/courses/1/activities"), 2, "最多一次重载");
 }
 
 /// 學期載入中連續兩次選擇：佇列只留一筆強制重載（不得重複完整重載）。
@@ -701,15 +794,15 @@ fn set_homework_term_keeps_a_single_forced_reload() {
             worker.wait_event(
                 |event| matches!(event, Event::Notice(text) if text.contains("已记住学期"))
             ),
-            "兩次選擇都應被處理"
+            "两次选择都应被处理"
         );
     }
     // 恰有一次重載：課程查詢計數應穩定於 2（兩次選擇各排一筆的舊行為會出現第三次）。
     assert!(
         wait_settled(|| count(&seen, "/api/my-courses"), 2),
-        "應恰有一次強制重載"
+        "应恰有一次强制重载"
     );
-    assert_eq!(count(&seen, "/api/my-courses"), 2, "不得出現第二次重載");
+    assert_eq!(count(&seen, "/api/my-courses"), 2, "不得出现第二次重载");
 }
 
 /// 強制載入進行中切換學期：必須再排入一次強制重載（切換不得被吞掉）。
@@ -763,7 +856,7 @@ fn set_homework_term_reloads_while_a_forced_load_runs() {
 
     assert!(
         wait_until(|| count(&seen, "/api/my-courses") == 2),
-        "切換學期後應再執行一次強制重載"
+        "切换学期后应再执行一次强制重载"
     );
     assert!(
         worker.wait_event(|event| matches!(
@@ -771,9 +864,9 @@ fn set_homework_term_reloads_while_a_forced_load_runs() {
             Event::Homework(update) if update.progress.is_none()
                 && update.term_label.as_deref() == Some("2025-2026 学年 第 2 学期")
         )),
-        "重載結果應為新學期"
+        "重载结果应为新学期"
     );
-    assert_eq!(count(&seen, "/api/my-courses"), 2, "最多一次重載");
+    assert_eq!(count(&seen, "/api/my-courses"), 2, "最多一次重载");
 }
 
 /// 長查詢期間按 `o` 開啟網頁：應在下一個步進邊界執行，不必等整輪載入。

@@ -29,7 +29,7 @@ fn missing_code_is_a_protocol_error() {
 #[test]
 fn non_integer_code_is_a_protocol_error() {
     let response = HttpResponse::new(200, "https://example", r#"{"code":"0","data":{}}"#);
-    let err = split_envelope(&response, "查询学期").expect_err("字串 code 应失败");
+    let err = split_envelope(&response, "查询学期").expect_err("字符串 code 应失败");
     assert!(matches!(err, AppError::Protocol(_)), "应为协定错误：{err}");
 }
 
@@ -47,7 +47,7 @@ fn business_error_keeps_code_and_prefixed_message() {
             assert!(message.contains("核验短信验证码"), "应带上下文：{message}");
             assert!(
                 message.contains("验证码错误"),
-                "应保留服务端訊息：{message}"
+                "应保留服务端信息：{message}"
             );
         }
         other => panic!("应为服务器业务错误，实际：{other}"),

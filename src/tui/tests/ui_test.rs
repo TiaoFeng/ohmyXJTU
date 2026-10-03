@@ -16,7 +16,10 @@ use crate::domain::semester::TermCode;
 use crate::model::{ActivityDetailView, FlowData, LessonEntry, ScheduleData};
 use crate::session::{AccessMode, SiteKind};
 use crate::sites::attendance::{AttendanceStatus, FlowRecord};
-use crate::sites::lms::{ActivityKind, LmsActivity, LmsCourse, LmsSubmissionList};
+use crate::sites::lms::{
+    ActivityContent, ActivityKind, BODY_NOT_OBJECT_NOTE, LmsActivity, LmsCourse, LmsSubmissionList,
+    LmsUpload, TOP_LEVEL_BODY_NOTE,
+};
 use crate::task::HomeworkIssue;
 use crate::tui::app::{
     AgreementState, App, FormState, HomeworkData, LmsLevel, LoginScreen, NavItem, Page, Screen,
@@ -88,7 +91,7 @@ fn find_row(backend: &TestBackend, needle: &str) -> (u16, String) {
 
 /// 子字串在該列中的起始欄位（以顯示寬度計算，不是位元組位移）。
 fn column_of(row: &str, needle: &str) -> u16 {
-    let offset = row.find(needle).expect("子字串应存在于该列");
+    let offset = row.find(needle).expect("子字符串应存在于该列");
     u16::try_from(Line::from(&row[..offset]).width()).unwrap_or(u16::MAX)
 }
 
@@ -108,7 +111,7 @@ fn field_layout_uses_display_width() {
     // 超過標籤欄寬的標籤不再補白，值區域等量縮減。
     let long = field_layout(FORM_INNER_WIDTH, "非常非常非常非常长的标签");
     assert_eq!(long.pad, 0);
-    assert_eq!(long.prefix, 26, "顯示寬度 24 + 間隔 2");
+    assert_eq!(long.prefix, 26, "显示宽度 24 + 间隔 2");
     assert_eq!(long.value, usize::from(FORM_INNER_WIDTH) - 26);
 
     // 窄視窗不得溢位。
@@ -132,17 +135,17 @@ fn draws_form_with_cursor_at_value_column() {
     assert_eq!(
         column_of(&row, "账号"),
         FORM_INNER_X + 10,
-        "「账号」顯示寬度 4，需補 10 欄"
+        "「账号」显示宽度 4，需补 10 栏"
     );
     assert_eq!(
         column_of(&row, "3120000001"),
         FORM_INNER_X + 16,
-        "值應接在間隔後"
+        "值应接在间隔后"
     );
     assert_eq!(
         backend.cursor_position().x,
         FORM_INNER_X + 16 + 10,
-        "游標應位於已輸入文字之後"
+        "光标应位于已输入文字之后"
     );
     assert_eq!(backend.cursor_position().y, row_y);
 }
@@ -162,7 +165,7 @@ fn masks_sensitive_values_in_form() {
     let (_, row) = find_row(backend, &masked);
     assert!(
         !screen_text(backend).contains("pw-12345"),
-        "密碼不得以明文顯示"
+        "密码不得以明文显示"
     );
     assert_eq!(column_of(&row, &masked), FORM_INNER_X + 16);
     assert_eq!(backend.cursor_position().x, FORM_INNER_X + 16 + 8);
@@ -184,11 +187,11 @@ fn long_value_scrolls_and_keeps_cursor_inside_field() {
     let visible = row.matches('x').count();
     let window = field_layout(FORM_INNER_WIDTH, "账号").value;
 
-    assert_eq!(visible, window - 1, "應捲動到最尾端內容");
+    assert_eq!(visible, window - 1, "应滚动到最尾端内容");
     assert_eq!(
         backend.cursor_position().x,
         value_column + u16::try_from(visible).unwrap_or(u16::MAX),
-        "游標應落在可見內容尾端"
+        "光标应落在可见内容尾端"
     );
     assert_eq!(backend.cursor_position().y, row_y);
 }
@@ -206,10 +209,10 @@ fn draws_credentials_form_with_previous_failure_note() {
 
     assert!(
         text.contains("上次登录失败：登录失败：用户名或密码错误"),
-        "應顯示上一次的失敗訊息：\n{text}"
+        "应显示上一次的失败信息：\n{text}"
     );
     for label in ["账号", "密码", "加密口令"] {
-        assert!(text.contains(label), "缺少欄位 {label}：\n{text}");
+        assert!(text.contains(label), "缺少字段 {label}：\n{text}");
     }
 }
 
@@ -228,18 +231,18 @@ fn draws_captcha_input_and_cursor() {
     assert_eq!(
         column_of(&row, "验证码"),
         LOGIN_INNER_X + 8,
-        "「验证码」顯示寬度 6，需補 8 欄"
+        "「验证码」显示宽度 6，需补 8 栏"
     );
     assert_eq!(column_of(&row, "a1b2"), LOGIN_INNER_X + 16);
     assert_eq!(
         backend.cursor_position().x,
         LOGIN_INNER_X + 16 + 4,
-        "游標應位於已輸入的驗證碼之後"
+        "光标应位于已输入的验证码之后"
     );
     assert_eq!(backend.cursor_position().y, row_y);
     assert!(
         screen_text(backend).contains("验证码错误"),
-        "錯誤訊息仍應顯示"
+        "错误信息仍应显示"
     );
 }
 
@@ -255,15 +258,15 @@ fn draws_mfa_input_and_placeholder_while_empty() {
     let terminal = draw(WIDTH, HEIGHT, |frame| draw_login(frame, &empty));
     let backend = terminal.backend();
     let text = screen_text(backend);
-    assert!(text.contains("短信验证码"), "應畫出輸入框標籤：\n{text}");
-    assert!(text.contains("138****8888"), "應顯示綁定手機號");
+    assert!(text.contains("短信验证码"), "应画出输入框标签：\n{text}");
+    assert!(text.contains("138****8888"), "应显示绑定手机号");
 
     // 空輸入且聚焦時，游標位於值區域起點。
     let (_, row) = find_row(backend, "短信验证码");
     assert_eq!(
         column_of(&row, "短信验证码"),
         LOGIN_INNER_X + 4,
-        "「短信验证码」顯示寬度 10，需補 4 欄"
+        "「短信验证码」显示宽度 10，需补 4 栏"
     );
     assert_eq!(backend.cursor_position().x, LOGIN_INNER_X + 16);
 }
@@ -276,6 +279,7 @@ fn homework_input(title: &str, end_time: &str, submitted: usize) -> HomeworkInpu
         activity_id: format!("a-{title}"),
         title: title.to_owned(),
         end_time: Some(end_time.to_owned()),
+        description: None,
         submit_by_group: Some(false),
         submission_count: Some(submitted),
         note: None,
@@ -320,19 +324,19 @@ fn draws_homework_groups_and_switches_them() {
     assert!(text.contains("已完成 1"), "标题应显示分组计数：\n{text}");
     assert!(
         text.contains("加载中 1/2 门课程"),
-        "應顯示載入進度：\n{text}"
+        "应显示加载进度：\n{text}"
     );
     assert!(
         text.contains("1 门课程缺少学期信息"),
-        "應提示未納入課程：\n{text}"
+        "应提示未纳入课程：\n{text}"
     );
     assert!(
         text.contains("待办作业"),
-        "預設分組應顯示未完成作業：\n{text}"
+        "默认分组应显示未完成作业：\n{text}"
     );
     assert!(
         !text.contains("完成作业"),
-        "已完成作業不應出現在未完成分組：\n{text}"
+        "已完成作业不应出现在未完成分组：\n{text}"
     );
 
     // 切換到「已完成」分組。
@@ -343,11 +347,11 @@ fn draws_homework_groups_and_switches_them() {
     let text = screen_text(terminal.backend());
     assert!(
         text.contains("完成作业"),
-        "已完成分組應顯示已完成作業：\n{text}"
+        "已完成分组应显示已完成作业：\n{text}"
     );
     assert!(
         !text.contains("待办作业"),
-        "未完成作業不應出現在已完成分組：\n{text}"
+        "未完成作业不应出现在已完成分组：\n{text}"
     );
 }
 
@@ -368,14 +372,14 @@ fn draws_term_picker_popup() {
         crate::tui::views::draw(frame, &mut app)
     });
     let text = screen_text(terminal.backend());
-    assert!(text.contains("选择学期"), "應顯示標題：\n{text}");
-    assert!(text.contains("考勤系统不可用"), "應顯示原因：\n{text}");
+    assert!(text.contains("选择学期"), "应显示标题：\n{text}");
+    assert!(text.contains("考勤系统不可用"), "应显示原因：\n{text}");
     assert!(
         text.contains("2026-2027 学年 第 1 学期"),
-        "應列出學期：\n{text}"
+        "应列出学期：\n{text}"
     );
-    assert!(text.contains("（建议）"), "應標示建議學期：\n{text}");
-    assert!(text.contains("enter 确定"), "應顯示操作提示：\n{text}");
+    assert!(text.contains("（建议）"), "应标示建议学期：\n{text}");
+    assert!(text.contains("enter 确定"), "应显示操作提示：\n{text}");
 }
 
 #[test]
@@ -390,6 +394,7 @@ fn draws_homework_unknown_warning_with_reason() {
                 activity_id: "a-unknown".to_owned(),
                 title: "待核实作业".to_owned(),
                 end_time: Some("2026-10-02 23:59:59".to_owned()),
+                description: None,
                 submit_by_group: Some(false),
                 submission_count: None,
                 note: Some("无法确认提交状态：思源学堂用户信息解析失败".to_owned()),
@@ -422,13 +427,13 @@ fn draws_homework_unknown_warning_with_reason() {
     let text = screen_text(terminal.backend());
     assert!(
         text.contains("已确认 1 / 待核实 1"),
-        "應顯示已確認與待核實數量：\n{text}"
+        "应显示已确认与待核实数量：\n{text}"
     );
     assert!(
         text.contains("用户信息解析失败"),
-        "應顯示待核實原因：\n{text}"
+        "应显示待核实原因：\n{text}"
     );
-    assert!(text.contains("按 r 重试"), "應提示可重試：\n{text}");
+    assert!(text.contains("按 r 重试"), "应提示可重试：\n{text}");
 }
 
 #[test]
@@ -444,7 +449,7 @@ fn footer_shows_site_session_state() {
     let text = screen_text(terminal.backend());
     assert!(
         text.contains("[未登录 自动]"),
-        "未登入時底欄應顯示未登录與訪問策略：\n{text}"
+        "未登录时底栏应显示未登录与访问策略：\n{text}"
     );
 
     // 思源學堂已登入：作業頁底欄只顯示實際訪問方式（不再贅述「已登录」）。
@@ -455,11 +460,11 @@ fn footer_shows_site_session_state() {
     let text = screen_text(terminal.backend());
     assert!(
         text.contains("[直连 自动]"),
-        "登入後底欄應顯示訪問方式與策略：\n{text}"
+        "登录后底栏应显示访问方式与策略：\n{text}"
     );
     assert!(
         !text.contains("已登录"),
-        "登入狀態正常時不應佔用底欄版面：\n{text}"
+        "登录状态正常时不应占用底栏版面：\n{text}"
     );
 }
 
@@ -477,7 +482,7 @@ fn homework_failure_with_stale_data_shows_inline_warning() {
     let text = screen_text(terminal.backend());
     assert!(
         text.contains("更新失败：网络连接失败（按 r 重试）"),
-        "保留舊資料時應在頁面內顯示更新失敗：\n{text}"
+        "保留旧数据时应在页面内显示更新失败：\n{text}"
     );
 }
 
@@ -495,11 +500,11 @@ fn login_overlay_keeps_main_view_behind_popup() {
 
     let first = render(&mut app);
     let text = screen_text(first.backend());
-    assert!(text.contains("课表"), "底層側欄應保持可見：\n{text}");
-    assert!(text.contains("未登录"), "底層底欄應保持可見：\n{text}");
+    assert!(text.contains("课表"), "底层侧栏应保持可见：\n{text}");
+    assert!(text.contains("未登录"), "底层底栏应保持可见：\n{text}");
     assert!(
         text.contains("正在登录考勤服务…"),
-        "彈窗內容應顯示：\n{text}"
+        "弹窗内容应显示：\n{text}"
     );
 
     // 事件只更新彈窗內容：換成驗證碼畫面後，底層仍完整可見（不出現黑屏）。
@@ -510,8 +515,8 @@ fn login_overlay_keeps_main_view_behind_popup() {
     }));
     let second = render(&mut app);
     let text = screen_text(second.backend());
-    assert!(text.contains("课表"), "換畫面後底層仍應可見：\n{text}");
-    assert!(text.contains("a1b2"), "新彈窗內容應顯示：\n{text}");
+    assert!(text.contains("课表"), "换画面后底层仍应可见：\n{text}");
+    assert!(text.contains("a1b2"), "新弹窗内容应显示：\n{text}");
 }
 
 /// 思源學堂測試用活動。
@@ -525,7 +530,9 @@ fn lms_activity(id: &str, kind: &str, end: Option<&str>) -> LmsActivity {
         end_time: end.map(str::to_owned),
         submit_by_group: None,
         group_id: None,
-        description: None,
+        data: None,
+        top_level_description: None,
+        uploads: Vec::new(),
         user_submit_count: None,
         published: None,
     }
@@ -547,10 +554,10 @@ fn draws_activity_groups_with_counts_and_empty_state() {
         crate::tui::views::draw(frame, &mut app)
     });
     let text = screen_text(terminal.backend());
-    assert!(text.contains("直播 0"), "應顯示各組計數：\n{text}");
-    assert!(text.contains("作业 1"), "應顯示作業組計數：\n{text}");
-    assert!(text.contains("资料 1"), "應顯示資料組計數：\n{text}");
-    assert!(text.contains("活动 1"), "應只顯示目前分組的項目：\n{text}");
+    assert!(text.contains("直播 0"), "应显示各组计数：\n{text}");
+    assert!(text.contains("作业 1"), "应显示作业组计数：\n{text}");
+    assert!(text.contains("资料 1"), "应显示数据组计数：\n{text}");
+    assert!(text.contains("活动 1"), "应只显示目前分组的项目：\n{text}");
 
     // 空組顯示提示，且不顯示其他組的項目。
     app.lms.activity_group = crate::domain::activity::ActivityGroup::LectureLive;
@@ -558,8 +565,8 @@ fn draws_activity_groups_with_counts_and_empty_state() {
         crate::tui::views::draw(frame, &mut app)
     });
     let text = screen_text(terminal.backend());
-    assert!(text.contains("本组暂无活动"), "空組應顯示提示：\n{text}");
-    assert!(!text.contains("活动 1"), "空組不應顯示其他組：\n{text}");
+    assert!(text.contains("本组暂无活动"), "空组应显示提示：\n{text}");
+    assert!(!text.contains("活动 1"), "空组不应显示其他组：\n{text}");
 }
 
 #[test]
@@ -572,6 +579,7 @@ fn activity_detail_hides_submission_section_for_non_homework() {
         id: "1".to_owned(),
         title: "直播课".to_owned(),
         kind: ActivityKind::LectureLive,
+        description: None,
         end_time: Some("2026-10-01 12:00:00".to_owned()),
         submit_by_group: Some(false),
         submissions: None,
@@ -582,11 +590,11 @@ fn activity_detail_hides_submission_section_for_non_homework() {
         crate::tui::views::draw(frame, &mut app)
     });
     let text = screen_text(terminal.backend());
-    assert!(text.contains("类型：直播"), "應顯示活動類型：\n{text}");
-    assert!(!text.contains("待核实"), "非作業不應顯示待核实：\n{text}");
+    assert!(text.contains("类型：直播"), "应显示活动类型：\n{text}");
+    assert!(!text.contains("待核实"), "非作业不应显示待核实：\n{text}");
     assert!(
         !text.contains("提交记录"),
-        "非作業不應顯示提交記錄區：\n{text}"
+        "非作业不应显示提交记录区：\n{text}"
     );
 
     // 作業仍顯示提交狀態（未知時為待核实）。
@@ -594,6 +602,7 @@ fn activity_detail_hides_submission_section_for_non_homework() {
         id: "2".to_owned(),
         title: "作业A".to_owned(),
         kind: ActivityKind::Homework,
+        description: None,
         end_time: None,
         submit_by_group: Some(false),
         submissions: None,
@@ -605,7 +614,7 @@ fn activity_detail_hides_submission_section_for_non_homework() {
     let text = screen_text(terminal.backend());
     assert!(
         text.contains("提交记录：无法确认（待核实）"),
-        "作業未知提交狀態應顯示待核实：\n{text}"
+        "作业未知提交状态应显示待核实：\n{text}"
     );
 }
 
@@ -628,6 +637,7 @@ fn activity_detail_converts_submission_times_to_school_time() {
         id: "1".to_owned(),
         title: "作业A".to_owned(),
         kind: ActivityKind::Homework,
+        description: None,
         end_time: Some("2026-09-25T15:59:59.000Z".to_owned()),
         submit_by_group: Some(false),
         submissions: Some(list.list),
@@ -640,19 +650,19 @@ fn activity_detail_converts_submission_times_to_school_time() {
     let text = screen_text(terminal.backend());
     assert!(
         text.contains("2026-09-20 10:00"),
-        "UTC 提交時間應換算為 +08:00：\n{text}"
+        "UTC 提交时间应换算为 +08:00：\n{text}"
     );
     assert!(
         text.contains("2026-09-21 09:30"),
-        "未帶時區的提交時間維持原樣：\n{text}"
+        "未带时区的提交时间维持原样：\n{text}"
     );
     assert!(
         !text.contains("T02:00:00"),
-        "不應顯示原始 ISO 字串：\n{text}"
+        "不应显示原始 ISO 字符串：\n{text}"
     );
     assert!(
         text.contains("截止：2026-09-25 23:59"),
-        "詳情截止時間也應換算：\n{text}"
+        "详情截止时间也应换算：\n{text}"
     );
 }
 
@@ -709,12 +719,12 @@ fn flow_rows_align_status_column_and_show_semantic_colors() {
     assert_eq!(
         backend.buffer()[(short_col, short_y)].fg,
         THEME.green,
-        "有效應為成功綠"
+        "有效应为成功绿"
     );
     assert_eq!(
         backend.buffer()[(long_col, long_y)].fg,
         THEME.yellow,
-        "未匹配應為警告黃"
+        "未匹配应为警告黄"
     );
 }
 
@@ -737,8 +747,8 @@ fn flow_rows_degrade_on_narrow_terminal() {
 
     let terminal = draw(64, HEIGHT, |frame| crate::tui::views::draw(frame, &mut app));
     let text = screen_text(terminal.backend());
-    assert!(text.contains('…'), "窄畫面應以省略號截斷地點：\n{text}");
-    assert!(text.contains("有效"), "狀態仍應可見：\n{text}");
+    assert!(text.contains('…'), "窄画面应以省略号截断地点：\n{text}");
+    assert!(text.contains("有效"), "状态仍应可见：\n{text}");
 }
 
 fn homework_data(items: Vec<HomeworkItem>, progress: Option<(usize, usize)>) -> HomeworkData {
@@ -772,12 +782,12 @@ fn homework_empty_states_distinguish_loading_and_terminal() {
     let text = screen_text(terminal.backend());
     assert!(
         text.contains("已完成 0/2 门课程"),
-        "載入中應顯示進度：\n{text}"
+        "加载中应显示进度：\n{text}"
     );
-    assert!(!text.contains("加载失败"), "載入中不得顯示失敗：\n{text}");
+    assert!(!text.contains("加载失败"), "加载中不得显示失败：\n{text}");
     assert!(
         !text.contains("没有未完成的作业"),
-        "載入中不得顯示空結果：\n{text}"
+        "加载中不得显示空结果：\n{text}"
     );
 
     // 終態空：明確顯示「本学期暂无作业」，而不是失敗。
@@ -788,9 +798,9 @@ fn homework_empty_states_distinguish_loading_and_terminal() {
     let text = screen_text(terminal.backend());
     assert!(
         text.contains("本学期暂无作业"),
-        "終態空應顯示明確空狀態：\n{text}"
+        "终态空应显示明确空状态：\n{text}"
     );
-    assert!(!text.contains("加载失败"), "空結果不得顯示為失敗：\n{text}");
+    assert!(!text.contains("加载失败"), "空结果不得显示为失败：\n{text}");
 }
 
 /// 「載入成功但沒有資料」的四個頁面都應顯示中性說明，不得誤標為載入失敗。
@@ -803,9 +813,9 @@ fn no_data_states_are_plain_notes_not_failures() {
     let text = main_text(&mut app);
     assert!(
         text.contains("本周没有课程安排"),
-        "課表空結果應顯示說明：\n{text}"
+        "课表空结果应显示说明：\n{text}"
     );
-    assert!(!text.contains("加载失败"), "空結果不得顯示為失敗：\n{text}");
+    assert!(!text.contains("加载失败"), "空结果不得显示为失败：\n{text}");
 
     // 考勤流水：本頁沒有記錄。
     let mut app = main_screen_app();
@@ -819,9 +829,9 @@ fn no_data_states_are_plain_notes_not_failures() {
     let text = main_text(&mut app);
     assert!(
         text.contains("本页没有流水记录"),
-        "流水空結果應顯示說明：\n{text}"
+        "流水空结果应显示说明：\n{text}"
     );
-    assert!(!text.contains("加载失败"), "空結果不得顯示為失敗：\n{text}");
+    assert!(!text.contains("加载失败"), "空结果不得显示为失败：\n{text}");
 
     // 思源學堂：沒有課程。
     let mut app = main_screen_app();
@@ -829,8 +839,8 @@ fn no_data_states_are_plain_notes_not_failures() {
     app.lms.level = LmsLevel::Courses;
     app.lms.courses = Page::Ready(Vec::new());
     let text = main_text(&mut app);
-    assert!(text.contains("没有课程"), "課程空結果應顯示說明：\n{text}");
-    assert!(!text.contains("加载失败"), "空結果不得顯示為失敗：\n{text}");
+    assert!(text.contains("没有课程"), "课程空结果应显示说明：\n{text}");
+    assert!(!text.contains("加载失败"), "空结果不得显示为失败：\n{text}");
 
     // 思源學堂：該課程沒有活動。
     let mut app = main_screen_app();
@@ -840,9 +850,9 @@ fn no_data_states_are_plain_notes_not_failures() {
     let text = main_text(&mut app);
     assert!(
         text.contains("该课程没有活动"),
-        "活動空結果應顯示說明：\n{text}"
+        "活动空结果应显示说明：\n{text}"
     );
-    assert!(!text.contains("加载失败"), "空結果不得顯示為失敗：\n{text}");
+    assert!(!text.contains("加载失败"), "空结果不得显示为失败：\n{text}");
 }
 
 /// 課表：有無法解析的課程時顯示提示，數字為零時不顯示。
@@ -861,7 +871,7 @@ fn schedule_shows_skipped_course_warning() {
     let text = main_text(&mut app);
     assert!(
         text.contains("已跳过 2 门无法解析的课程"),
-        "應顯示跳過提示：\n{text}"
+        "应显示跳过提示：\n{text}"
     );
 
     let mut app = main_screen_app();
@@ -873,7 +883,7 @@ fn schedule_shows_skipped_course_warning() {
         AttendanceStatus::Normal,
     )]));
     let text = main_text(&mut app);
-    assert!(!text.contains("已跳过"), "沒有跳過時不應顯示提示：\n{text}");
+    assert!(!text.contains("已跳过"), "没有跳过时不应显示提示：\n{text}");
 }
 
 #[test]
@@ -891,9 +901,9 @@ fn homework_shows_failed_course_count() {
     let text = screen_text(terminal.backend());
     assert!(
         text.contains("1 门课程查询失败"),
-        "應顯示略過的課程數：\n{text}"
+        "应显示略过的课程数：\n{text}"
     );
-    assert!(text.contains("按 r 重试"), "應提示可重試：\n{text}");
+    assert!(text.contains("按 r 重试"), "应提示可重试：\n{text}");
 }
 
 fn lms_course(id: &str, code: Option<&str>) -> LmsCourse {
@@ -934,17 +944,17 @@ fn lms_courses_partition_current_term_first() {
     let text = screen_text(backend);
     assert!(
         text.contains("当前学期 · 2026-2027 学年 第 1 学期"),
-        "應顯示當前學期分區：\n{text}"
+        "应显示当前学期分区：\n{text}"
     );
-    assert!(text.contains("历史课程"), "應顯示歷史分區：\n{text}");
-    assert!(text.contains("学期未知"), "應顯示未知分區：\n{text}");
+    assert!(text.contains("历史课程"), "应显示历史分区：\n{text}");
+    assert!(text.contains("学期未知"), "应显示未知分区：\n{text}");
 
     let (current_y, _) = find_row(backend, "课程2");
     let (history_y, history_row) = find_row(backend, "课程1");
     let (unknown_y, _) = find_row(backend, "课程3");
     assert!(
         current_y < history_y && history_y < unknown_y,
-        "順序應為當前學期 → 歷史 → 未知：\n{text}"
+        "顺序应为当前学期 → 历史 → 未知：\n{text}"
     );
 
     // 「历史课程」標題與上方課程之間應空出一列。
@@ -952,7 +962,7 @@ fn lms_courses_partition_current_term_first() {
     assert_eq!(
         header_y,
         current_y + 2,
-        "歷史分區標題前應留一列空白：\n{text}"
+        "历史分区标题前应留一列空白：\n{text}"
     );
 
     // 歷史課程以較淺灰色呈現；當前學期課程維持一般文字色。
@@ -960,14 +970,14 @@ fn lms_courses_partition_current_term_first() {
     assert_eq!(
         backend.buffer()[(history_col, history_y)].fg,
         THEME.muted,
-        "歷史課程應為淺灰：\n{text}"
+        "历史课程应为浅灰：\n{text}"
     );
     let (_, current_row) = find_row(backend, "课程2");
     let current_col = column_of(&current_row, "课程2");
     assert_eq!(
         backend.buffer()[(current_col, current_y)].fg,
         THEME.text,
-        "當前學期課程應維持一般文字色：\n{text}"
+        "当前学期课程应维持一般文字色：\n{text}"
     );
 }
 
@@ -978,14 +988,14 @@ fn assert_popup_borders(backend: &TestBackend, popup: Rect) {
     for y in popup.y + 1..popup.y + popup.height - 1 {
         for x in [popup.x, popup.x + popup.width - 1] {
             let cell = &buffer[(x, y)];
-            assert_ne!(cell.symbol(), " ", "邊框不得被打斷：(x={x}, y={y})");
-            assert_eq!(cell.fg, THEME.accent, "邊框顏色：(x={x}, y={y})");
+            assert_ne!(cell.symbol(), " ", "边框不得被打断：(x={x}, y={y})");
+            assert_eq!(cell.fg, THEME.accent, "边框颜色：(x={x}, y={y})");
         }
     }
     for x in popup.x + 1..popup.x + popup.width - 1 {
         let cell = &buffer[(x, popup.y + popup.height - 1)];
-        assert_ne!(cell.symbol(), " ", "下緣不得被打斷：(x={x})");
-        assert_eq!(cell.fg, THEME.accent, "下緣顏色：(x={x})");
+        assert_ne!(cell.symbol(), " ", "下缘不得被打断：(x={x})");
+        assert_eq!(cell.fg, THEME.accent, "下缘颜色：(x={x})");
     }
     for x in popup.x + 1..popup.x + popup.width - 1 {
         let cell = &buffer[(x, popup.y)];
@@ -993,7 +1003,7 @@ fn assert_popup_borders(backend: &TestBackend, popup: Rect) {
         let symbol = cell.symbol();
         assert!(
             symbol == " " || cell.fg == THEME.accent || cell.fg == THEME.blue,
-            "上緣不得殘留底層文字：(x={x}) symbol={symbol:?}"
+            "上缘不得残留底层文字：(x={x}) symbol={symbol:?}"
         );
     }
     for y in popup.y..popup.y + popup.height {
@@ -1004,7 +1014,7 @@ fn assert_popup_borders(backend: &TestBackend, popup: Rect) {
             let continuation = cell.symbol() == " " && cell.fg == Color::Reset;
             assert!(
                 continuation || cell.bg == THEME.surface || cell.bg == THEME.accent,
-                "彈窗必須不透明：(x={x}, y={y}) symbol={:?} bg={:?}",
+                "弹窗必须不透明：(x={x}, y={y}) symbol={:?} bg={:?}",
                 cell.symbol(),
                 cell.bg
             );
@@ -1034,7 +1044,7 @@ fn popup_surface_is_opaque_over_text_background() {
             assert_eq!(
                 buffer[(x, y)].symbol(),
                 " ",
-                "彈窗內部不得有底層文字：(x={x}, y={y})"
+                "弹窗内部不得有底层文字：(x={x}, y={y})"
             );
         }
     }
@@ -1084,7 +1094,7 @@ fn popup_redraw_is_stable_across_frames() {
 
     let first = snapshot(&mut app);
     let second = snapshot(&mut app);
-    assert_eq!(first, second, "連續兩幀的彈窗內容必須一致");
+    assert_eq!(first, second, "连续两帧的弹窗内容必须一致");
 }
 
 #[test]
@@ -1147,7 +1157,7 @@ fn find_sidebar_row(backend: &TestBackend, label: &str) -> String {
             return sidebar.to_owned();
         }
     }
-    panic!("側邊欄找不到 {label}：\n{backend}");
+    panic!("侧边栏找不到 {label}：\n{backend}");
 }
 
 #[test]
@@ -1169,30 +1179,30 @@ fn sidebar_left_aligns_labels_and_blinks_dots_before_text() {
 
     assert!(
         schedule.contains("..."),
-        "載入中應顯示三點動畫：{schedule:?}"
+        "加载中应显示三点动画：{schedule:?}"
     );
     assert!(
         !schedule.contains("正在"),
-        "側邊欄不得顯示載入說明：{schedule:?}"
+        "侧边栏不得显示加载说明：{schedule:?}"
     );
 
     // 標籤左對齊：所有項目共用同一個文字起始欄。
     let label_col = column_of(&schedule, "课表");
-    assert_eq!(column_of(&homework, "作业"), label_col, "標籤應左對齊");
+    assert_eq!(column_of(&homework, "作业"), label_col, "标签应左对齐");
     assert_eq!(column_of(&attendance, "考勤流水"), label_col);
     assert_eq!(column_of(&lms, "思源学堂"), label_col);
 
     // 文字欄置中：以最寬標籤（考勤流水，寬 8）計算左右留白相等。
     let left_margin = usize::from(label_col);
     let right_margin = 20 - (left_margin + 8);
-    assert_eq!(left_margin, right_margin, "文字欄應置中：{schedule:?}");
+    assert_eq!(left_margin, right_margin, "文字栏应置中：{schedule:?}");
 
     // 三點緊貼文字正前方（不參與置中）。
     let dots_col = column_of(&schedule, "...");
     assert_eq!(
         usize::from(dots_col) + 4,
         usize::from(label_col),
-        "三點應顯示在文字正前方：{schedule:?}"
+        "三点应显示在文字正前方：{schedule:?}"
     );
 
     // 相位 0：三點為空白，標籤欄位不得改變（動畫不造成跳動）。
@@ -1203,18 +1213,18 @@ fn sidebar_left_aligns_labels_and_blinks_dots_before_text() {
     let sidebar_blank = find_sidebar_row(terminal.backend(), "课表");
     assert!(
         !sidebar_blank.contains('.'),
-        "相位 0 不應顯示點：{sidebar_blank:?}"
+        "相位 0 不应显示点：{sidebar_blank:?}"
     );
     assert_eq!(
         column_of(&sidebar_blank, "课表"),
         label_col,
-        "動畫不得讓標籤位移"
+        "动画不得让标签位移"
     );
 
     // 未載入的頁面永遠沒有指示燈。
     assert!(
         !homework.contains('.'),
-        "未載入頁面不應顯示點：{homework:?}"
+        "未加载页面不应显示点：{homework:?}"
     );
 }
 
@@ -1278,22 +1288,22 @@ fn schedule_rows_align_attendance_column() {
     let absent_col = column_of(&absent_row, "缺勤");
     assert_eq!(
         normal_col, absent_col,
-        "考勤狀態欄起點不得受課程、地點與教師長度影響：\n{normal_row}\n{absent_row}"
+        "考勤状态栏起点不得受课程、地点与教师长度影响：\n{normal_row}\n{absent_row}"
     );
     assert_eq!(
         column_of(&normal_row, "主楼A101"),
         column_of(&absent_row, "逸夫科学馆"),
-        "地點欄起點必須一致：\n{normal_row}\n{absent_row}"
+        "地点栏起点必须一致：\n{normal_row}\n{absent_row}"
     );
     assert_eq!(
         backend.buffer()[(normal_col, normal_y)].fg,
         THEME.green,
-        "正常應為成功綠"
+        "正常应为成功绿"
     );
     assert_eq!(
         backend.buffer()[(absent_col, absent_y)].fg,
         THEME.red,
-        "缺勤應為錯誤紅"
+        "缺勤应为错误红"
     );
 }
 
@@ -1311,10 +1321,10 @@ fn schedule_rows_hide_teacher_column_when_narrow() {
 
     let terminal = draw(70, HEIGHT, |frame| crate::tui::views::draw(frame, &mut app));
     let text = screen_text(terminal.backend());
-    assert!(text.contains("高等数学"), "課程仍應可見：\n{text}");
-    assert!(text.contains("主楼A101"), "地點仍應可見：\n{text}");
-    assert!(!text.contains("张老师"), "寬度不足時收起教師欄：\n{text}");
-    assert!(text.contains("正常"), "考勤狀態仍應可見：\n{text}");
+    assert!(text.contains("高等数学"), "课程仍应可见：\n{text}");
+    assert!(text.contains("主楼A101"), "地点仍应可见：\n{text}");
+    assert!(!text.contains("张老师"), "宽度不足时收起教师栏：\n{text}");
+    assert!(text.contains("正常"), "考勤状态仍应可见：\n{text}");
 }
 
 #[test]
@@ -1327,6 +1337,7 @@ fn homework_rows_trade_group_and_title_detail_when_narrow() {
             activity_id: "a-2".to_owned(),
             title: "社会实践报告与社会调查作业".to_owned(),
             end_time: Some("2026-10-08T15:59:59.000Z".to_owned()),
+            description: None,
             submit_by_group: Some(true),
             submission_count: Some(0),
             note: None,
@@ -1345,11 +1356,11 @@ fn homework_rows_trade_group_and_title_detail_when_narrow() {
     let (_, wide_row) = find_row(wide.backend(), "马克思");
     assert!(
         wide_row.contains("截止 2026-10-08 23:59"),
-        "寬畫面應顯示完整截止時間：\n{wide_row}"
+        "宽画面应显示完整截止时间：\n{wide_row}"
     );
     assert!(
         wide_row.contains("小组"),
-        "寬畫面應顯示提交單位：\n{wide_row}"
+        "宽画面应显示提交单位：\n{wide_row}"
     );
 
     // 70 欄：收起「小组」欄與「截止」前綴（日期仍完整），標題以省略號截斷。
@@ -1357,19 +1368,19 @@ fn homework_rows_trade_group_and_title_detail_when_narrow() {
     let (_, narrow_row) = find_row(narrow.backend(), "马克思");
     assert!(
         !narrow_row.contains("小组"),
-        "窄畫面應收起提交單位欄：\n{narrow_row}"
+        "窄画面应收起提交单位栏：\n{narrow_row}"
     );
     assert!(
         !narrow_row.contains("截止"),
-        "窄畫面應收起「截止」前綴：\n{narrow_row}"
+        "窄画面应收起「截止」前缀：\n{narrow_row}"
     );
     assert!(
         narrow_row.contains("2026-10-08 23:59"),
-        "窄畫面仍應保留完整日期：\n{narrow_row}"
+        "窄画面仍应保留完整日期：\n{narrow_row}"
     );
     assert!(
         narrow_row.contains('…'),
-        "過長的文字應以省略號截斷：\n{narrow_row}"
+        "过长的文字应以省略号截断：\n{narrow_row}"
     );
 
     // 64 欄：再壓縮日期（省略年份）。
@@ -1377,11 +1388,11 @@ fn homework_rows_trade_group_and_title_detail_when_narrow() {
     let (_, compact_row) = find_row(compact.backend(), "马克思");
     assert!(
         compact_row.contains("10-08 23:59"),
-        "極窄畫面應壓縮為不含年份的日期：\n{compact_row}"
+        "极窄画面应压缩为不含年份的日期：\n{compact_row}"
     );
     assert!(
         !compact_row.contains("2026-"),
-        "壓縮後不應再顯示年份：\n{compact_row}"
+        "压缩后不应再显示年份：\n{compact_row}"
     );
 }
 
@@ -1413,13 +1424,13 @@ fn schedule_rows_show_full_names_when_terminal_is_wide() {
     let text = screen_text(terminal.backend());
     assert!(
         text.contains("毛泽东思想和中国特色社会主义理论体系概论"),
-        "足夠寬時課程名稱應完整顯示：\n{text}"
+        "足够宽时课程名称应完整显示：\n{text}"
     );
     assert!(
         text.contains("塑胶田径场-田径场"),
-        "足夠寬時地點應完整顯示：\n{text}"
+        "足够宽时地点应完整显示：\n{text}"
     );
-    assert!(text.contains("赵金瑞"), "教師欄應完整顯示：\n{text}");
+    assert!(text.contains("赵金瑞"), "教师栏应完整显示：\n{text}");
 }
 
 #[test]
@@ -1433,6 +1444,7 @@ fn homework_rows_show_full_names_when_terminal_is_wide() {
                 activity_id: "a-1".to_owned(),
                 title: "第五章作业（含附件）".to_owned(),
                 end_time: Some("2026-10-12T15:59:59.000Z".to_owned()),
+                description: None,
                 submit_by_group: Some(false),
                 submission_count: Some(0),
                 note: None,
@@ -1454,15 +1466,15 @@ fn homework_rows_show_full_names_when_terminal_is_wide() {
     let text = screen_text(terminal.backend());
     assert!(
         text.contains("微电子电路基础"),
-        "足夠寬時課程名稱應完整顯示：\n{text}"
+        "足够宽时课程名称应完整显示：\n{text}"
     );
     assert!(
         text.contains("第五章作业（含附件）"),
-        "足夠寬時標題應完整顯示：\n{text}"
+        "足够宽时标题应完整显示：\n{text}"
     );
     assert!(
         text.contains("截止 2026-10-12 23:59"),
-        "UTC 截止時間應換算為 +08:00 顯示：\n{text}"
+        "UTC 截止时间应换算为 +08:00 显示：\n{text}"
     );
 }
 
@@ -1482,17 +1494,17 @@ fn lists_ask_to_enlarge_terminal_when_too_narrow() {
 
     let terminal = draw(64, HEIGHT, |frame| crate::tui::views::draw(frame, &mut app));
     let text = screen_text(terminal.backend());
-    assert!(text.contains("终端过窄"), "過窄時應提示放大窗口：\n{text}");
+    assert!(text.contains("终端过窄"), "过窄时应提示放大窗口：\n{text}");
     assert!(
         !text.contains("主楼A101"),
-        "過窄時不應擠出殘缺的列表：\n{text}"
+        "过窄时不应挤出残缺的列表：\n{text}"
     );
 
     // 放寬兩欄即可正常顯示（不再提示）。
     let terminal = draw(66, HEIGHT, |frame| crate::tui::views::draw(frame, &mut app));
     let text = screen_text(terminal.backend());
-    assert!(!text.contains("终端过窄"), "足夠寬時不應提示：\n{text}");
-    assert!(text.contains("高等数"), "足夠寬時應顯示課表：\n{text}");
+    assert!(!text.contains("终端过窄"), "足够宽时不应提示：\n{text}");
+    assert!(text.contains("高等数"), "足够宽时应显示课表：\n{text}");
 }
 
 #[test]
@@ -1530,16 +1542,16 @@ fn activity_rows_align_title_and_deadline_columns() {
     assert_eq!(
         column_of(&first, "作业一"),
         column_of(&second, "很长很长"),
-        "標題欄起點必須一致（類型欄以顯示寬度排版）：\n{first}\n{second}"
+        "标题栏起点必须一致（类型栏以显示宽度排版）：\n{first}\n{second}"
     );
     assert_eq!(
         column_of(&first, "2026-10-08"),
         column_of(&second, "2026-09-20"),
-        "截止欄起點必須一致：\n{first}\n{second}"
+        "截止栏起点必须一致：\n{first}\n{second}"
     );
     assert!(
         first.contains("2026-10-08 23:59"),
-        "UTC 截止時間應換算為 +08:00：\n{first}"
+        "UTC 截止时间应换算为 +08:00：\n{first}"
     );
 }
 
@@ -1565,24 +1577,24 @@ fn too_small_message_is_centered_and_colors_current_size() {
     let terminal = draw(48, 18, |frame| crate::tui::views::draw(frame, &mut app));
     let backend = terminal.backend();
     let text = screen_text(backend);
-    assert!(text.contains("终端太小了:"), "應顯示新版提示：\n{text}");
-    assert!(!text.contains("窗口过小"), "舊版文案不應再出現：\n{text}");
-    assert!(!text.contains("至少需要"), "不再顯示最低需求：\n{text}");
+    assert!(text.contains("终端太小了:"), "应显示新版提示：\n{text}");
+    assert!(!text.contains("窗口过小"), "旧版文案不应再出现：\n{text}");
+    assert!(!text.contains("至少需要"), "不再显示最低需求：\n{text}");
 
     let (title_y, title_row) = find_row(backend, "终端太小了");
-    assert_eq!(title_y, 8, "第一行應垂直置中（(18-2)/2）：\n{text}");
+    assert_eq!(title_y, 8, "第一行应垂直置中（(18-2)/2）：\n{text}");
     assert_eq!(
         column_of(&title_row, "终端太小了"),
         19,
-        "第一行應水平置中（48/2 − 11/2）：\n{title_row}"
+        "第一行应水平置中（48/2 − 11/2）：\n{title_row}"
     );
 
     let (size_y, size_row) = find_row(backend, "宽 = ");
-    assert_eq!(size_y, 9, "第二行應緊接在下一列：\n{text}");
+    assert_eq!(size_y, 9, "第二行应紧接在下一列：\n{text}");
     let line_start = column_of(&size_row, "宽 = ");
     assert_eq!(
         line_start, 16,
-        "第二行應水平置中（48/2 − 16/2）：\n{size_row}"
+        "第二行应水平置中（48/2 − 16/2）：\n{size_row}"
     );
 
     let width_col = column_of(&size_row, "48");
@@ -1590,17 +1602,17 @@ fn too_small_message_is_centered_and_colors_current_size() {
     assert_eq!(
         backend.buffer()[(line_start, size_y)].fg,
         THEME.text,
-        "標題文字應為白色：\n{size_row}"
+        "标题文字应为白色：\n{size_row}"
     );
     assert_eq!(
         backend.buffer()[(width_col, size_y)].fg,
         THEME.red,
-        "寬度 48 未達 64 應為紅色：\n{size_row}"
+        "宽度 48 未达 64 应为红色：\n{size_row}"
     );
     assert_eq!(
         backend.buffer()[(height_col, size_y)].fg,
         THEME.green,
-        "高度 18 已達門檻應為綠色：\n{size_row}"
+        "高度 18 已达门槛应为绿色：\n{size_row}"
     );
 }
 
@@ -1612,16 +1624,16 @@ fn too_small_message_flags_only_the_failing_dimension() {
     let backend = terminal.backend();
     let (size_y, size_row) = find_row(backend, "宽 = 100");
     // 提示帶自 (12-2)/2 = 5 起算，第二行落在帶內第二列。
-    assert_eq!(size_y, 6, "第二行應在提示帶的第二列：\n{size_row}");
+    assert_eq!(size_y, 6, "第二行应在提示带的第二列：\n{size_row}");
     assert_eq!(
         backend.buffer()[(column_of(&size_row, "宽 = ") + 5, size_y)].fg,
         THEME.green,
-        "寬度 100 已達門檻應為綠色：\n{size_row}"
+        "宽度 100 已达门槛应为绿色：\n{size_row}"
     );
     assert_eq!(
         backend.buffer()[(column_of(&size_row, "高 = ") + 5, size_y)].fg,
         THEME.red,
-        "高度 12 未達 18 應為紅色：\n{size_row}"
+        "高度 12 未达 18 应为红色：\n{size_row}"
     );
 
     // 48x24：太窄、夠高。
@@ -1629,16 +1641,16 @@ fn too_small_message_flags_only_the_failing_dimension() {
     let backend = terminal.backend();
     let (size_y, size_row) = find_row(backend, "宽 = 48");
     // 提示帶自 (24-2)/2 = 11 起算，第二行落在帶內第二列。
-    assert_eq!(size_y, 12, "第二行應在提示帶的第二列：\n{size_row}");
+    assert_eq!(size_y, 12, "第二行应在提示带的第二列：\n{size_row}");
     assert_eq!(
         backend.buffer()[(column_of(&size_row, "宽 = ") + 5, size_y)].fg,
         THEME.red,
-        "寬度 48 未達 64 應為紅色：\n{size_row}"
+        "宽度 48 未达 64 应为红色：\n{size_row}"
     );
     assert_eq!(
         backend.buffer()[(column_of(&size_row, "高 = ") + 5, size_y)].fg,
         THEME.green,
-        "高度 24 已達門檻應為綠色：\n{size_row}"
+        "高度 24 已达门槛应为绿色：\n{size_row}"
     );
 }
 
@@ -1649,11 +1661,11 @@ fn too_small_message_survives_single_row_terminal() {
     let text = screen_text(terminal.backend());
     assert!(
         text.contains("终端太小了"),
-        "只剩一列時仍應顯示標題：\n{text}"
+        "只剩一列时仍应显示标题：\n{text}"
     );
     assert!(
         !text.contains("高 = "),
-        "只放得下一列時不顯示第二行：\n{text}"
+        "只放得下一列时不显示第二行：\n{text}"
     );
 }
 
@@ -1666,7 +1678,7 @@ fn too_small_message_hidden_at_minimum_size() {
     let text = screen_text(terminal.backend());
     assert!(
         !text.contains("终端太小了"),
-        "達到 64x18 門檻時不應顯示提示：\n{text}"
+        "达到 64x18 门槛时不应显示提示：\n{text}"
     );
 }
 
@@ -1677,25 +1689,25 @@ fn too_small_message_shown_on_startup_forms() {
     let mut app = App::new(AccessPolicy::Auto); // 預設畫面＝解鎖表單
     let terminal = draw(48, 18, |frame| crate::tui::views::draw(frame, &mut app));
     let text = screen_text(terminal.backend());
-    assert!(text.contains("终端太小了"), "解鎖畫面應顯示提示：\n{text}");
-    assert!(!text.contains("解锁凭证"), "過小時不應擠出表單：\n{text}");
+    assert!(text.contains("终端太小了"), "解锁画面应显示提示：\n{text}");
+    assert!(!text.contains("解锁凭证"), "过小时不应挤出表单：\n{text}");
 
     app.set_screen(Screen::Setup(FormState::setup()));
     let terminal = draw(48, 18, |frame| crate::tui::views::draw(frame, &mut app));
     let text = screen_text(terminal.backend());
     assert!(
         text.contains("终端太小了"),
-        "首次設定畫面應顯示提示：\n{text}"
+        "首次设置画面应显示提示：\n{text}"
     );
-    assert!(!text.contains("首次使用"), "過小時不應擠出表單：\n{text}");
+    assert!(!text.contains("首次使用"), "过小时不应挤出表单：\n{text}");
 
     app.set_screen(Screen::SettingsForm(FormState::change_passphrase()));
     let terminal = draw(48, 18, |frame| crate::tui::views::draw(frame, &mut app));
     let text = screen_text(terminal.backend());
-    assert!(text.contains("终端太小了"), "設定表單應顯示提示：\n{text}");
+    assert!(text.contains("终端太小了"), "设置表单应显示提示：\n{text}");
     assert!(
         !text.contains("修改加密口令"),
-        "過小時不應擠出表單：\n{text}"
+        "过小时不应挤出表单：\n{text}"
     );
 
     // 登入互動覆蓋層也不能蓋掉提示。
@@ -1707,11 +1719,11 @@ fn too_small_message_shown_on_startup_forms() {
     let text = screen_text(terminal.backend());
     assert!(
         text.contains("终端太小了"),
-        "登入彈窗開啟時仍應顯示提示：\n{text}"
+        "登录弹窗开启时仍应显示提示：\n{text}"
     );
     assert!(
         !text.contains("正在登录"),
-        "過小時不應畫出登入彈窗：\n{text}"
+        "过小时不应画出登录弹窗：\n{text}"
     );
 }
 
@@ -1725,10 +1737,10 @@ fn startup_form_visible_at_minimum_size() {
     let text = screen_text(terminal.backend());
     assert!(
         !text.contains("终端太小了"),
-        "達到門檻時不顯示提示：\n{text}"
+        "达到门槛时不显示提示：\n{text}"
     );
-    assert!(text.contains("解锁凭证"), "應顯示解鎖表單標題：\n{text}");
-    assert!(text.contains("加密口令"), "應顯示欄位標籤：\n{text}");
+    assert!(text.contains("解锁凭证"), "应显示解锁表单标题：\n{text}");
+    assert!(text.contains("加密口令"), "应显示字段标签：\n{text}");
 }
 
 #[test]
@@ -1741,10 +1753,10 @@ fn login_overlay_visible_when_terminal_is_large_enough() {
 
     let terminal = draw(100, 30, |frame| crate::tui::views::draw(frame, &mut app));
     let text = screen_text(terminal.backend());
-    assert!(!text.contains("终端太小了"), "足夠大時不顯示提示：\n{text}");
+    assert!(!text.contains("终端太小了"), "足够大时不显示提示：\n{text}");
     assert!(
         text.contains("正在登录"),
-        "足夠大時應顯示登入彈窗：\n{text}"
+        "足够大时应显示登录弹窗：\n{text}"
     );
 }
 
@@ -1760,15 +1772,15 @@ fn agreement_overlay_covers_screen_and_shows_document() {
     let text = screen_text(terminal.backend());
     let title = format!("用户协议（ohmyXJTU）v{}", crate::privacy::VERSION);
 
-    assert!(text.contains(&title), "標題應含版本：\n{text}");
-    assert!(text.contains("欢迎您使用"), "應顯示協議開頭：\n{text}");
+    assert!(text.contains(&title), "标题应含版本：\n{text}");
+    assert!(text.contains("欢迎您使用"), "应显示协议开头：\n{text}");
     assert!(
         text.contains("请阅读至最底部"),
-        "頁腳應提示閱讀進度：\n{text}"
+        "页脚应提示阅读进度：\n{text}"
     );
     assert!(
         !text.contains("首次使用：设置加密口令与账号"),
-        "底層表單不得露出：\n{text}"
+        "底层表单不得露出：\n{text}"
     );
 
     assert_popup_borders(terminal.backend(), Rect::new(0, 0, WIDTH, HEIGHT));
@@ -1786,24 +1798,24 @@ fn agreement_footer_activates_after_reaching_bottom() {
     let text = screen_text(terminal.backend());
     assert!(
         text.contains("请阅读至最底部"),
-        "初始應提示捲到底部：\n{text}"
+        "初始应提示滚到底部：\n{text}"
     );
     assert!(
         !text.contains("同意并继续"),
-        "未讀完不得出現確認按鈕：\n{text}"
+        "未读完不得出现确认按钮：\n{text}"
     );
 
     // 跳到結尾後重繪：出現確認按鈕。
-    app.agreement.as_mut().expect("閱讀門").to_bottom();
+    app.agreement.as_mut().expect("阅读门").to_bottom();
     let terminal = draw(WIDTH, HEIGHT, |frame| {
         crate::tui::views::draw(frame, &mut app)
     });
     let text = screen_text(terminal.backend());
     assert!(
         text.contains("[ 同意并继续 ]"),
-        "到底部後應出現確認按鈕：\n{text}"
+        "到底部后应出现确认按钮：\n{text}"
     );
-    assert!(text.contains("enter 同意并继续"), "應提示確認鍵：\n{text}");
+    assert!(text.contains("enter 同意并继续"), "应提示确认键：\n{text}");
     assert!(!text.contains("请阅读至最底部"));
 }
 
@@ -1826,7 +1838,7 @@ fn agreement_failure_is_shown_in_footer() {
     assert_eq!(
         terminal.backend().buffer()[(1, y)].fg,
         THEME.red,
-        "錯誤訊息應以紅色顯示"
+        "错误信息应以红色显示"
     );
 }
 
@@ -1842,10 +1854,10 @@ fn agreement_showing(app: &mut App, needle: &str) -> Terminal<TestBackend> {
         lines
             .iter()
             .position(|line| line.text.contains(needle))
-            .unwrap_or_else(|| panic!("協議中找不到 {needle}")),
+            .unwrap_or_else(|| panic!("协议中找不到 {needle}")),
     )
-    .expect("列號可轉為 i32");
-    app.agreement.as_mut().expect("閱讀門").scroll_by(index);
+    .expect("列号可转为 i32");
+    app.agreement.as_mut().expect("阅读门").scroll_by(index);
     draw(WIDTH, HEIGHT, |frame| {
         crate::tui::views::draw(frame, &mut *app)
     })
@@ -1861,22 +1873,22 @@ fn agreement_table_cards_align_labels_with_their_values() {
 
     // 卡片標題：符號為次要色、主機名為強調色。
     let (title_y, title_row) = find_row(terminal.backend(), "▸ login.xjtu.edu.cn");
-    assert_eq!(column_of(&title_row, "▸"), 1, "外框後即為卡片標題");
+    assert_eq!(column_of(&title_row, "▸"), 1, "外框后即为卡片标题");
     assert_eq!(
         terminal.backend().buffer()[(1, title_y)].fg,
         THEME.muted,
-        "標題符號以次要色呈現"
+        "标题符号以次要色呈现"
     );
     assert_eq!(
         terminal.backend().buffer()[(3, title_y)].fg,
         THEME.accent,
-        "主機名以強調色呈現"
+        "主机名以强调色呈现"
     );
 
     // 欄位列：標籤與值同行，值自固定欄起算。
     let (label_y, label_row) = find_row(terminal.backend(), "会上传的内容");
     assert!(label_row.contains("账号、RSA 加密后的密码"), "{label_row}");
-    assert_eq!(column_of(&label_row, "会上传的内容"), 3, "縮排 2 ＋ 外框 1");
+    assert_eq!(column_of(&label_row, "会上传的内容"), 3, "缩进 2 ＋ 外框 1");
     assert_eq!(terminal.backend().buffer()[(1, label_y)].fg, THEME.muted);
     assert_eq!(terminal.backend().buffer()[(17, label_y)].fg, THEME.text);
 
@@ -1884,7 +1896,7 @@ fn agreement_table_cards_align_labels_with_their_values() {
     let next = row_text(terminal.backend(), label_y + 1);
     assert!(
         next.contains("所需的会话与状态字段"),
-        "續行應接續同一欄的值：{next}"
+        "续行应接续同一栏的值：{next}"
     );
     assert_eq!(column_of(&next, "所需的会话与状态字段"), 17);
     assert_eq!(
@@ -1903,11 +1915,11 @@ fn agreement_table_grid_aligns_columns_when_it_fits() {
 
     // 短表格排成對齊表格：標頭兩欄同行、使用標題色。
     let (header_y, header) = find_row(terminal.backend(), "平台");
-    assert!(header.contains("目录"), "標頭應與另一欄同行：{header}");
+    assert!(header.contains("目录"), "标头应与另一栏同行：{header}");
     assert_eq!(
         terminal.backend().buffer()[(1, header_y)].fg,
         THEME.blue,
-        "標頭列使用標題色"
+        "标头列使用标题色"
     );
 
     // 資料列的第二欄與標頭的第二欄起點一致。
@@ -1916,11 +1928,11 @@ fn agreement_table_grid_aligns_columns_when_it_fits() {
     assert_eq!(
         column_of(&row, "~/.local/share/ohmyXJTU/"),
         column_of(&header, "目录"),
-        "兩列的欄位起點必須一致"
+        "两列的字段起点必须一致"
     );
 
     let rule = row_text(terminal.backend(), header_y + 1);
-    assert!(rule.contains("───"), "標頭下方應為表格細線：{rule}");
+    assert!(rule.contains("───"), "标头下方应为表格细线：{rule}");
 }
 
 /// 詳情計數必須與作業彙總的「有效提交」語義一致（單一判據 is_effective）。
@@ -1943,6 +1955,7 @@ fn activity_detail_counts_effective_submissions_consistently() {
         id: "1".to_owned(),
         title: "作业A".to_owned(),
         kind: ActivityKind::Homework,
+        description: None,
         end_time: None,
         submit_by_group: Some(false),
         submissions: Some(list.list),
@@ -1982,6 +1995,7 @@ fn activity_detail_reports_no_effective_submissions() {
         id: "1".to_owned(),
         title: "作业A".to_owned(),
         kind: ActivityKind::Homework,
+        description: None,
         end_time: None,
         submit_by_group: Some(false),
         submissions: Some(list.list),
@@ -2009,6 +2023,7 @@ fn homework_detail_shows_unknown_submission_unit() {
             activity_id: "a-1".to_owned(),
             title: "缺单位作业".to_owned(),
             end_time: None,
+            description: None,
             submit_by_group: None,
             submission_count: Some(0),
             note: None,
@@ -2053,4 +2068,589 @@ fn schedule_renders_notice_above_empty_state() {
         text.contains("本周没有课程安排"),
         "空状态提示应保留：\n{text}"
     );
+}
+
+/// 作業說明顯示於詳情框：純文字、保留換行、不留 HTML 標籤。
+#[test]
+fn homework_detail_shows_activity_description() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00+08:00").expect("固定时间");
+    let items = aggregate(
+        &[HomeworkInput {
+            description: Some(ActivityContent {
+                text: Some("第一章习题\n交到邮箱".to_owned()),
+                has_media: false,
+                has_links: false,
+                attachments: Vec::new(),
+                issue: None,
+            }),
+            ..homework_input("第一章作业", "2026-10-01 23:59:59", 0)
+        }],
+        now,
+    );
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Homework;
+    app.homework = Page::Ready(homework_data(items, None));
+    app.homework_detail = true;
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(text.contains("作业描述："), "应显示描述区块：\n{text}");
+    assert!(text.contains("第一章习题"), "应显示描述内容：\n{text}");
+    assert!(text.contains("交到邮箱"), "描述换行应保留：\n{text}");
+    assert!(!text.contains("<p>"), "不应残留 HTML 标签：\n{text}");
+}
+
+/// 沒有說明時不顯示描述區塊（不得把空值當成內容）。
+#[test]
+fn homework_detail_hides_description_section_when_absent() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00+08:00").expect("固定时间");
+    let items = aggregate(
+        &[homework_input("第一章作业", "2026-10-01 23:59:59", 0)],
+        now,
+    );
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Homework;
+    app.homework = Page::Ready(homework_data(items, None));
+    app.homework_detail = true;
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(
+        !text.contains("作业描述"),
+        "没有说明时不应显示描述区块：\n{text}"
+    );
+}
+
+/// 長說明可捲動：列數由繪製回寫，捲到底後應看得到結尾。
+#[test]
+fn homework_detail_scrolls_long_description() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00+08:00").expect("固定时间");
+    let description = (1..=30)
+        .map(|line| format!("第{line}行"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let items = aggregate(
+        &[HomeworkInput {
+            description: Some(ActivityContent {
+                text: Some(description),
+                has_media: false,
+                has_links: false,
+                attachments: Vec::new(),
+                issue: None,
+            }),
+            ..homework_input("长作业", "2026-10-01 23:59:59", 0)
+        }],
+        now,
+    );
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Homework;
+    app.homework = Page::Ready(homework_data(items, None));
+    app.homework_detail = true;
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(text.contains("第1行"), "初始应显示说明开头：\n{text}");
+    assert!(!text.contains("第30行"), "初始不应显示说明结尾：\n{text}");
+    assert!(app.homework_scroll.scrollable(), "内容超长时应可滚动");
+
+    app.homework_scroll.to_bottom();
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(text.contains("第30行"), "滚到底应显示说明结尾：\n{text}");
+    assert!(
+        !text.contains("第1行"),
+        "滚到底后开头应已离开画面：\n{text}"
+    );
+}
+
+/// 整份說明只有一張圖片：必須標註含圖片並提示開網頁，而不是看起來沒有說明。
+#[test]
+fn homework_detail_marks_image_only_description() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00+08:00").expect("固定时间");
+    let items = aggregate(
+        &[HomeworkInput {
+            description: Some(ActivityContent {
+                text: None,
+                has_media: true,
+                has_links: false,
+                attachments: Vec::new(),
+                issue: None,
+            }),
+            ..homework_input("图片作业", "2026-10-01 23:59:59", 0)
+        }],
+        now,
+    );
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Homework;
+    app.homework = Page::Ready(homework_data(items, None));
+    app.homework_detail = true;
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(text.contains("作业描述："), "应显示描述区块：\n{text}");
+    assert!(text.contains("说明含图片"), "应标注说明含图片：\n{text}");
+    assert!(
+        text.contains("按 o 打开思源学堂后自行查看"),
+        "应提示到思源学堂看原文：\n{text}"
+    );
+}
+
+/// 說明含連結（`href` 目標不在純文字裡）：應標註並提示開網頁。
+#[test]
+fn homework_detail_marks_link_only_description() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00+08:00").expect("固定时间");
+    let items = aggregate(
+        &[HomeworkInput {
+            description: Some(ActivityContent {
+                text: Some("下载附件".to_owned()),
+                has_media: false,
+                has_links: true,
+                attachments: Vec::new(),
+                issue: None,
+            }),
+            ..homework_input("链接作业", "2026-10-01 23:59:59", 0)
+        }],
+        now,
+    );
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Homework;
+    app.homework = Page::Ready(homework_data(items, None));
+    app.homework_detail = true;
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(text.contains("下载附件"), "应显示锚文字：\n{text}");
+    assert!(text.contains("说明含链接"), "应标注含链接：\n{text}");
+    assert!(
+        text.contains("按 o 打开思源学堂后自行查看"),
+        "应提示到思源学堂看原文：\n{text}"
+    );
+}
+
+/// 圖片與連結並存：提示合併為一句。
+#[test]
+fn homework_detail_combines_media_and_link_hint() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00+08:00").expect("固定时间");
+    let items = aggregate(
+        &[HomeworkInput {
+            description: Some(ActivityContent {
+                text: None,
+                has_media: true,
+                has_links: true,
+                attachments: Vec::new(),
+                issue: None,
+            }),
+            ..homework_input("图文作业", "2026-10-01 23:59:59", 0)
+        }],
+        now,
+    );
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Homework;
+    app.homework = Page::Ready(homework_data(items, None));
+    app.homework_detail = true;
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(
+        text.contains("说明含图片、链接"),
+        "图片与链接并存时应合并提示：\n{text}"
+    );
+}
+
+/// 底欄在詳情可捲動時提示捲動鍵（終端夠寬時才看得見完整提示）。
+#[test]
+fn footer_hints_scrolling_when_detail_is_scrollable() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00+08:00").expect("固定时间");
+    let description = (1..=30)
+        .map(|line| format!("第{line}行"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let items = aggregate(
+        &[HomeworkInput {
+            description: Some(ActivityContent {
+                text: Some(description),
+                has_media: false,
+                has_links: false,
+                attachments: Vec::new(),
+                issue: None,
+            }),
+            ..homework_input("长作业", "2026-10-01 23:59:59", 0)
+        }],
+        now,
+    );
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Homework;
+    app.homework = Page::Ready(homework_data(items, None));
+    app.homework_detail = true;
+
+    let terminal = draw(200, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(
+        text.contains("PgUp/PgDn 滚动"),
+        "底栏应提示滚动键：\n{text}"
+    );
+}
+
+/// 沒畫到詳情面板時（空分組）不得沿用上一幀的捲動資訊，否則底欄會一直提示
+/// 捲動鍵卻沒有東西可捲。
+#[test]
+fn footer_hides_scroll_hint_when_the_panel_is_not_drawn() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00+08:00").expect("固定时间");
+    // 唯一一筆作業已提交（屬「已完成」分組），預設的「未完成」分組為空。
+    let items = aggregate(&[homework_input("已交作业", "2026-10-01 23:59:59", 1)], now);
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Homework;
+    app.homework = Page::Ready(homework_data(items, None));
+    app.homework_detail = true;
+    // 假裝上一幀的詳情很長（可捲動）。
+    app.homework_scroll.sync(5, 20);
+    assert!(app.homework_scroll.scrollable(), "前置条件：上一帧可滚动");
+
+    let terminal = draw(200, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(
+        text.contains("没有未完成的作业"),
+        "应显示空分组提示：\n{text}"
+    );
+    assert!(
+        !text.contains("PgUp/PgDn 滚动"),
+        "没有详情面板时不应提示滚动：\n{text}"
+    );
+}
+
+/// 提示列依重要度取捨：畫面專屬的操作（尤其捲動）在小終端也看得到。
+///
+/// 回歸：提示列以往把畫面專屬的操作接在固定的長前綴之後，終端稍窄就會被裁掉
+/// （實測 100 欄時連「enter 收起详情」都只剩半個字），使用者因此看不到「這份
+/// 說明還能往下讀」。
+#[test]
+fn footer_keeps_page_hints_on_narrow_terminals() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00+08:00").expect("固定时间");
+    let description = (1..=30)
+        .map(|line| format!("第{line}行"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let items = aggregate(
+        &[HomeworkInput {
+            description: Some(ActivityContent {
+                text: Some(description),
+                has_media: false,
+                has_links: false,
+                attachments: Vec::new(),
+                issue: None,
+            }),
+            ..homework_input("长作业", "2026-10-01 23:59:59", 0)
+        }],
+        now,
+    );
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Homework;
+    app.homework = Page::Ready(homework_data(items, None));
+    app.homework_detail = true;
+
+    for width in [64, 80] {
+        let terminal = draw(width, HEIGHT, |frame| {
+            crate::tui::views::draw(frame, &mut app)
+        });
+        let footer = row_text(terminal.backend(), HEIGHT - 1);
+        assert!(
+            footer.contains("PgUp/PgDn 滚动"),
+            "{width} 栏应看得到滚动提示：{footer:?}"
+        );
+        assert!(
+            footer.contains("[ ] 分组"),
+            "{width} 栏应看得到页面操作：{footer:?}"
+        );
+    }
+
+    // 放不下的通用提示整段捨去（並標示還有未顯示的提示）。
+    let terminal = draw(64, HEIGHT, |frame| crate::tui::views::draw(frame, &mut app));
+    let footer = row_text(terminal.backend(), HEIGHT - 1);
+    assert!(
+        !footer.contains("^P 账户设置"),
+        "应舍去放不下的提示：{footer:?}"
+    );
+    assert!(footer.contains('…'), "应标注还有未显示的提示：{footer:?}");
+
+    // 寬終端仍列出完整提示。
+    let terminal = draw(200, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let footer = row_text(terminal.backend(), HEIGHT - 1);
+    assert!(
+        footer.contains("^P 账户设置"),
+        "宽终端应显示完整提示：{footer:?}"
+    );
+    assert!(!footer.contains('…'), "全部显示时不应有省略号：{footer:?}");
+}
+
+/// 思源學堂活動詳情顯示說明，且長說明可捲動。
+#[test]
+fn activity_detail_shows_description_and_scrolls() {
+    let description = (1..=30)
+        .map(|line| format!("第{line}行"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Lms;
+    app.lms.level = LmsLevel::Detail;
+    app.lms.detail = Page::Ready(ActivityDetailView {
+        id: "1".to_owned(),
+        title: "作业A".to_owned(),
+        kind: ActivityKind::Homework,
+        description: Some(ActivityContent {
+            text: Some(description),
+            has_media: false,
+            has_links: false,
+            attachments: Vec::new(),
+            issue: None,
+        }),
+        end_time: None,
+        submit_by_group: Some(false),
+        submissions: None,
+        note: None,
+    });
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(text.contains("作业描述："), "应显示描述区块：\n{text}");
+    assert!(text.contains("第1行"), "初始应显示说明开头：\n{text}");
+    assert!(!text.contains("第30行"), "初始不应显示说明结尾：\n{text}");
+
+    app.lms.detail_scroll.to_bottom();
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(text.contains("第30行"), "滚到底应显示说明结尾：\n{text}");
+    assert!(
+        !text.contains("第1行"),
+        "滚到底后开头应已离开画面：\n{text}"
+    );
+}
+
+/// 說明區塊標題依活動類型：作業為「作业描述」，其他為「内容」。
+#[test]
+fn activity_detail_labels_description_by_kind() {
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Lms;
+    app.lms.level = LmsLevel::Detail;
+    app.lms.detail = Page::Ready(ActivityDetailView {
+        id: "1".to_owned(),
+        title: "课程简介".to_owned(),
+        kind: ActivityKind::Material,
+        description: Some(ActivityContent {
+            text: Some("课程介绍".to_owned()),
+            has_media: true,
+            has_links: false,
+            attachments: Vec::new(),
+            issue: None,
+        }),
+        end_time: None,
+        submit_by_group: None,
+        submissions: None,
+        note: None,
+    });
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(
+        text.contains("内容："),
+        "资料类型应使用「内容」标题：\n{text}"
+    );
+    assert!(text.contains("课程介绍"), "应显示正文：\n{text}");
+    assert!(text.contains("说明含图片"), "应标注说明含图片：\n{text}");
+    assert!(
+        !text.contains("作业描述"),
+        "非作业不得使用作业描述标题：\n{text}"
+    );
+}
+
+/// 測試用附件。
+fn upload(name: &str, size: Option<u64>) -> LmsUpload {
+    LmsUpload {
+        name: Some(name.to_owned()),
+        size,
+    }
+}
+
+/// 附件逐項列出名稱與大小，並與圖片／連結共用同一句提示。
+#[test]
+fn homework_detail_lists_attachments() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00+08:00").expect("固定时间");
+    let items = aggregate(
+        &[HomeworkInput {
+            description: Some(ActivityContent {
+                text: None,
+                has_media: false,
+                has_links: false,
+                attachments: vec![
+                    upload("题目.pdf", Some(1_234_567)),
+                    upload("参考答案.docx", Some(24_576)),
+                ],
+                issue: None,
+            }),
+            ..homework_input("附件作业", "2026-10-01 23:59:59", 0)
+        }],
+        now,
+    );
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Homework;
+    app.homework = Page::Ready(homework_data(items, None));
+    app.homework_detail = true;
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(text.contains("附件（2）："), "应列出附件数量：\n{text}");
+    assert!(
+        text.contains("题目.pdf（1.2 MB）"),
+        "应显示附件名称与大小：\n{text}"
+    );
+    assert!(
+        text.contains("参考答案.docx（24 KB）"),
+        "应显示附件名称与大小：\n{text}"
+    );
+    assert!(
+        text.contains("说明含附件"),
+        "附件内容无法在终端显示，应提示开网页：\n{text}"
+    );
+}
+
+/// 附件過多時只列前面幾項，並註明剩餘數量。
+#[test]
+fn homework_detail_caps_the_attachment_list() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00+08:00").expect("固定时间");
+    let attachments = (1..=7)
+        .map(|index| upload(&format!("附件{index}.pdf"), None))
+        .collect::<Vec<_>>();
+    let items = aggregate(
+        &[HomeworkInput {
+            description: Some(ActivityContent {
+                text: None,
+                has_media: false,
+                has_links: false,
+                attachments,
+                issue: None,
+            }),
+            ..homework_input("多附件作业", "2026-10-01 23:59:59", 0)
+        }],
+        now,
+    );
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Homework;
+    app.homework = Page::Ready(homework_data(items, None));
+    app.homework_detail = true;
+
+    let terminal = draw(WIDTH, 40, |frame| crate::tui::views::draw(frame, &mut app));
+    let text = screen_text(terminal.backend());
+    assert!(text.contains("附件（7）："), "数量应为全部附件数：\n{text}");
+    assert!(text.contains("附件5.pdf"), "应列出前几项：\n{text}");
+    assert!(!text.contains("附件6.pdf"), "超出的附件不应列出：\n{text}");
+    assert!(text.contains("…另有 2 个"), "应注明剩余数量：\n{text}");
+}
+
+/// 讀不出正文時顯示原因：不得靜默地看起來「這項活動沒有說明」。
+///
+/// 這是實網驗收的診斷入口——欄位假設與實際回應不符時，畫面會直接說出原因。
+#[test]
+fn homework_detail_reports_unreadable_description() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00+08:00").expect("固定时间");
+    let items = aggregate(
+        &[HomeworkInput {
+            description: Some(ActivityContent {
+                text: None,
+                has_media: false,
+                has_links: false,
+                attachments: Vec::new(),
+                issue: Some(BODY_NOT_OBJECT_NOTE),
+            }),
+            ..homework_input("异常作业", "2026-10-01 23:59:59", 0)
+        }],
+        now,
+    );
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Homework;
+    app.homework = Page::Ready(homework_data(items, None));
+    app.homework_detail = true;
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(text.contains("作业描述："), "标题仍应显示：\n{text}");
+    assert!(
+        text.contains("未取得说明正文"),
+        "应显示读取失败的原因：\n{text}"
+    );
+    assert!(text.contains("不是对象"), "应指出具体原因：\n{text}");
+}
+
+/// 思源學堂活動詳情同樣顯示讀取失敗的原因（共用同一套說明區塊）。
+#[test]
+fn activity_detail_reports_unreadable_description() {
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Lms;
+    app.lms.level = LmsLevel::Detail;
+    app.lms.detail = Page::Ready(ActivityDetailView {
+        id: "1".to_owned(),
+        title: "作业A".to_owned(),
+        kind: ActivityKind::Homework,
+        description: Some(ActivityContent {
+            text: None,
+            has_media: false,
+            has_links: false,
+            attachments: Vec::new(),
+            issue: Some(TOP_LEVEL_BODY_NOTE),
+        }),
+        end_time: None,
+        submit_by_group: Some(false),
+        submissions: None,
+        note: None,
+    });
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(text.contains("未取得说明正文"), "应显示原因：\n{text}");
+    assert!(text.contains("顶层"), "应指出正文实际位置：\n{text}");
 }

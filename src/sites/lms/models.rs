@@ -6,7 +6,8 @@
 use serde::Deserialize;
 
 use super::super::{
-    optional_object, optional_string_lenient, optional_string_or_number, string_or_number,
+    lenient_array, optional_object, optional_string_lenient, optional_string_or_number,
+    optional_u64_lenient, string_or_number,
 };
 use super::html;
 
@@ -159,19 +160,70 @@ pub struct LmsActivityBody {
     pub content: Option<String>,
 }
 
-/// 活動正文（純文字與是否含圖片、連結等內容）。
+/// 活動附件（老師上傳的檔案）。
 ///
-/// 純文字不足以呈現整份正文：作業說明可能就是一張圖片，或含有 `href` 目標的
-/// 連結。因此額外回報 `has_media` 與 `has_links`，讓介面能提示使用者「說明含
-/// 圖片或連結，請開網頁查看」。
+/// 只保留終端顯示所需的欄位：附件內容勢必得在瀏覽器下載（TUI 不做檔案落地），
+/// 因此識別碼、下載與預覽網址都不解析——參考實作的下載網址還是自行用識別碼拼接
+/// 出來的，不在回應裡。伺服器欄位是活動詳情回應的頂層 `uploads` 陣列。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct LmsUpload {
+    /// 檔名；缺欄位或型別異常時為 `None`。
+    #[serde(default, deserialize_with = "optional_string_lenient")]
+    pub name: Option<String>,
+    /// 位元組數；缺欄位或型別異常時為 `None`。
+    #[serde(default, deserialize_with = "optional_u64_lenient")]
+    pub size: Option<u64>,
+}
+
+impl LmsUpload {
+    /// 顯示用檔名：伺服器沒給名稱（或只有空白）時以「未命名附件」代替，
+    /// 不讓附件因沒有檔名而從清單消失。
+    pub fn display_name(&self) -> &str {
+        self.name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .unwrap_or("未命名附件")
+    }
+
+    /// 顯示用大小（`512 B`、`24 KB`、`1.2 MB`）；伺服器沒給大小時回 `None`。
+    pub fn size_label(&self) -> Option<String> {
+        /// 進位門檻（二進位單位，與參考實作一致）。
+        const KB: u64 = 1024;
+        const MB: u64 = 1024 * 1024;
+        let size = self.size?;
+        Some(if size < KB {
+            format!("{size} B")
+        } else if size < MB {
+            format!("{} KB", size / KB)
+        } else {
+            format!("{:.1} MB", size as f64 / MB as f64)
+        })
+    }
+}
+
+/// 活動詳情可顯示的內容：說明正文與附件。
+///
+/// 純文字不足以呈現整份正文：作業說明可能就是一張圖片、含有 `href` 目標的連結，
+/// 或題目整個放在附件裡。因此除了正文，還回報 `has_media`／`has_links` 與
+/// `attachments`，讓介面能標註並列出「要看完整內容得開網頁」的部分。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ActivityText {
+pub struct ActivityContent {
     /// 純文字內容（沒有可見文字時為 `None`）。
     pub text: Option<String>,
     /// 是否含圖片、影片等無法以文字呈現的元素。
     pub has_media: bool,
     /// 是否含指向實際目標的連結（`href` 不會出現在純文字裡）。
     pub has_links: bool,
+    /// 附件（老師上傳的檔案）；沒有一律為空 vec。
+    pub attachments: Vec<LmsUpload>,
+}
+
+impl ActivityContent {
+    /// 有沒有任何可顯示的內容（正文、圖片、連結或附件）。
+    pub fn is_empty(&self) -> bool {
+        self.text.is_none() && !self.has_media && !self.has_links && self.attachments.is_empty()
+    }
 }
 
 /// 活動（作業、資料、課程內容…）。
@@ -207,6 +259,12 @@ pub struct LmsActivity {
     /// 一段說明就讓整份活動解析失敗（詳情失敗會使該課程的作業全部退回「待核实」）。
     #[serde(default, deserialize_with = "optional_object")]
     pub data: Option<LmsActivityBody>,
+    /// 附件（老師上傳的檔案）。
+    ///
+    /// 只出現在活動詳情回應的頂層 `uploads`（不在 `data` 底下），列表項目不含
+    /// 此欄位；參考實作同樣從頂層取用。
+    #[serde(default, deserialize_with = "lenient_array")]
+    pub uploads: Vec<LmsUpload>,
     /// 伺服器記錄的提交次數。
     #[serde(default)]
     pub user_submit_count: Option<u64>,
@@ -241,11 +299,13 @@ impl LmsActivity {
             .find(|html| !html.trim().is_empty())
     }
 
-    /// 活動正文（純文字＋是否含圖片、連結等內容）；沒有正文時回 `None`。
-    pub fn body(&self) -> Option<ActivityText> {
-        let body = html::convert(self.body_html()?);
-        // 說明可能整份只有一張圖片或一個連結，沒有可見文字，但仍要讓介面能標註。
-        (body.text.is_some() || body.has_media || body.has_links).then_some(body)
+    /// 活動的可顯示內容（正文＋附件）；兩者都沒有時回 `None`。
+    ///
+    /// 正文取自 `data`、附件取自頂層 `uploads`（都只有詳情回應才有）。
+    pub fn body(&self) -> Option<ActivityContent> {
+        let mut content = self.body_html().map(html::convert).unwrap_or_default();
+        content.attachments.clone_from(&self.uploads);
+        (!content.is_empty()).then_some(content)
     }
 }
 

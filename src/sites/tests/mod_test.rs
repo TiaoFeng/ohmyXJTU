@@ -156,3 +156,68 @@ fn optional_string_lenient_ignores_non_string_values() {
         assert!(target.text.is_none(), "{value}");
     }
 }
+
+/// 列表欄位的寬容解析：缺欄位、非陣列與個別項目異常都不得讓整份回應失敗。
+#[test]
+fn lenient_array_tolerates_missing_and_malformed_values() {
+    #[derive(serde::Deserialize)]
+    struct Target {
+        #[serde(default, deserialize_with = "lenient_array")]
+        items: Vec<Item>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct Item {
+        #[serde(default, deserialize_with = "optional_string_lenient")]
+        name: Option<String>,
+    }
+
+    let missing: Target = serde_json::from_str("{}").expect("缺少字段应可用");
+    assert!(missing.items.is_empty());
+
+    for json in [
+        r#"{"items":null}"#,
+        r#"{"items":{}}"#,
+        r#"{"items":0}"#,
+        r#"{"items":"a.pdf"}"#,
+    ] {
+        let target: Target = serde_json::from_str(json).expect("非数组应可用");
+        assert!(target.items.is_empty(), "{json}");
+    }
+
+    // 個別項目型別異常時跳過該項，其餘照常解析（與 `parse_lenient` 同精神）。
+    let target: Target =
+        serde_json::from_str(r#"{"items":[{"name":"a"},7,null,{"name":"b"}]}"#).expect("可解析");
+    let names: Vec<&str> = target
+        .items
+        .iter()
+        .filter_map(|item| item.name.as_deref())
+        .collect();
+    assert_eq!(names, ["a", "b"]);
+}
+
+/// 數量欄位的寬容解析：只有數字與可解析的數字字串才算數。
+#[test]
+fn optional_u64_lenient_accepts_numbers_and_numeric_strings() {
+    fn size(json: &str) -> Option<u64> {
+        #[derive(serde::Deserialize)]
+        struct Target {
+            #[serde(default, deserialize_with = "optional_u64_lenient")]
+            size: Option<u64>,
+        }
+        serde_json::from_str::<Target>(json)
+            .unwrap_or_else(|err| panic!("{json}: {err}"))
+            .size
+    }
+
+    assert_eq!(size(r#"{"size":2048}"#), Some(2048));
+    assert_eq!(size(r#"{"size":"2048"}"#), Some(2048));
+    assert_eq!(size(r#"{"size":" 512 "}"#), Some(512));
+    // 缺欄位、非數字字串、負數、小數與非純量一律視為沒有這個數字。
+    assert_eq!(size("{}"), None);
+    assert_eq!(size(r#"{"size":"大小不明"}"#), None);
+    assert_eq!(size(r#"{"size":-1}"#), None);
+    assert_eq!(size(r#"{"size":1.5}"#), None);
+    assert_eq!(size(r#"{"size":{"n":1}}"#), None);
+    assert_eq!(size(r#"{"size":null}"#), None);
+}

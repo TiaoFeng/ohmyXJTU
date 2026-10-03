@@ -21,12 +21,12 @@
 //!
 //! 沒有可見文字時 `text` 為 `None`，但 `has_media`／`has_links` 仍可能為真（整份
 //! 說明只有一張圖片或一個連結）：是否顯示描述區塊由呼叫端依三者共同決定
-//! （見 `LmsActivity::body`）。
+//! （見 `LmsActivity::body`）——連附件也算在內。
 
 use scraper::node::{Element, Node};
 use scraper::{ElementRef, Html};
 
-use super::models::ActivityText;
+use super::models::ActivityContent;
 
 /// 純文字長度上限（字元）；超出時截斷並以「…」結尾。
 ///
@@ -97,10 +97,13 @@ enum Step {
 
 /// 把 HTML 片段轉成純文字。
 ///
-/// 回傳 [`ActivityText`]：純文字只能呈現正文的一部分（作業說明可能整份就是一張
-/// 圖片），`has_media` 讓上層能標註「說明含圖片」，使用者才會知道要開網頁看原本
-/// 的內容；沒有可見文字時 `text` 為 `None`。
-pub(super) fn convert(html: &str) -> ActivityText {
+/// 回傳 [`ActivityContent`]：純文字只能呈現正文的一部分（作業說明可能整份就是一張
+/// 圖片），`has_media`／`has_links` 讓上層能標註「說明含圖片或連結」，使用者才會
+/// 知道要開網頁看原本的內容；沒有可見文字時 `text` 為 `None`。
+///
+/// 附件（`attachments`）不在正文 HTML 裡——那是活動詳情回應的頂層 `uploads`，
+/// 由 `LmsActivity::body` 填入，這裡一律留空。
+pub(super) fn convert(html: &str) -> ActivityContent {
     let document = Html::parse_fragment(html);
     let mut raw = String::new();
     let mut has_media = false;
@@ -117,10 +120,11 @@ pub(super) fn convert(html: &str) -> ActivityText {
             push_text(&text.text, &mut raw);
         }
     }
-    ActivityText {
+    ActivityContent {
         text: normalize(&raw),
         has_media,
         has_links,
+        attachments: Vec::new(),
     }
 }
 

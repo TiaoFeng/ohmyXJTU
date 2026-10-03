@@ -16,7 +16,9 @@ use crate::domain::semester::TermCode;
 use crate::model::{ActivityDetailView, FlowData, LessonEntry, ScheduleData};
 use crate::session::{AccessMode, SiteKind};
 use crate::sites::attendance::{AttendanceStatus, FlowRecord};
-use crate::sites::lms::{ActivityKind, ActivityText, LmsActivity, LmsCourse, LmsSubmissionList};
+use crate::sites::lms::{
+    ActivityContent, ActivityKind, LmsActivity, LmsCourse, LmsSubmissionList, LmsUpload,
+};
 use crate::task::HomeworkIssue;
 use crate::tui::app::{
     AgreementState, App, FormState, HomeworkData, LmsLevel, LoginScreen, NavItem, Page, Screen,
@@ -528,6 +530,7 @@ fn lms_activity(id: &str, kind: &str, end: Option<&str>) -> LmsActivity {
         submit_by_group: None,
         group_id: None,
         data: None,
+        uploads: Vec::new(),
         user_submit_count: None,
         published: None,
     }
@@ -2071,10 +2074,11 @@ fn homework_detail_shows_activity_description() {
     let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00+08:00").expect("固定时间");
     let items = aggregate(
         &[HomeworkInput {
-            description: Some(ActivityText {
+            description: Some(ActivityContent {
                 text: Some("第一章习题\n交到邮箱".to_owned()),
                 has_media: false,
                 has_links: false,
+                attachments: Vec::new(),
             }),
             ..homework_input("第一章作业", "2026-10-01 23:59:59", 0)
         }],
@@ -2130,10 +2134,11 @@ fn homework_detail_scrolls_long_description() {
         .join("\n");
     let items = aggregate(
         &[HomeworkInput {
-            description: Some(ActivityText {
+            description: Some(ActivityContent {
                 text: Some(description),
                 has_media: false,
                 has_links: false,
+                attachments: Vec::new(),
             }),
             ..homework_input("长作业", "2026-10-01 23:59:59", 0)
         }],
@@ -2171,10 +2176,11 @@ fn homework_detail_marks_image_only_description() {
     let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00+08:00").expect("固定时间");
     let items = aggregate(
         &[HomeworkInput {
-            description: Some(ActivityText {
+            description: Some(ActivityContent {
                 text: None,
                 has_media: true,
                 has_links: false,
+                attachments: Vec::new(),
             }),
             ..homework_input("图片作业", "2026-10-01 23:59:59", 0)
         }],
@@ -2204,10 +2210,11 @@ fn homework_detail_marks_link_only_description() {
     let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00+08:00").expect("固定时间");
     let items = aggregate(
         &[HomeworkInput {
-            description: Some(ActivityText {
+            description: Some(ActivityContent {
                 text: Some("下载附件".to_owned()),
                 has_media: false,
                 has_links: true,
+                attachments: Vec::new(),
             }),
             ..homework_input("链接作业", "2026-10-01 23:59:59", 0)
         }],
@@ -2237,10 +2244,11 @@ fn homework_detail_combines_media_and_link_hint() {
     let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00+08:00").expect("固定时间");
     let items = aggregate(
         &[HomeworkInput {
-            description: Some(ActivityText {
+            description: Some(ActivityContent {
                 text: None,
                 has_media: true,
                 has_links: true,
+                attachments: Vec::new(),
             }),
             ..homework_input("图文作业", "2026-10-01 23:59:59", 0)
         }],
@@ -2257,7 +2265,7 @@ fn homework_detail_combines_media_and_link_hint() {
     });
     let text = screen_text(terminal.backend());
     assert!(
-        text.contains("说明含图片与链接"),
+        text.contains("说明含图片、链接"),
         "图片与链接并存时应合并提示：\n{text}"
     );
 }
@@ -2272,10 +2280,11 @@ fn footer_hints_scrolling_when_detail_is_scrollable() {
         .join("\n");
     let items = aggregate(
         &[HomeworkInput {
-            description: Some(ActivityText {
+            description: Some(ActivityContent {
                 text: Some(description),
                 has_media: false,
                 has_links: false,
+                attachments: Vec::new(),
             }),
             ..homework_input("长作业", "2026-10-01 23:59:59", 0)
         }],
@@ -2342,10 +2351,11 @@ fn activity_detail_shows_description_and_scrolls() {
         id: "1".to_owned(),
         title: "作业A".to_owned(),
         kind: ActivityKind::Homework,
-        description: Some(ActivityText {
+        description: Some(ActivityContent {
             text: Some(description),
             has_media: false,
             has_links: false,
+            attachments: Vec::new(),
         }),
         end_time: None,
         submit_by_group: Some(false),
@@ -2384,10 +2394,11 @@ fn activity_detail_labels_description_by_kind() {
         id: "1".to_owned(),
         title: "课程简介".to_owned(),
         kind: ActivityKind::Material,
-        description: Some(ActivityText {
+        description: Some(ActivityContent {
             text: Some("课程介绍".to_owned()),
             has_media: true,
             has_links: false,
+            attachments: Vec::new(),
         }),
         end_time: None,
         submit_by_group: None,
@@ -2409,4 +2420,89 @@ fn activity_detail_labels_description_by_kind() {
         !text.contains("作业描述"),
         "非作业不得使用作业描述标题：\n{text}"
     );
+}
+
+/// 測試用附件。
+fn upload(name: &str, size: Option<u64>) -> LmsUpload {
+    LmsUpload {
+        name: Some(name.to_owned()),
+        size,
+    }
+}
+
+/// 附件逐項列出名稱與大小，並與圖片／連結共用同一句提示。
+#[test]
+fn homework_detail_lists_attachments() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00+08:00").expect("固定时间");
+    let items = aggregate(
+        &[HomeworkInput {
+            description: Some(ActivityContent {
+                text: None,
+                has_media: false,
+                has_links: false,
+                attachments: vec![
+                    upload("题目.pdf", Some(1_234_567)),
+                    upload("参考答案.docx", Some(24_576)),
+                ],
+            }),
+            ..homework_input("附件作业", "2026-10-01 23:59:59", 0)
+        }],
+        now,
+    );
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Homework;
+    app.homework = Page::Ready(homework_data(items, None));
+    app.homework_detail = true;
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(text.contains("附件（2）："), "应列出附件数量：\n{text}");
+    assert!(
+        text.contains("题目.pdf（1.2 MB）"),
+        "应显示附件名称与大小：\n{text}"
+    );
+    assert!(
+        text.contains("参考答案.docx（24 KB）"),
+        "应显示附件名称与大小：\n{text}"
+    );
+    assert!(
+        text.contains("说明含附件"),
+        "附件内容无法在终端显示，应提示开网页：\n{text}"
+    );
+}
+
+/// 附件過多時只列前面幾項，並註明剩餘數量。
+#[test]
+fn homework_detail_caps_the_attachment_list() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00+08:00").expect("固定时间");
+    let attachments = (1..=7)
+        .map(|index| upload(&format!("附件{index}.pdf"), None))
+        .collect::<Vec<_>>();
+    let items = aggregate(
+        &[HomeworkInput {
+            description: Some(ActivityContent {
+                text: None,
+                has_media: false,
+                has_links: false,
+                attachments,
+            }),
+            ..homework_input("多附件作业", "2026-10-01 23:59:59", 0)
+        }],
+        now,
+    );
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Homework;
+    app.homework = Page::Ready(homework_data(items, None));
+    app.homework_detail = true;
+
+    let terminal = draw(WIDTH, 40, |frame| crate::tui::views::draw(frame, &mut app));
+    let text = screen_text(terminal.backend());
+    assert!(text.contains("附件（7）："), "数量应为全部附件数：\n{text}");
+    assert!(text.contains("附件5.pdf"), "应列出前几项：\n{text}");
+    assert!(!text.contains("附件6.pdf"), "超出的附件不应列出：\n{text}");
+    assert!(text.contains("…另有 2 个"), "应注明剩余数量：\n{text}");
 }

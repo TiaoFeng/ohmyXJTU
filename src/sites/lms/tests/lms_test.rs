@@ -392,3 +392,75 @@ fn course_activities_rejects_unsafe_identifiers_without_requests() {
         assert!(matches!(err, AppError::Protocol(_)), "{err:?}");
     }
 }
+
+/// 附件在詳情回應的**頂層** `uploads`（不在 `data` 底下）；只保留名稱與大小。
+#[test]
+fn parses_activity_uploads_from_the_detail_top_level() {
+    let value = json!({
+        "id": 9001,
+        "type": "homework",
+        "title": "第 3 次作业",
+        "data": { "description": "", "content": "" },
+        "uploads": [
+            {"id": 1, "name": "题目.pdf", "type": "application/pdf", "size": 1234567},
+            {"id": 2, "name": "参考答案.docx", "size": "24576"},
+            {"id": 3, "name": "   ", "size": null},
+            {"id": 4}
+        ]
+    });
+    let activity: LmsActivity =
+        crate::sites::deserialize_value(value, "查询活动详情").expect("应可解析");
+    assert_eq!(activity.uploads.len(), 4);
+    assert_eq!(activity.uploads[0].display_name(), "题目.pdf");
+    assert_eq!(activity.uploads[0].size_label().as_deref(), Some("1.2 MB"));
+    assert_eq!(activity.uploads[1].display_name(), "参考答案.docx");
+    assert_eq!(activity.uploads[1].size_label().as_deref(), Some("24 KB"));
+    // 沒有名稱或大小的附件仍留在清單裡，不會因為欄位缺漏就消失。
+    assert_eq!(activity.uploads[2].display_name(), "未命名附件");
+    assert_eq!(activity.uploads[2].size_label(), None);
+    assert_eq!(activity.uploads[3].display_name(), "未命名附件");
+
+    // 正文為空、只有附件時仍算「有可顯示的內容」，介面才不會整段藏起來。
+    let content = activity.body().expect("只有附件也是可显示的内容");
+    assert_eq!(content.text, None);
+    assert_eq!(content.attachments.len(), 4);
+}
+
+/// 附件欄位缺漏或型別異常都不影響其他欄位（詳情失敗會讓整批作業退回「待核实」）。
+#[test]
+fn tolerates_missing_or_malformed_uploads() {
+    for value in [
+        json!({"id": 1, "type": "homework"}),
+        json!({"id": 1, "type": "homework", "uploads": null}),
+        json!({"id": 1, "type": "homework", "uploads": {}}),
+        json!({"id": 1, "type": "homework", "uploads": "题目.pdf"}),
+    ] {
+        let activity: LmsActivity = crate::sites::deserialize_value(value.clone(), "查询活动详情")
+            .unwrap_or_else(|err| panic!("{value}: {err}"));
+        assert!(activity.uploads.is_empty(), "{value}");
+    }
+
+    // 個別項目異常時跳過該項，其餘照常解析。
+    let value = json!({
+        "id": 1,
+        "type": "homework",
+        "uploads": [{"name": "题目.pdf", "size": 1024}, 7, null]
+    });
+    let activity: LmsActivity =
+        crate::sites::deserialize_value(value, "查询活动详情").expect("应可解析");
+    assert_eq!(activity.uploads.len(), 1);
+    assert_eq!(activity.uploads[0].size_label().as_deref(), Some("1 KB"));
+}
+
+/// 大小顯示沿用參考實作的進位門檻（B／KB／MB）。
+#[test]
+fn upload_size_labels_follow_the_reference_thresholds() {
+    let label = |size: Option<u64>| LmsUpload { name: None, size }.size_label();
+    assert_eq!(label(Some(0)).as_deref(), Some("0 B"));
+    assert_eq!(label(Some(1023)).as_deref(), Some("1023 B"));
+    assert_eq!(label(Some(1024)).as_deref(), Some("1 KB"));
+    assert_eq!(label(Some(1024 * 1024 - 1)).as_deref(), Some("1023 KB"));
+    assert_eq!(label(Some(1024 * 1024)).as_deref(), Some("1.0 MB"));
+    assert_eq!(label(Some(5 * 1024 * 1024)).as_deref(), Some("5.0 MB"));
+    assert_eq!(label(None), None);
+}

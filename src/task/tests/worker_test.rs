@@ -1269,9 +1269,25 @@ fn homework_updates(harness: &mut Harness) -> Vec<HomeworkUpdate> {
         .collect()
 }
 
-/// 取出說明中的純文字（測試斷言用；是否含圖片另有斷言）。
-fn description_text(description: &Option<lms::ActivityText>) -> Option<&str> {
-    description.as_ref().and_then(|body| body.text.as_deref())
+/// 取出說明中的純文字（測試斷言用；是否含圖片、附件另有斷言）。
+fn description_text(description: &Option<lms::ActivityContent>) -> Option<&str> {
+    description
+        .as_ref()
+        .and_then(|content| content.text.as_deref())
+}
+
+/// 取出說明中的附件名稱（測試斷言用）。
+fn attachment_names(description: &Option<lms::ActivityContent>) -> Vec<String> {
+    description
+        .as_ref()
+        .map(|content| {
+            content
+                .attachments
+                .iter()
+                .map(|upload| upload.display_name().to_owned())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[test]
@@ -2385,7 +2401,8 @@ fn homework_carries_activity_description_without_extra_requests() {
             serde_json::json!({ "id": "11", "type": "homework", "title": "作业A",
                 "end_time": "2099-12-31 23:59:59",
                 "submit_by_group": false, "user_submit_count": 0,
-                "data": { "description": "<p>第一章习题</p><p>交到邮箱</p>", "content": "" } }),
+                "data": { "description": "<p>第一章习题</p><p>交到邮箱</p>", "content": "" },
+                "uploads": [{ "id": 1, "name": "题目.pdf", "size": 2048 }] }),
         )],
         expire_first_submission: false,
         submissions: AtomicUsize::new(0),
@@ -2406,6 +2423,11 @@ fn homework_carries_activity_description_without_extra_requests() {
         Some("第一章习题\n交到邮箱"),
         "作业说明应为去除标签的纯文字"
     );
+    assert_eq!(
+        attachment_names(&last.items[0].description),
+        ["题目.pdf"],
+        "附件应随详情一起带出"
+    );
 
     // 第二次载入命中快取：说明仍须带出，且不得重新查询课程、活动或详情
     // （考勤学期查询与作业快取无关，不在此限）。
@@ -2425,6 +2447,11 @@ fn homework_carries_activity_description_without_extra_requests() {
         description_text(&last.items[0].description),
         Some("第一章习题\n交到邮箱"),
         "快取命中时说明不得遗失"
+    );
+    assert_eq!(
+        attachment_names(&last.items[0].description),
+        ["题目.pdf"],
+        "快取命中时附件不得遗失"
     );
     assert_eq!(api_calls(&site), before, "快取命中不应重新查询 LMS 资料");
 }

@@ -726,6 +726,7 @@ fn lms_activity(id: &str, kind: &str) -> LmsActivity {
         submit_by_group: None,
         group_id: None,
         data: None,
+        uploads: Vec::new(),
         user_submit_count: None,
         published: None,
     }

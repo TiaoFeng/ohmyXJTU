@@ -11,7 +11,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::domain::homework::parse_time;
-use crate::sites::lms::{ActivityKind, ActivityText};
+use crate::sites::lms::{ActivityContent, ActivityKind, LmsUpload};
 use crate::text::{fit_display, wrap_display};
 use crate::tui::app::{App, NavItem, ScrollState};
 use crate::tui::theme::THEME;
@@ -42,28 +42,34 @@ const ROW_CHROME_WIDTH: u16 = 3;
 /// 詳情面板的預設高度（課表與流水頁；作業頁依內容區高度自行計算）。
 const DETAIL_HEIGHT: u16 = 7;
 
-/// 說明含圖片等無法以文字呈現的內容時的提示。
-const MEDIA_HINT: &str = "（说明含图片，按 o 打开思源学堂后自行查看）";
+/// 詳情框列出的附件數量上限（比照提交記錄的筆數上限）。
+const ATTACHMENT_LIMIT: usize = 5;
 
-/// 說明含連結（`href` 目標不會出現在純文字裡）時的提示。
-const LINK_HINT: &str = "（说明含链接，按 o 打开思源学堂后自行查看）";
-
-/// 說明同時含圖片與連結時的提示。
-const MEDIA_LINK_HINT: &str = "（说明含图片与链接，按 o 打开思源学堂后自行查看）";
-
-/// 說明含無法以文字呈現的內容（圖片、連結）時的提示。
+/// 說明含無法以文字呈現的內容（圖片、連結、附件）時的提示。
 ///
-/// 純圖片說明沒有任何文字可顯示；連結的文字雖保留，`href` 目標卻會遺失。兩者都
-/// 建議使用者按 `o` 開網頁查看原文；但用詞刻意只寫「打开思源学堂后自行查看」：
-/// `o` 對資料等活動只開啟思源學堂首頁（見 `Worker::open_activity_url`），作業頁
-/// 則開啟所屬課程的作業列表，都不是該活動的頁面，因此不承諾一鍵直達。
-fn description_hint(text: &ActivityText) -> Option<&'static str> {
-    match (text.has_media, text.has_links) {
-        (true, true) => Some(MEDIA_LINK_HINT),
-        (true, false) => Some(MEDIA_HINT),
-        (false, true) => Some(LINK_HINT),
-        (false, false) => None,
+/// 純圖片說明沒有任何文字可顯示；連結的文字雖保留，`href` 目標卻會遺失；附件的
+/// 內容則要在瀏覽器下載。三者都建議使用者按 `o` 開網頁查看原文，因此依實際情形
+/// 組句（只列出現的項目）。用詞刻意只寫「打开思源学堂后自行查看」：`o` 對資料等
+/// 活動只開啟思源學堂首頁（見 `Worker::open_activity_url`），作業頁則開啟所屬
+/// 課程的作業列表，都不是該活動的頁面，因此不承諾一鍵直達。
+fn description_hint(content: &ActivityContent) -> Option<String> {
+    let mut kinds = Vec::new();
+    if content.has_media {
+        kinds.push("图片");
     }
+    if content.has_links {
+        kinds.push("链接");
+    }
+    if !content.attachments.is_empty() {
+        kinds.push("附件");
+    }
+    if kinds.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "（说明含{}，按 o 打开思源学堂后自行查看）",
+        kinds.join("、")
+    ))
 }
 
 /// 說明區塊的標題：作業為「作业描述」，其他活動為「内容」。
@@ -152,23 +158,57 @@ pub(super) fn push_multiline(
     }
 }
 
-/// 加入說明區塊：標題、正文，以及無法以文字呈現內容的提示。
+/// 加入說明與附件區塊：標題、正文、附件清單，以及無法呈現內容的提示。
 ///
-/// 作業頁與思源學堂詳情頁共用同一套規則：有說明才顯示標題，且圖片、連結的目標
-/// 都不在純文字裡，必須明講使用者才知道要開網頁（見 [`description_hint`]）。
+/// 作業頁與思源學堂詳情頁共用同一套規則：標題一律顯示（整段可能只有圖片、
+/// 連結或附件，標題是這些項目的歸屬）；附件逐項列出名稱與大小；圖片、連結與
+/// 附件的目標都不在純文字裡，必須明講使用者才知道要開網頁（見 [`description_hint`]）。
 /// 標題由 `kind` 推導（見 [`description_label`]），呼叫端不必自行挑選文案。
 pub(super) fn push_description(
     lines: &mut Vec<Line<'static>>,
-    description: &ActivityText,
+    content: &ActivityContent,
     kind: ActivityKind,
     width: usize,
 ) {
     push_wrapped(lines, description_label(kind), THEME.muted_style(), width);
-    if let Some(text) = &description.text {
+    if let Some(text) = &content.text {
         push_multiline(lines, text, Style::default().fg(THEME.text), width);
     }
-    if let Some(hint) = description_hint(description) {
+    if !content.attachments.is_empty() {
+        push_attachments(lines, &content.attachments, width);
+    }
+    if let Some(hint) = description_hint(content) {
         push_wrapped(lines, hint, THEME.muted_style(), width);
+    }
+}
+
+/// 附件清單：標題＋逐項「· 檔名（大小）」。
+///
+/// 只列名稱與大小：內容要在瀏覽器下載，TUI 不做檔案落地。檔名過長時自然換行，
+/// 數量過多時截斷並註明剩餘數量——這份清單是為了讓使用者判斷「要不要開網頁」，
+/// 不是檔案管理器（提交記錄同樣有筆數上限）。
+fn push_attachments(lines: &mut Vec<Line<'static>>, attachments: &[LmsUpload], width: usize) {
+    push_wrapped(
+        lines,
+        format!("附件（{}）：", attachments.len()),
+        THEME.muted_style(),
+        width,
+    );
+    for attachment in attachments.iter().take(ATTACHMENT_LIMIT) {
+        let mut item = format!("· {}", attachment.display_name());
+        if let Some(size) = attachment.size_label() {
+            item.push_str(&format!("（{size}）"));
+        }
+        push_wrapped(lines, item, Style::default().fg(THEME.text), width);
+    }
+    let rest = attachments.len().saturating_sub(ATTACHMENT_LIMIT);
+    if rest > 0 {
+        push_wrapped(
+            lines,
+            format!("…另有 {rest} 个"),
+            THEME.muted_style(),
+            width,
+        );
     }
 }
 

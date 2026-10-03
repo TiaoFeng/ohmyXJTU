@@ -9,7 +9,8 @@ mod js_object;
 pub mod models;
 
 pub use models::{
-    ActivityKind, ActivityText, LmsActivity, LmsCourse, LmsSubmission, LmsSubmissionList,
+    ActivityContent, ActivityKind, LmsActivity, LmsCourse, LmsSubmission, LmsSubmissionList,
+    LmsUpload,
 };
 
 use serde::de::DeserializeOwned;
@@ -110,8 +111,8 @@ pub struct SubmissionSummary {
     pub count: Option<usize>,
     /// 無法確認的原因。
     pub note: Option<String>,
-    /// 作業說明（純文字＋是否含圖片）；`None` 代表詳情沒有可顯示的說明。
-    pub description: Option<ActivityText>,
+    /// 作業說明與附件（正文＋附件）；`None` 代表詳情沒有可顯示的內容。
+    pub description: Option<ActivityContent>,
 }
 
 /// 活動詳情缺少 `submit_by_group` 時的說明。

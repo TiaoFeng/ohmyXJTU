@@ -4,6 +4,7 @@
 //! 調度核心插入控制任務；每項作業完成後節流地回報部分結果。學期判定
 //!（明確選擇 → 考勤當前學期 → 記憶 → 選擇器）與課程過濾也在此。
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use chrono::Local;
@@ -15,6 +16,8 @@ use crate::session::SiteKind;
 use crate::sites::lms::{ActivityKind, LmsActivity, LmsCourse, submission_failure_note};
 use crate::task::protocol::{Event, FailedTarget, HomeworkIssue, HomeworkUpdate, Job};
 
+use super::cache::{ActivitiesOutcome, DetailOutcome};
+use super::timing::Phase;
 use super::{SiteFailure, Worker, is_recoverable};
 
 /// 作業載入進度事件的節流間隔。
@@ -22,6 +25,12 @@ use super::{SiteFailure, Worker, is_recoverable};
 /// 每完成這麼多項作業（或每門課程結束）才送出一次完整快照，避免大型學期
 /// 逐項重算彙總造成 O(N²) 成本與無界的事件佇列。
 const PROGRESS_EMIT_INTERVAL: usize = 10;
+
+/// 每次併發抓取的課程數。
+///
+/// 取傳輸層的併發上限：一批就是一個往返波次。批次之間仍會回到步進迴圈
+///（排空控制任務），因此這個值也決定了「控制任務最多會被擋多久」。
+const ACTIVITY_BATCH: usize = crate::http::batch::MAX_CONCURRENT_REQUESTS;
 
 /// 作業載入的步進階段。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,6 +72,10 @@ struct HomeworkRunner {
     course_index: usize,
     /// 目前課程的作業活動。
     activities: Vec<LmsActivity>,
+    /// 已併發預取、等待取用的課程活動（鍵為課程索引；已過濾為作業）。
+    prefetched: HashMap<usize, ActivitiesOutcome>,
+    /// 已併發預取、等待取用的活動詳情（鍵為活動識別碼）。
+    prefetched_details: HashMap<String, DetailOutcome>,
     /// 下一個活動的索引。
     activity_index: usize,
     /// 已彙總的輸入。
@@ -105,6 +118,8 @@ impl HomeworkRunner {
             term_options,
             course_index: 0,
             activities: Vec::new(),
+            prefetched: HashMap::new(),
+            prefetched_details: HashMap::new(),
             activity_index: 0,
             inputs: Vec::new(),
             failed_courses: 0,
@@ -146,6 +161,14 @@ impl HomeworkRunner {
             requests,
         }
     }
+}
+
+/// 只保留作業類型的活動（其餘類型在作業頁沒有用途）。
+fn homework_only(activities: Vec<LmsActivity>) -> Vec<LmsActivity> {
+    activities
+        .into_iter()
+        .filter(|activity| activity.kind() == ActivityKind::Homework)
+        .collect()
 }
 
 /// 彙總「待核实」作業的共同原因（同一原因只列一次，依項數遞減再按文字排序）。
@@ -201,7 +224,11 @@ impl Worker {
 
         let mut runner = match self.begin_homework(force) {
             Ok(Some(runner)) => runner,
-            Ok(None) => return,
+            // 沒有課程或已改為等待選擇學期：本次載入到此為止。
+            Ok(None) => {
+                self.finish_timing();
+                return;
+            }
             Err(failure) => {
                 self.report_data_failure(failure.site, job, generation, failure.err);
                 return;
@@ -210,9 +237,12 @@ impl Worker {
 
         loop {
             if !self.drain_channel(&job) {
+                // 收到結束指令：不再輸出報告。
+                self.timing.abandon();
                 return;
             }
             if self.homework_cancelled(generation, epoch) {
+                self.timing.abandon();
                 return;
             }
             // 互動式資料任務（按 `o` 開啟網頁）不應等待整輪載入：在下一個
@@ -222,16 +252,19 @@ impl Worker {
             // 資料繼續載入並回填畫面。
             let login_pending = self.flush_interactive();
             if self.homework_cancelled(generation, epoch) {
+                self.timing.abandon();
                 return;
             }
             if login_pending {
                 // 觸發了互動式登入：暫停本輪載入並重新排隊——登入完成（或
-                // 取消）後會再跑一次，已取得的資料多在快取中。
+                // 取消）後會再跑一次，已取得的資料多在快取中。計時不結束，
+                // 登入時間才會計入同一次使用者請求。
                 self.merge_data_job(job, None);
                 return;
             }
             if matches!(runner.stage, HomeworkStage::Done) {
                 self.emit_homework(&runner);
+                self.finish_timing();
                 return;
             }
             if let Err(err) = self.homework_step(&mut runner) {
@@ -281,7 +314,12 @@ impl Worker {
             requests_baseline: self.request_count(),
         };
 
-        let (courses, skipped_data) = self.lms_courses(force)?;
+        let (courses, skipped_data) = {
+            let started = self.timing.mark();
+            let courses = self.lms_courses(force);
+            self.timing.record(Phase::Courses, started, 1);
+            courses?
+        };
         if skipped_data > 0 {
             self.emit(Event::Notice(format!(
                 "已跳过 {skipped_data} 项无法解析的思源学堂数据"
@@ -293,7 +331,12 @@ impl Worker {
             return Ok(None);
         }
 
-        let Some((term, term_source)) = self.homework_term(&courses)? else {
+        let Some((term, term_source)) = ({
+            let started = self.timing.mark();
+            let resolved = self.homework_term(&courses);
+            self.timing.record(Phase::Term, started, 1);
+            resolved?
+        }) else {
             return Ok(None);
         };
         let term_options = semester::term_options(&courses, term);
@@ -388,21 +431,18 @@ impl Worker {
     fn homework_step(&mut self, runner: &mut HomeworkRunner) -> AppResult<()> {
         match runner.stage {
             HomeworkStage::Activities => {
-                let course_id = runner
+                runner
                     .current_course()
-                    .map(|course| course.id.clone())
                     .ok_or_else(|| AppError::protocol("课程索引越界"))?;
-                match self.lms_activities(&course_id, runner.force) {
+                match self.course_activities_step(runner)? {
                     Ok((activities, skipped)) => {
                         if skipped > 0 {
                             self.emit(Event::Notice(format!(
                                 "已跳过 {skipped} 项无法解析的思源学堂数据"
                             )));
                         }
-                        runner.activities = activities
-                            .into_iter()
-                            .filter(|activity| activity.kind() == ActivityKind::Homework)
-                            .collect();
+                        // 預取時已過濾為作業類型。
+                        runner.activities = activities;
                         runner.activity_index = 0;
                         runner.stage = if runner.activities.is_empty() {
                             HomeworkStage::AdvanceCourse
@@ -430,8 +470,21 @@ impl Worker {
                     .current_course()
                     .cloned()
                     .ok_or_else(|| AppError::protocol("课程索引越界"))?;
-                let input = self.homework_input(&course, &activity, runner.force)?;
+                // 詳情多已在同一批課程預取時一併抓回。
+                let detail = match runner.prefetched_details.remove(&activity.id) {
+                    Some(detail) => detail,
+                    None => {
+                        // 防禦：預取遺漏（例如活動識別碼在批次後才出現）時
+                        // 就地補抓一筆，不讓作業無故變成「待核实」。
+                        let started = self.timing.mark();
+                        let detail = self.lms_activity_detail(&activity.id, runner.force);
+                        self.timing.record(Phase::Detail, started, 1);
+                        detail
+                    }
+                };
+                let input = self.homework_input(&course, &activity, detail, runner.force)?;
                 runner.inputs.push(input);
+                self.timing.note_first_item();
 
                 runner.activity_index += 1;
                 runner.since_emit += 1;
@@ -462,11 +515,85 @@ impl Worker {
         Ok(())
     }
 
-    /// 取得單一作業的提交摘要（詳情先行確定小組，再抓提交記錄）。
+    /// 取得目前課程的活動：優先取用預取結果，否則併發抓取後續數門課程。
+    ///
+    /// 一次抓取 [`ACTIVITY_BATCH`] 門課程並放進 [`HomeworkRunner::prefetched`]，
+    /// 之後每一步直接取用；同一批課程的**作業詳情**也在這裡一併預取（放進
+    /// [`HomeworkRunner::prefetched_details`]），提交階段只負責算提交摘要。
+    /// 步進的節奏（每一步之間排空控制任務）因此不變，但序列往返的波次少了
+    /// 好幾倍；批次內單門課程失敗仍只影響那一門。
+    fn course_activities_step(
+        &mut self,
+        runner: &mut HomeworkRunner,
+    ) -> AppResult<ActivitiesOutcome> {
+        if let Some(result) = runner.prefetched.remove(&runner.course_index) {
+            return Ok(result);
+        }
+        let start = runner.course_index;
+        let course_ids: Vec<String> = runner
+            .courses
+            .iter()
+            .skip(start)
+            .take(ACTIVITY_BATCH)
+            .map(|course| course.id.clone())
+            .collect();
+
+        let started = self.timing.mark();
+        let results = self.lms_activities_batch(&course_ids, runner.force)?;
+        self.timing
+            .record(Phase::Activities, started, results.len());
+
+        // 預取時就只留作業，並把整批課程的作業一起收集起來：詳情一次抓整批，
+        // 才不會因為「每門課只有一兩項作業」而讓每一批只送出一個請求。
+        let results: Vec<ActivitiesOutcome> = results
+            .into_iter()
+            .map(|result| result.map(|(activities, skipped)| (homework_only(activities), skipped)))
+            .collect();
+        for result in &results {
+            let Ok((activities, _)) = result else {
+                continue;
+            };
+            // 診斷用：統計列表本身就帶了哪些提交欄位。若幾乎都有值，就能
+            // 靠列表判定提交狀態、只在開啟說明時才抓詳情。
+            for activity in activities {
+                self.timing.note_list_item(
+                    activity.submit_by_group.is_some(),
+                    activity.user_submit_count.is_some(),
+                    activity.group_id.is_some(),
+                );
+            }
+        }
+
+        let homework_ids: Vec<String> = results
+            .iter()
+            .filter_map(|result| result.as_ref().ok())
+            .flat_map(|(activities, _)| activities.iter().map(|activity| activity.id.clone()))
+            .collect();
+        if !homework_ids.is_empty() {
+            let started = self.timing.mark();
+            let details = self.lms_detail_batch(&homework_ids, runner.force)?;
+            self.timing.record(Phase::Detail, started, details.len());
+            for (activity_id, detail) in homework_ids.into_iter().zip(details) {
+                runner.prefetched_details.insert(activity_id, detail);
+            }
+        }
+
+        let mut results = results.into_iter();
+        let current = results
+            .next()
+            .unwrap_or_else(|| Err(AppError::protocol("课程活动批次为空")));
+        for (offset, result) in results.enumerate() {
+            runner.prefetched.insert(start + offset + 1, result);
+        }
+        Ok(current)
+    }
+
+    /// 取得單一作業的提交摘要（詳情已由批次預取提供）。
     fn homework_input(
         &mut self,
         course: &LmsCourse,
         activity: &LmsActivity,
+        detail: DetailOutcome,
         force: bool,
     ) -> AppResult<HomeworkInput> {
         let mut input = HomeworkInput {
@@ -483,7 +610,17 @@ impl Worker {
             note: None,
         };
 
-        match self.lms_submission_summary(&activity.id, force) {
+        let detail = match detail {
+            Ok(detail) => detail,
+            // 登入態失效與連線層錯誤向上傳播；其他單項失敗保留「待核实」。
+            Err(err) if !is_recoverable(&err) => return Err(err),
+            Err(err) => {
+                input.note = Some(submission_failure_note(&err));
+                return Ok(input);
+            }
+        };
+
+        match self.lms_submission_summary_from_detail(&activity.id, &detail, force) {
             Ok(summary) => {
                 input.submit_by_group = summary.submit_by_group;
                 input.submission_count = summary.count;
@@ -498,7 +635,10 @@ impl Worker {
     }
 
     /// 發送一次作業載入更新（附耗時與本次載入已送出的請求數）。
-    fn emit_homework(&self, runner: &HomeworkRunner) {
+    fn emit_homework(&mut self, runner: &HomeworkRunner) {
+        if !runner.inputs.is_empty() {
+            self.timing.note_first_shown();
+        }
         let update = runner.update(
             runner.started.elapsed(),
             self.request_count()

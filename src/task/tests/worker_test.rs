@@ -186,6 +186,8 @@ impl Harness {
                 cache: LmsCache::default(),
                 known_term: None,
                 chosen_term: None,
+                timing: LoadTiming::default(),
+                login_started: None,
                 shutdown: false,
             },
             events: event_rx,
@@ -1332,6 +1334,162 @@ fn parse_date_reports_category_without_echoing_server_value() {
 }
 
 #[test]
+fn homework_load_ends_the_timing_span() {
+    // 每次全新的作業載入都會開始一次計時；載入結束（含無課程的早退）時
+    // 必須收尾，否則下一次載入會把兩次之間的時間算進去。
+    let mut harness = harness(fake_flow(0));
+    harness.login_both_sites();
+
+    harness
+        .dispatch(Job::LoadHomework { force: false })
+        .expect("作业加载应当成功");
+
+    assert!(harness.worker.timing.is_idle(), "载入结束后计时应已收尾");
+    let events = harness.drain_events();
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::Notice(text) if text.starts_with("计时"))),
+        "默认（未设 OHMYXJTU_TIMING）不得输出计时报告：{events:?}"
+    );
+}
+
+#[test]
+fn finish_timing_emits_a_report_only_when_enabled() {
+    let mut harness = harness(|request: &HttpRequest| panic!("不应发起请求：{}", request.url));
+    // 沒有進行中的計時：即使收尾也不輸出任何訊息。
+    harness.worker.finish_timing();
+    assert!(harness.drain_events().is_empty(), "未计时不应有事件");
+
+    harness.worker.timing.begin(true);
+    harness.worker.finish_timing();
+    let events = harness.drain_events();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::Notice(text) if text.starts_with("计时 总"))),
+        "启用后应输出计时报告：{events:?}"
+    );
+}
+
+#[test]
+fn homework_prefetches_details_without_repeating_or_cross_wiring_them() {
+    // 五門課程各一項作業：詳情與活動同批預取。每項活動的詳情必須恰好查一次
+    //（預取與就地補抓都跑就會是兩次），且各自的說明不得互相錯掛。
+    let site = Arc::new(FakeHomeworkSite {
+        seen: Arc::new(Mutex::new(Vec::new())),
+        courses: serde_json::json!({ "courses": [
+            { "id": "1", "name": "课程A", "semester": { "code": "2026-1" } },
+            { "id": "2", "name": "课程B", "semester": { "code": "2026-1" } },
+            { "id": "3", "name": "课程C", "semester": { "code": "2026-1" } },
+            { "id": "4", "name": "课程D", "semester": { "code": "2026-1" } },
+            { "id": "5", "name": "课程E", "semester": { "code": "2026-1" } },
+        ]}),
+        activities: vec![
+            (
+                "1",
+                serde_json::json!({ "activities": [{ "id": "11", "type": "homework",
+                    "title": "作业A", "end_time": "2099-12-31 23:59:59" }] }),
+            ),
+            (
+                "2",
+                serde_json::json!({ "activities": [{ "id": "12", "type": "homework",
+                    "title": "作业B", "end_time": "2099-12-31 23:59:59" }] }),
+            ),
+            (
+                "3",
+                serde_json::json!({ "activities": [{ "id": "13", "type": "homework",
+                    "title": "作业C", "end_time": "2099-12-31 23:59:59" }] }),
+            ),
+            (
+                "4",
+                serde_json::json!({ "activities": [{ "id": "14", "type": "homework",
+                    "title": "作业D", "end_time": "2099-12-31 23:59:59" }] }),
+            ),
+            (
+                "5",
+                serde_json::json!({ "activities": [{ "id": "15", "type": "homework",
+                    "title": "作业E", "end_time": "2099-12-31 23:59:59" }] }),
+            ),
+        ],
+        details: (1..=5)
+            .map(|index| {
+                let id: &'static str = match index {
+                    1 => "11",
+                    2 => "12",
+                    3 => "13",
+                    4 => "14",
+                    _ => "15",
+                };
+                let title: &'static str = match index {
+                    1 => "作业A",
+                    2 => "作业B",
+                    3 => "作业C",
+                    4 => "作业D",
+                    _ => "作业E",
+                };
+                let description: &'static str = match index {
+                    1 => "说明A",
+                    2 => "说明B",
+                    3 => "说明C",
+                    4 => "说明D",
+                    _ => "说明E",
+                };
+                (
+                    id,
+                    serde_json::json!({ "id": id, "type": "homework", "title": title,
+                        "end_time": "2099-12-31 23:59:59", "submit_by_group": false,
+                        "user_submit_count": 0,
+                        "data": { "description": format!("<p>{description}</p>") } }),
+                )
+            })
+            .collect(),
+        expire_first_submission: false,
+        submissions: AtomicUsize::new(0),
+        attendance_term: None,
+    });
+
+    let system = Arc::clone(&site);
+    let mut harness = harness(move |request| system.handle(request));
+    harness.login_lms_only();
+    harness.worker.config.homework_term = Some("2026-2027-1".to_owned());
+
+    harness
+        .dispatch(Job::LoadHomework { force: true })
+        .expect("作业加载应当成功");
+
+    let updates = homework_updates(&mut harness);
+    let last = updates.last().expect("最终更新");
+    let descriptions: Vec<&str> = last
+        .items
+        .iter()
+        .map(|item| {
+            item.description
+                .as_ref()
+                .and_then(|content| content.text.as_deref())
+                .unwrap_or("<none>")
+        })
+        .collect();
+    assert_eq!(
+        descriptions,
+        ["说明A", "说明B", "说明C", "说明D", "说明E"],
+        "每项作业应各自带自己的说明"
+    );
+
+    let seen = site.urls();
+    for activity_id in ["11", "12", "13", "14", "15"] {
+        let count = seen
+            .iter()
+            .filter(|url| url.ends_with(&format!("/api/activities/{activity_id}")))
+            .count();
+        assert_eq!(
+            count, 1,
+            "活动 {activity_id} 的详情应恰好查询一次：{seen:?}"
+        );
+    }
+}
+
+#[test]
 fn homework_filters_to_current_term_and_streams_progress() {
     // 截止時間取遠未來：本測試需要「尚未截止」的作業（`待提交`），
     // 固定的近日日期會隨時鐘走過而變成「逾期」。
@@ -1412,6 +1570,109 @@ fn homework_filters_to_current_term_and_streams_progress() {
             .count(),
         1
     );
+}
+
+#[test]
+fn homework_fetches_activity_lists_in_batches_without_repeating_requests() {
+    // 五門課程（超過一批的並行上限）：每門課程的活動仍恰好查一次，結果依
+    // 課程順序彙總。預取只是把同一批的請求同時送出，不會重複查詢既有課程。
+    let courses: Vec<serde_json::Value> = ["A", "B", "C", "D", "E"]
+        .iter()
+        .enumerate()
+        .map(|(index, suffix)| {
+            serde_json::json!({
+                "id": (index + 1).to_string(),
+                "name": format!("课程{suffix}"),
+                "semester": { "code": "2026-1" },
+            })
+        })
+        .collect();
+    let site = Arc::new(FakeHomeworkSite {
+        seen: Arc::new(Mutex::new(Vec::new())),
+        courses: serde_json::json!({ "courses": courses }),
+        activities: vec![
+            (
+                "1",
+                serde_json::json!({ "activities": [
+                    { "id": "11", "type": "homework", "title": "作业A",
+                      "end_time": "2099-12-31 23:59:59" },
+                ]}),
+            ),
+            (
+                "2",
+                serde_json::json!({ "activities": [
+                    { "id": "12", "type": "homework", "title": "作业B",
+                      "end_time": "2099-12-31 23:59:59" },
+                ]}),
+            ),
+            (
+                "3",
+                serde_json::json!({ "activities": [
+                    { "id": "13", "type": "homework", "title": "作业C",
+                      "end_time": "2099-12-31 23:59:59" },
+                ]}),
+            ),
+            (
+                "4",
+                serde_json::json!({ "activities": [
+                    { "id": "14", "type": "homework", "title": "作业D",
+                      "end_time": "2099-12-31 23:59:59" },
+                ]}),
+            ),
+            (
+                "5",
+                serde_json::json!({ "activities": [
+                    { "id": "15", "type": "homework", "title": "作业E",
+                      "end_time": "2099-12-31 23:59:59" },
+                ]}),
+            ),
+        ],
+        details: ["11", "12", "13", "14", "15"]
+            .iter()
+            .enumerate()
+            .map(|(index, id)| {
+                let suffix = ["A", "B", "C", "D", "E"][index];
+                (
+                    *id,
+                    serde_json::json!({ "id": id, "type": "homework",
+                        "title": format!("作业{suffix}"),
+                        "end_time": "2099-12-31 23:59:59",
+                        "submit_by_group": false, "user_submit_count": 0 }),
+                )
+            })
+            .collect(),
+        expire_first_submission: false,
+        submissions: AtomicUsize::new(0),
+        attendance_term: Some(("2026-2027", "第一学期")),
+    });
+
+    let system = Arc::clone(&site);
+    let mut harness = harness(move |request| system.handle(request));
+    harness.login_both_sites();
+
+    harness
+        .dispatch(Job::LoadHomework { force: false })
+        .expect("作业加载应当成功");
+
+    let last = homework_updates(&mut harness).pop().expect("最终更新");
+    let titles: Vec<&str> = last.items.iter().map(|item| item.title.as_str()).collect();
+    assert_eq!(
+        titles,
+        ["作业A", "作业B", "作业C", "作业D", "作业E"],
+        "结果应依课程顺序彙總"
+    );
+
+    let seen = site.urls();
+    for course in 1..=5 {
+        let requests = seen
+            .iter()
+            .filter(|url| url.ends_with(&format!("/courses/{course}/activities")))
+            .count();
+        assert_eq!(
+            requests, 1,
+            "第 {course} 门课程的活动应恰好查询一次：{seen:?}"
+        );
+    }
 }
 
 #[test]
@@ -2957,6 +3218,11 @@ fn harness_with_switch_during_open(injected: Job) -> Harness {
                     kind: lms::ActivityKind::Lesson,
                 },
             );
+            return Ok(json(serde_json::json!({ "activities": [] })));
+        }
+        if url.ends_with("/courses/2/activities") {
+            // 活動查詢以一批（並行上限）為單位送出：第二門課程與第一門同時
+            // 發出，因此即使在開啟任務期間取消，這個請求仍可能已經送出。
             return Ok(json(serde_json::json!({ "activities": [] })));
         }
         if url.contains("/player-url") {

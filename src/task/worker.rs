@@ -29,6 +29,7 @@ use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::thread;
+use std::time::Instant;
 
 use crate::auth::LoginDriver;
 use crate::config::Config;
@@ -46,8 +47,10 @@ mod credentials;
 mod data;
 mod homework;
 mod login;
+mod timing;
 
 use cache::LmsCache;
+use timing::LoadTiming;
 
 /// 單一任務（及其自動重試鏈）允許的自動重新登入次數上限。
 ///
@@ -189,6 +192,10 @@ struct Worker {
     /// 它不持久化，重新開啟程式後仍以考勤為權威，而設定檔中的
     /// `homework_term` 則作為考勤不可用時的後備。
     chosen_term: Option<TermCode>,
+    /// 作業載入的分階段計時（診斷用，見 [`timing`]）。
+    timing: LoadTiming,
+    /// 最近一次自動重新登入的起點（診斷用）。
+    login_started: Option<Instant>,
     /// 已收到結束指令；[`Worker::run`] 於迴圈開頭立即返回。
     shutdown: bool,
 }
@@ -220,6 +227,8 @@ pub fn spawn(config: Config, vault: Vault) -> AppResult<(Sender<Job>, Receiver<E
         cache: LmsCache::default(),
         known_term: None,
         chosen_term: None,
+        timing: LoadTiming::default(),
+        login_started: None,
         shutdown: false,
     };
 
@@ -283,6 +292,11 @@ impl Worker {
         if let Some(key) = job.data_key() {
             self.relogin.reset(&key);
         }
+        // 每次全新的作業載入都是新的一次量測：自動重登後的重試走
+        // [`Self::run_data_job`]，不會重置，登入時間因此計入同一輪。
+        if matches!(job, Job::LoadHomework { .. }) {
+            self.timing.begin(timing::enabled());
+        }
         self.run_data_job(job);
     }
 
@@ -296,9 +310,11 @@ impl Worker {
         // 帳號切換失敗時必須丟棄待存憑證：交由 [`Self::dispatch_control`] 統一
         // 處理（含互動驗證步驟），這裡只需要清掉暫存的驗證碼圖片。
         if let Err(err) = self.dispatch_control(job) {
-            // 登入類任務出錯即視為本次登入結束：清掉暫存的驗證碼圖片。
+            // 登入類任務出錯即視為本次登入結束：清掉暫存的驗證碼圖片，
+            // 並丟棄計時起點（該段時間仍留在載入的牆鐘總量中）。
             if target == FailedTarget::Login {
                 self.clear_captcha();
+                self.login_started = None;
             }
             // 驗證碼填錯已由 [`Self::dispatch_control`] 回報成可重試事件
             //（介面要留在輸入畫面），不另外彈出一般失敗。
@@ -335,7 +351,12 @@ impl Worker {
     /// 回報資料任務失敗。
     ///
     /// `site` 為實際失敗的站點；無法判定時為 `None`（介面就不會把它當成登入失敗）。
-    fn emit_failed(&self, job: &Job, site: Option<SiteKind>, err: AppError) {
+    fn emit_failed(&mut self, job: &Job, site: Option<SiteKind>, err: AppError) {
+        // 作業載入到此為止：先輸出計時報告（若啟用），再讓失敗訊息蓋過它——
+        // 終止失敗時使用者要看的是錯誤原因。
+        if matches!(job, Job::LoadHomework { .. }) {
+            self.finish_timing();
+        }
         let what = job.label();
         self.emit(Event::Failed {
             what: if what.is_empty() {
@@ -636,6 +657,13 @@ impl Worker {
     }
 
     // ── 工具 ─────────────────────────────────────────────
+
+    /// 結束作業載入計時：啟用時輸出一行分階段報告（見 [`timing`]）。
+    fn finish_timing(&mut self) {
+        if let Some(report) = self.timing.take_report() {
+            self.emit(Event::Notice(report));
+        }
+    }
 
     /// 目前會話已送出的請求數（診斷用）。
     fn request_count(&self) -> usize {

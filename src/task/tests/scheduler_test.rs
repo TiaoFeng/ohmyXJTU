@@ -96,6 +96,8 @@ impl ThreadWorker {
             cache: LmsCache::default(),
             known_term: None,
             chosen_term: None,
+            timing: LoadTiming::default(),
+            login_started: None,
             shutdown: false,
         };
 
@@ -221,7 +223,15 @@ fn control_jobs_interrupt_homework_between_steps() {
         site_seen.lock().expect("lock").push(url.clone());
 
         if url.ends_with("/api/my-courses") {
-            return courses_response();
+            // 六門課程：一批只抓前三門，第四門之後屬於下一批。
+            return Ok(json(serde_json::json!({ "courses": [
+                { "id": "1", "name": "编译原理", "semester": { "code": "2026-1" } },
+                { "id": "2", "name": "操作系统", "semester": { "code": "2026-1" } },
+                { "id": "3", "name": "计算机网络", "semester": { "code": "2026-1" } },
+                { "id": "4", "name": "数据库原理", "semester": { "code": "2026-1" } },
+                { "id": "5", "name": "软件工程", "semester": { "code": "2026-1" } },
+                { "id": "6", "name": "数字逻辑", "semester": { "code": "2026-1" } },
+            ]})));
         }
         if url.ends_with("/timetable/semesters") {
             return semester_response();
@@ -236,7 +246,8 @@ fn control_jobs_interrupt_homework_between_steps() {
             release_rx.lock().expect("lock").recv().expect("等待释放");
             return Ok(json(serde_json::json!({ "activities": [] })));
         }
-        if url.ends_with("/courses/2/activities") {
+        if url.ends_with("/courses/2/activities") || url.ends_with("/courses/3/activities") {
+            // 同一批內的其餘課程（與第一門同時送出）。
             return Ok(json(serde_json::json!({ "activities": [] })));
         }
         panic!("未预期的请求：{url}");
@@ -267,12 +278,14 @@ fn control_jobs_interrupt_homework_between_steps() {
         "取消后应通知界面解除加载中状态"
     );
 
+    // 活動查詢以「一批（並行上限）門課程」為單位送出：取消發生在批次之後，
+    // 因此在途的請求可能已經送出（結果一律丟棄），但**不得再啟動下一批**。
     let seen = seen.lock().expect("lock").clone();
     assert!(
         !seen
             .iter()
-            .any(|url| url.ends_with("/courses/2/activities")),
-        "取消后不应继续查询下一门课程：{seen:?}"
+            .any(|url| url.ends_with("/courses/4/activities")),
+        "取消后不得再启动下一批查询：{seen:?}"
     );
 }
 

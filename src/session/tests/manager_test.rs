@@ -325,6 +325,136 @@ fn send_reports_expired_session_when_login_page_is_returned() {
 }
 
 #[test]
+fn send_batch_keeps_order_and_injects_site_headers() {
+    // 回應內容即請求網址：據此驗證「結果與輸入同序」。**送出的先後**在並行下
+    // 不保證（也不是契約），只檢查三筆都送出且都帶了站點頭標。
+    let (mut manager, direct, _) = manager_with(AccessPolicy::Direct, |request| {
+        Ok(HttpResponse::new(
+            200,
+            request.url.clone(),
+            request.url.clone(),
+        ))
+    });
+    manager.mark_logged_in(
+        SiteKind::Lms,
+        AccessMode::Direct,
+        vec![("X-Business-Token".to_owned(), "token-1".to_owned())],
+    );
+
+    let requests = ["/api/a", "/api/b", "/api/c"]
+        .iter()
+        .map(|path| HttpRequest::get(format!("https://lms.xjtu.edu.cn{path}")))
+        .collect();
+    let responses = manager
+        .send_batch(SiteKind::Lms, requests)
+        .expect("批次应成功");
+
+    assert_eq!(responses.len(), 3, "每笔请求都应有结果");
+    for (index, response) in responses.iter().enumerate() {
+        let response = response.as_ref().expect("每笔请求都应成功");
+        assert_eq!(
+            response.text(),
+            format!("https://lms.xjtu.edu.cn/api/{}", ["a", "b", "c"][index]),
+            "结果应与输入同序"
+        );
+    }
+
+    let sent = direct.requests();
+    assert_eq!(sent.len(), 3);
+    let mut urls: Vec<&str> = sent.iter().map(|request| request.url.as_str()).collect();
+    urls.sort_unstable();
+    assert_eq!(
+        urls,
+        [
+            "https://lms.xjtu.edu.cn/api/a",
+            "https://lms.xjtu.edu.cn/api/b",
+            "https://lms.xjtu.edu.cn/api/c",
+        ]
+    );
+    for request in &sent {
+        assert_eq!(
+            request.header_value("X-Business-Token"),
+            Some("token-1"),
+            "站点头标应逐笔注入"
+        );
+    }
+}
+
+#[test]
+fn send_batch_rewrites_urls_in_webvpn_mode() {
+    let (mut manager, _, webvpn) = manager_with(AccessPolicy::WebVpn, |_| ok_response());
+    manager.mark_logged_in(
+        SiteKind::Attendance,
+        AccessMode::WebVpn,
+        vec![("X-Business-Token".to_owned(), "token-1".to_owned())],
+    );
+
+    let requests = ["/sa/student/a", "/sa/student/b"]
+        .iter()
+        .map(|path| HttpRequest::get(format!("https://bk-kq.xjtu.edu.cn{path}")))
+        .collect();
+    manager
+        .send_batch(SiteKind::Attendance, requests)
+        .expect("批次应成功");
+
+    let sent = webvpn.requests();
+    assert_eq!(sent.len(), 2);
+    let mut urls: Vec<&str> = sent.iter().map(|request| request.url.as_str()).collect();
+    urls.sort_unstable();
+    for (index, url) in urls.iter().enumerate() {
+        assert!(
+            url.starts_with("https://webvpn.xjtu.edu.cn/https/"),
+            "应改写为 WebVPN 网址：{url}"
+        );
+        assert!(
+            url.ends_with(&format!("/sa/student/{}", ["a", "b"][index])),
+            "改写后仍应指向原路径：{url}"
+        );
+    }
+    for request in &sent {
+        assert_eq!(request.header_value("X-Business-Token"), Some("token-1"));
+    }
+}
+
+#[test]
+fn send_batch_reports_expired_session_when_any_response_is_a_login_page() {
+    let (mut manager, _, _) = manager_with(AccessPolicy::Direct, |request| {
+        // 第二筆回傳統一認證登入頁：整批都應視為登入態失效。
+        if request.url.ends_with("/api/b") {
+            return Ok(HttpResponse::new(
+                200,
+                "https://login.xjtu.edu.cn/cas/login?service=lms",
+                LOGIN_PAGE.as_bytes(),
+            ));
+        }
+        ok_response()
+    });
+    manager.mark_logged_in(SiteKind::Lms, AccessMode::Direct, Vec::new());
+
+    let requests = ["/api/a", "/api/b", "/api/c"]
+        .iter()
+        .map(|path| HttpRequest::get(format!("https://lms.xjtu.edu.cn{path}")))
+        .collect();
+    let err = manager
+        .send_batch(SiteKind::Lms, requests)
+        .expect_err("任一请求失效时整批应作废");
+    assert!(matches!(err, AppError::SessionExpired), "实际错误：{err}");
+    assert!(!manager.is_logged_in(SiteKind::Lms), "失效后应重置登录态");
+}
+
+#[test]
+fn send_batch_without_login_reports_expired_session() {
+    let (mut manager, _, _) = manager_with(AccessPolicy::Direct, |_| ok_response());
+    let err = manager
+        .send_batch(
+            SiteKind::Lms,
+            vec![HttpRequest::get("https://lms.xjtu.edu.cn/api/a")],
+        )
+        .expect_err("未登录时不应送出请求");
+    assert!(matches!(err, AppError::SessionExpired), "实际错误：{err}");
+}
+
+#[test]
 fn send_without_login_reports_expired_session() {
     let (mut manager, _, _) = manager_with(AccessPolicy::Direct, |_| ok_response());
     let err = manager

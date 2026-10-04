@@ -412,15 +412,8 @@ impl SessionManager {
     /// 站點尚未登入或登入態已失效時回報 [`AppError::SessionExpired`]，
     /// 由呼叫端重新走一次登入流程後重試。
     pub fn send(&mut self, site: SiteKind, request: HttpRequest) -> AppResult<HttpResponse> {
-        let (mode, headers) = {
-            let state = self.sites.get(&site).ok_or(AppError::SessionExpired)?;
-            (state.access_mode, state.headers.clone())
-        };
-
-        let mut request = merge_headers(request, &headers);
-        if mode == AccessMode::WebVpn {
-            request = self.rewrite_for_webvpn(request)?;
-        }
+        let (mode, headers) = self.site_transport(site)?;
+        let request = prepare_request(mode, &headers, request)?;
 
         let client = self.backend(mode).client.clone();
         self.requests += 1;
@@ -432,6 +425,49 @@ impl SessionManager {
             return Err(AppError::SessionExpired);
         }
         Ok(response)
+    }
+
+    /// 併發送出同一站點的多個請求，回傳與輸入**同序**的結果。
+    ///
+    /// 只負責傳輸：標頭注入、WebVPN 改址與請求計數都在這裡處理，解析留給
+    /// 呼叫端。與 [`Self::send`] 的差異有兩點：
+    ///
+    /// - 單一請求的網路錯誤留在各自的結果中（呼叫端可只略過那一項）。
+    /// - 只要任一筆回應被判定為登入態失效，整批結果一併丟棄並回傳
+    ///   [`AppError::SessionExpired`]，交由呼叫端走既有的統一重新登入流程
+    ///   （不讓部分回應混著舊會話的結果回填畫面）。
+    pub fn send_batch(
+        &mut self,
+        site: SiteKind,
+        requests: Vec<HttpRequest>,
+    ) -> AppResult<Vec<AppResult<HttpResponse>>> {
+        let (mode, headers) = self.site_transport(site)?;
+        let mut prepared = Vec::with_capacity(requests.len());
+        for request in requests {
+            prepared.push(prepare_request(mode, &headers, request)?);
+        }
+        self.requests += prepared.len();
+
+        let client = self.backend(mode).client.clone();
+        let responses: Vec<AppResult<HttpResponse>> =
+            crate::http::batch::send_concurrently(client, prepared)
+                .into_iter()
+                .map(|result| result.map_err(|err| with_site_context(err, site, mode)))
+                .collect();
+        if responses
+            .iter()
+            .any(|response| response.as_ref().is_ok_and(is_auth_failure))
+        {
+            self.invalidate(site);
+            return Err(AppError::SessionExpired);
+        }
+        Ok(responses)
+    }
+
+    /// 站點目前的訪問方式與要注入的標頭。
+    fn site_transport(&self, site: SiteKind) -> AppResult<(AccessMode, Vec<(String, String)>)> {
+        let state = self.sites.get(&site).ok_or(AppError::SessionExpired)?;
+        Ok((state.access_mode, state.headers.clone()))
     }
 
     /// 站點登入成功後寫入狀態。
@@ -455,33 +491,6 @@ impl SessionManager {
             Some(mode) => rewrite_for_mode(mode, url),
             None => Ok(url.to_owned()),
         }
-    }
-
-    /// 將請求網址與 `Referer` 改寫為 WebVPN 網址。
-    fn rewrite_for_webvpn(&self, request: HttpRequest) -> AppResult<HttpRequest> {
-        let mut headers: Vec<(String, String)> = request
-            .headers
-            .iter()
-            .filter(|(name, _)| !name.eq_ignore_ascii_case("Referer"))
-            .cloned()
-            .collect();
-        if let Some(referer) = request.header_value("Referer").map(str::to_owned)
-            && webvpn::should_rewrite(&referer)
-        {
-            headers.push((
-                "Referer".to_owned(),
-                rewrite_for_mode(AccessMode::WebVpn, &referer)?,
-            ));
-        }
-
-        Ok(HttpRequest {
-            method: request.method,
-            url: rewrite_for_mode(AccessMode::WebVpn, &request.url)?,
-            headers,
-            body: request.body,
-            timeout: request.timeout,
-            follow_redirects: request.follow_redirects,
-        })
     }
 
     /// 探測校內網路是否可直連（結果快取五分鐘）。
@@ -519,6 +528,45 @@ impl SessionManager {
             .map(|adapter| adapter.policy())
             .ok_or_else(|| unknown_site(site))
     }
+}
+
+/// 依訪問方式準備要送出的請求：注入站點標頭，必要時改寫為 WebVPN 網址。
+///
+/// 抽成自由函式（而非 `&self` 方法）是為了讓併發送出時能先**序列地**完成
+/// 準備工作，再交給 [`crate::http::batch::send_concurrently`] 平行傳輸。
+fn prepare_request(
+    mode: AccessMode,
+    headers: &[(String, String)],
+    request: HttpRequest,
+) -> AppResult<HttpRequest> {
+    let request = merge_headers(request, headers);
+    if mode != AccessMode::WebVpn {
+        return Ok(request);
+    }
+
+    let mut headers: Vec<(String, String)> = request
+        .headers
+        .iter()
+        .filter(|(name, _)| !name.eq_ignore_ascii_case("Referer"))
+        .cloned()
+        .collect();
+    if let Some(referer) = request.header_value("Referer").map(str::to_owned)
+        && webvpn::should_rewrite(&referer)
+    {
+        headers.push((
+            "Referer".to_owned(),
+            rewrite_for_mode(AccessMode::WebVpn, &referer)?,
+        ));
+    }
+
+    Ok(HttpRequest {
+        method: request.method,
+        url: rewrite_for_mode(AccessMode::WebVpn, &request.url)?,
+        headers,
+        body: request.body,
+        timeout: request.timeout,
+        follow_redirects: request.follow_redirects,
+    })
 }
 
 /// 為網路錯誤補上「站點（訪問方式）」上下文，方便使用者定位失敗發生在哪裡。

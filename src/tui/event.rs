@@ -213,6 +213,17 @@ fn apply_session_disabled(app: &mut App, message: String) {
 }
 
 fn apply_schedule(app: &mut App, data: ScheduleData) {
+    // 遲到的舊週結果：切週指令要等已在執行中的舊週載入回報後才生效，那筆
+    // 結果仍會送達介面。使用者已指定別的週次時丟棄它並保留「載入中」，等
+    // 目標週的結果抵達；否則畫面會閃回舊週，甚至在新週載入失敗時停在舊週
+    // 的課程資料與標題（見 `App::schedule_pending_week`）。
+    if app
+        .schedule_pending_week
+        .is_some_and(|pending| pending != data.week)
+    {
+        return;
+    }
+    app.schedule_pending_week = None;
     // 週次與總週數先取出：切週載入期間資料已清空，標題仍能顯示目標週。
     app.schedule_week = Some(data.week);
     app.schedule_total = Some(data.total_weeks);

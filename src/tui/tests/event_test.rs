@@ -10,11 +10,12 @@ use crate::domain::semester::{TermCode, TermSource};
 use crate::model::{ActivityDetailView, FlowData, ScheduleData};
 use crate::session::{AccessMode, SiteKind};
 use crate::sites::lms::LmsCourse;
-use crate::task::{CoursesData, Event, FailedTarget, HomeworkUpdate};
+use crate::task::{CoursesData, Event, FailedTarget, HomeworkUpdate, Job};
 use crate::tui::app::{
     AgreementState, App, FormState, HomeworkData, LmsLevel, LoginScreen, NavItem, Page, Screen,
     SettingsState, TermPickerState,
 };
+use crate::tui::controller;
 use crate::tui::text::InputLine;
 
 use super::apply_event as apply_event_with_jobs;
@@ -72,6 +73,114 @@ fn schedule_event_tracks_the_week_and_account_change_clears_it() {
     assert_eq!(app.schedule_week, None, "换账号后回到当前周");
     assert_eq!(app.schedule_total, None);
     assert!(app.schedule.is_idle());
+}
+
+/// 套用一筆課表事件（`label` 用來辨識是哪一週的資料）。
+fn apply_schedule_event(app: &mut App, week: u32, label: &str) {
+    apply_event(
+        app,
+        Event::Schedule(Box::new(ScheduleData {
+            semester: label.to_owned(),
+            week,
+            total_weeks: 23,
+            lessons: Vec::new(),
+            skipped: 0,
+            notice: None,
+        })),
+    );
+}
+
+/// 切週待回期間丟棄舊週的遲到結果。
+///
+/// 課表載入是單步任務：切週指令要等已在執行中的舊週載入回報後才生效，那筆
+/// 結果仍會送達介面。若照單全收，畫面會閃回舊週；而新週載入失敗時更會停在
+/// 舊週的課程資料與標題（`Page::fail` 會把舊資料留在 `stale`）。
+#[test]
+fn stale_schedule_event_is_discarded_while_a_week_switch_is_pending() {
+    let mut app = app();
+    app.schedule_week = Some(5);
+    app.schedule_total = Some(23);
+    apply_schedule_event(&mut app, 5, "旧周资料");
+    assert!(app.schedule.ready().is_some());
+
+    // 使用者按 `]`：標題立即顯示目標週、內容清空，並送出切週指令。
+    let (jobs, rx) = channel();
+    controller::change_schedule_week(&mut app, &jobs, 1);
+    assert_eq!(app.schedule_week, Some(6), "标题应立即显示目标周");
+    assert_eq!(app.schedule_pending_week, Some(6));
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(Job::SetScheduleWeek { week: 6 })
+    ));
+    assert!(app.schedule.is_loading());
+
+    // 舊週（第 5 週）的載入此時才回報：必須丟棄。
+    apply_schedule_event(&mut app, 5, "旧周资料");
+    assert_eq!(app.schedule_week, Some(6), "标题应维持在目标周");
+    assert_eq!(app.schedule_pending_week, Some(6), "待回周次不应被清除");
+    assert!(app.schedule.is_loading(), "应维持在加载中");
+    assert!(app.schedule.ready().is_none(), "不得显示旧周课程");
+
+    // 目標週的結果抵達：套用並清除待回週次。
+    apply_schedule_event(&mut app, 6, "目标周资料");
+    assert_eq!(app.schedule_week, Some(6));
+    assert_eq!(app.schedule_pending_week, None);
+    assert_eq!(
+        app.schedule.ready().map(|data| data.semester.as_str()),
+        Some("目标周资料")
+    );
+}
+
+/// 沒有待回週次時，週次與上次顯示不同仍必須套用。
+///
+/// 使用者從未切週且學期已結束／尚未開始時，工作者會回應正規化後的週次
+///（與上次顯示的週次不同）；拿 `schedule_week` 直接比對會把合法結果誤丟，
+/// 頁面反而永久停在「載入中」。
+#[test]
+fn schedule_event_without_a_pending_switch_is_always_applied() {
+    let mut app = app();
+    app.schedule_week = Some(18);
+    app.schedule_total = Some(18);
+
+    apply_schedule_event(&mut app, 22, "学期已结束");
+
+    assert_eq!(app.schedule_week, Some(22), "没有待回周次时不应丢弃");
+    assert_eq!(app.schedule_pending_week, None);
+    assert_eq!(
+        app.schedule.ready().map(|data| data.semester.as_str()),
+        Some("学期已结束")
+    );
+}
+
+/// 待回週次的生命週期：換帳號清除（工作者一併重設週次），切換訪問模式保留
+///（工作者同樣保留）。
+#[test]
+fn pending_week_cleared_on_account_change_but_kept_on_mode_change() {
+    let mut app = app();
+    app.schedule_week = Some(6);
+    app.schedule_total = Some(23);
+    app.schedule_pending_week = Some(6);
+
+    apply_event(
+        &mut app,
+        Event::SessionsCleared {
+            account_changed: false,
+        },
+    );
+    assert_eq!(
+        app.schedule_pending_week,
+        Some(6),
+        "切换访问模式应保留待回周次"
+    );
+
+    apply_event(
+        &mut app,
+        Event::SessionsCleared {
+            account_changed: true,
+        },
+    );
+    assert_eq!(app.schedule_pending_week, None, "换账号应清除待回周次");
+    assert_eq!(app.schedule_week, None);
 }
 
 #[test]

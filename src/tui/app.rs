@@ -863,6 +863,10 @@ pub struct App {
     pub nav: NavItem,
     /// 課表頁。
     pub schedule: Page<ScheduleData>,
+    /// 目前顯示（或正在載入）的課表週次；`None` 表示尚未載入。
+    pub schedule_week: Option<u32>,
+    /// 學期總週數（切換週次的邊界）。
+    pub schedule_total: Option<u32>,
     /// 作業頁。
     pub homework: Page<HomeworkData>,
     /// 作業頁目前分組。
@@ -921,6 +925,8 @@ impl App {
             agreement: None,
             nav: NavItem::Schedule,
             schedule: Page::Idle,
+            schedule_week: None,
+            schedule_total: None,
             homework: Page::Idle,
             homework_group: HomeworkGroup::Unfinished,
             term_options: Vec::new(),
@@ -1087,6 +1093,8 @@ impl App {
     pub fn invalidate_data(&mut self, account_changed: bool) {
         if account_changed {
             self.schedule = Page::Idle;
+            self.schedule_week = None;
+            self.schedule_total = None;
             self.homework = Page::Idle;
             self.attendance = Page::Idle;
             // 舊帳號的課程、活動與詳情一律清空。

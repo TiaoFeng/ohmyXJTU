@@ -361,6 +361,9 @@ impl Worker {
         self.generation += 1;
         self.pending_data.clear();
         self.cache.clear();
+        // 課表快取與選定週次都屬於舊帳號。
+        self.schedule_cache = None;
+        self.schedule_week = None;
         self.emit(Event::SessionsCleared {
             account_changed: true,
         });

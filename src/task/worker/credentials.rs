@@ -64,6 +64,9 @@ impl Worker {
         self.relogin.clear();
         self.pending_data.clear();
         self.cache.clear();
+        // 課表快取與選定週次都屬於舊帳號。
+        self.schedule_cache = None;
+        self.schedule_week = None;
         // 失敗計數以 (帳號, 後端) 為鍵保存：換了帳號自然從 0 起算，
         // 同一帳號重試則保留——否則伺服器要求的驗證碼永遠不會出現。
         self.login_failure_key = None;
@@ -124,6 +127,9 @@ impl Worker {
         self.relogin.clear();
         self.pending_data.clear();
         self.cache.clear();
+        // 課表快取與選定週次都屬於舊帳號：一併作廢（介面也會清除頁面資料）。
+        self.schedule_cache = None;
+        self.schedule_week = None;
         // 舊帳號的站點登入狀態與頁面資料已失效：介面應清除。
         self.emit(Event::SessionsCleared {
             account_changed: true,
@@ -149,6 +155,8 @@ impl Worker {
         self.generation += 1;
         self.relogin.clear();
         self.cache.clear();
+        // 訪問方式變更：課表快取一併作廢（重新登入後重建）；選定週次保留。
+        self.schedule_cache = None;
         // 連線與登入態已重建：介面清除站點登入狀態；既有頁面資料仍有效，
         // 只解除因任務作廢而卡住的載入狀態。
         self.emit(Event::SessionsCleared {
@@ -193,6 +201,8 @@ impl Worker {
         // （排隊中的資料任務不在此列：它們會以還原後的帳號重新執行。）
         self.generation += 1;
         self.cache.clear();
+        // 課表快取屬於被丟棄的切換：作廢（選定週次保留，介面未清空）。
+        self.schedule_cache = None;
         self.login_failure_key = None;
     }
 

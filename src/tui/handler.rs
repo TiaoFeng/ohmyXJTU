@@ -10,7 +10,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::credentials::Secret;
 use crate::session::SiteKind;
 use crate::task::Job;
-use crate::tui::app::{App, FormKind, FormState, LoginScreen, Screen, SettingsState};
+use crate::tui::app::{App, FormKind, FormState, LoginScreen, NavItem, Screen, SettingsState};
 use crate::tui::text::InputLine;
 
 use super::controller;
@@ -463,8 +463,21 @@ fn handle_main(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
             let nav = app.nav;
             controller::request(app, jobs, nav, true);
         }
-        KeyCode::Char('[') => controller::change_group(app, -1),
-        KeyCode::Char(']') => controller::change_group(app, 1),
+        // 課表頁切換週次；作業頁與思源學堂活動層切換分組。
+        KeyCode::Char('[') => {
+            if app.nav == NavItem::Schedule {
+                controller::change_schedule_week(app, jobs, -1);
+            } else {
+                controller::change_group(app, -1);
+            }
+        }
+        KeyCode::Char(']') => {
+            if app.nav == NavItem::Schedule {
+                controller::change_schedule_week(app, jobs, 1);
+            } else {
+                controller::change_group(app, 1);
+            }
+        }
         KeyCode::Char('o') => controller::open_activity(app, jobs),
         KeyCode::Char('s') => controller::open_term_picker(app),
         KeyCode::Char('n') => controller::change_flow_page(app, jobs, 1),

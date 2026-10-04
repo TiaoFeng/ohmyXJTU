@@ -27,12 +27,15 @@ fn app_with_schedule(len: usize) -> App {
     app.schedule = Page::Ready(ScheduleData {
         semester: "2026-2027-1".to_owned(),
         week: 2,
+        total_weeks: 23,
         lessons: (0..len)
             .map(|index| lesson(1, u32::try_from(index + 1).expect("节次")))
             .collect(),
         skipped: 0,
         notice: None,
     });
+    app.schedule_week = Some(2);
+    app.schedule_total = Some(23);
     app
 }
 

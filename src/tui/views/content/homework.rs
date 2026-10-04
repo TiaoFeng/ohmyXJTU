@@ -14,10 +14,11 @@ use ratatui::widgets::{ListItem, ListState, Paragraph, Wrap};
 use crate::domain::homework::{HomeworkGroup, HomeworkItem};
 use crate::domain::todo::{PageRow, Task, visual_index};
 use crate::sites::lms::ActivityKind;
-use crate::text::fit_display;
+use crate::text::{display_width, fit_display};
 use crate::tui::app::{App, Page, TaskEntry};
+use crate::tui::text::InputLine;
 use crate::tui::theme::THEME;
-use crate::tui::ui::render_list;
+use crate::tui::ui::{input_window, render_list};
 
 use super::columns::{GROUP_WIDTH, RowColumns, RowNeeds, page_columns, page_min_row_width};
 use super::{
@@ -51,18 +52,31 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
         return;
     }
 
-    // 分組標籤列＋載入狀態（更新失敗或有待核实項目時再加一行提示）。
+    // 分組標籤列＋（搜尋中）搜尋輸入框＋（更新失敗或有待核实）提示列。
     let header = homework_tabs(app);
     let warning = homework_warning(app);
-    let header_height = 1 + u16::from(warning.is_some());
+    let search_row = u16::from(app.task_search.is_some());
+    let header_height = 1 + search_row + u16::from(warning.is_some());
     let [header_area, body_area] =
         Layout::vertical([Constraint::Length(header_height), Constraint::Min(3)]).areas(area);
-    let [tabs_area, warning_area] =
-        Layout::vertical([Constraint::Length(1), Constraint::Length(header_height - 1)])
-            .areas(header_area);
-    frame.render_widget(Paragraph::new(header).style(THEME.base_style()), tabs_area);
+    let header_rows = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(search_row),
+        Constraint::Length(u16::from(warning.is_some())),
+    ])
+    .split(header_area);
+    frame.render_widget(
+        Paragraph::new(header).style(THEME.base_style()),
+        header_rows[0],
+    );
+    if let Some(input) = app.task_search.as_ref() {
+        draw_search(frame, input, header_rows[1]);
+    }
     if let Some(line) = warning {
-        frame.render_widget(Paragraph::new(line).style(THEME.base_style()), warning_area);
+        frame.render_widget(
+            Paragraph::new(line).style(THEME.base_style()),
+            header_rows[2],
+        );
     }
 
     if app.task_page_rows().is_empty() {
@@ -140,6 +154,27 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
     );
     if let (Some(area), Some((lines, detail_title))) = (detail_area, detail) {
         scrolled_panel(frame, area, detail_title, lines, &mut app.homework_scroll);
+    }
+}
+
+/// 搜尋輸入框（`^f`）：把目前輸入的內容與游標畫出來。
+///
+/// 少了這一列，使用者只能盲打（看不到自己打了什麼，也没有游標），看起來就
+/// 像畫面卡住了；按鍵說明放在底欄（`enter 应用筛选 · esc 取消`）。
+fn draw_search(frame: &mut Frame, input: &InputLine, area: Rect) {
+    /// 輸入框前綴。
+    const PREFIX: &str = " 搜索：";
+
+    let prefix = u16::try_from(display_width(PREFIX)).unwrap_or(0);
+    let value_width = usize::from(area.width.saturating_sub(prefix));
+    let (visible, cursor) = input_window(input, value_width);
+    let line = Line::from(vec![
+        Span::styled(PREFIX, THEME.accent_style()),
+        Span::styled(visible, Style::default().fg(THEME.text)),
+    ]);
+    frame.render_widget(Paragraph::new(line).style(THEME.base_style()), area);
+    if value_width > 0 {
+        frame.set_cursor_position((area.x + prefix + cursor, area.y));
     }
 }
 

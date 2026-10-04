@@ -1515,11 +1515,10 @@ fn task_form_reports_validation_errors_in_place() {
         }
         other => panic!("应为新增任务任务，实际为 {other:?}"),
     }
+    // 送出中的面板仍可用 `esc` 關閉：保存已在背景進行，不該把使用者鎖住。
     press(&mut app, &jobs, KeyCode::Esc);
-    assert!(
-        matches!(app.screen, Screen::TaskForm(_)),
-        "保存中应按 busy 规则忽略按键（等工作者回报）"
-    );
+    assert!(matches!(app.screen, Screen::Main), "esc 应关闭面板");
+    assert_eq!(app.message_text(), Some("面板已关闭，保存仍在进行"));
 }
 
 #[test]

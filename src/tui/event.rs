@@ -300,12 +300,22 @@ fn apply_homework(app: &mut App, update: HomeworkUpdate) {
 ///
 /// 任務可能因為標記完成而換分組（不在目前分組時就找不到），因此優先用識別碼
 /// 重新定位；找不到才把索引夾在新長度內。
+///
+/// 表單開啟時代表使用者剛送出新增／修改：快照就是那次操作的結果，面板必須
+/// 關起來（否則會永遠停在「正在保存…」，連 `esc` 都被 busy 擋住）。
+///
+/// 這裡刻意不切換根畫面：解鎖時任務服務會先回報一次快照（`InitTasks` 排在
+/// `VaultReady` 之前送出），那時介面還停在解鎖表單，不該被任務快照拉進主畫面
+/// ——進入主畫面由 `VaultReady` 負責。
 fn apply_tasks(app: &mut App, tasks: Vec<Task>) {
     let previous = match app.selected_entry() {
         Some(TaskEntry::Task(task)) => Some(task.id),
         _ => None,
     };
     app.tasks = tasks;
+    if matches!(app.screen, Screen::TaskForm(_)) {
+        app.set_screen(Screen::Main);
+    }
     let len = app.task_group_items(app.homework_group).len()
         + app.homework_group_items(app.homework_group).len();
     let fallback = app.page_selection().min(len.saturating_sub(1));
@@ -317,7 +327,6 @@ fn apply_tasks(app: &mut App, tasks: Vec<Task>) {
         })
         .unwrap_or(fallback);
     app.homework_state.select(Some(selected));
-    app.ensure_main();
 }
 
 /// 課程清單更新：以穩定的課程識別碼重新定位目前課程。

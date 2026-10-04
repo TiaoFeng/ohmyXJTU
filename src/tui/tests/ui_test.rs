@@ -2990,6 +2990,50 @@ fn task_menu_and_confirm_popups_render() {
 }
 
 #[test]
+fn task_page_search_box_shows_the_query_and_cursor() {
+    let mut app = task_page_app(
+        vec![todo(1, "写实验报告", Priority::High, false)],
+        Vec::new(),
+    );
+    app.task_search = Some(InputLine::with_value("报告"));
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let backend = terminal.backend();
+    let (row_y, row) = find_row(backend, "搜索：报告");
+    let (tabs_y, _) = find_row(backend, "未完成 1");
+    assert!(
+        tabs_y < row_y,
+        "搜索框应在分组标签列之后：\n{}",
+        screen_text(backend)
+    );
+
+    // 游標應緊接在輸入內容之後（前綴 1+4+2 欄，內容為兩個全形字＝4 欄）。
+    let content_x = column_of(&row, "搜索");
+    assert_eq!(backend.cursor_position().y, row_y, "游标应在搜索框那一列");
+    assert_eq!(
+        backend.cursor_position().x,
+        content_x + 10,
+        "游标应在输入内容之后：\n{row}"
+    );
+}
+
+#[test]
+fn task_page_hides_the_search_box_when_no_search_is_open() {
+    let mut app = task_page_app(
+        vec![todo(1, "写实验报告", Priority::High, false)],
+        Vec::new(),
+    );
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(!text.contains("搜索："), "未搜尋時不應出现搜尋框：\n{text}");
+}
+
+#[test]
 fn task_batch_menu_lists_the_batch_operations() {
     let mut app = App::new(AccessPolicy::Auto);
     app.set_screen(Screen::TaskBatchMenu(TaskBatchMenuState { index: 2 }));

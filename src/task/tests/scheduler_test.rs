@@ -73,7 +73,7 @@ impl ThreadWorker {
 
         let (job_tx, job_rx) = std_channel();
         let (event_tx, event_rx) = std_channel();
-        let tasks = TaskStore::at(dir.path().join("tasks.vault"));
+        let tasks = crate::task::tasks::detached();
         let mut worker = Worker {
             jobs: job_rx,
             events: event_tx,

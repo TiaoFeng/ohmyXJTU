@@ -594,8 +594,13 @@ fn handle_task_confirm(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
 ///
 /// `tab` 切換欄位、描述欄 `enter` 換行、左右鍵切換選項、`^s` 保存、`esc` 取消。
 fn handle_task_form(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
-    // 送出中：忽略所有輸入，避免重複提交。
+    // 送出中：忽略所有輸入，避免重複提交；但 `esc` 仍可關閉面板——保存已在
+    // 背景進行（任務服務獨立一條執行緒），不應把使用者鎖在面板裡。
     if matches!(&app.screen, Screen::TaskForm(form) if form.busy) {
+        if key.code == KeyCode::Esc {
+            app.set_screen(Screen::Main);
+            app.set_message("面板已关闭，保存仍在进行");
+        }
         return;
     }
     // 保存用組合鍵：描述欄的 enter 已經被「換行」佔用。

@@ -1650,13 +1650,24 @@ fn tasks_failure_keeps_the_form_and_shows_the_error_in_place() {
 }
 
 #[test]
-fn tasks_event_keeps_the_task_form_open() {
+fn tasks_event_closes_the_task_form_after_saving() {
     let mut app = app();
     app.set_screen(Screen::TaskForm(Box::new(TaskFormState::add())));
+    if let Screen::TaskForm(form) = &mut app.screen {
+        form.busy = true;
+    }
+
+    // 新增／修改成功的快照：面板必須關起來，否則會永遠停在「正在保存…」。
     apply_event(&mut app, Event::Tasks(vec![todo_task(1, "甲", false)]));
     assert!(
-        matches!(app.screen, Screen::TaskForm(_)),
-        "任务表单属于主画面，不得被背景快照关闭"
+        matches!(app.screen, Screen::Main),
+        "任务快照抵达时应关闭任务表单"
+    );
+    assert_eq!(app.tasks.len(), 1, "快照应已套用");
+    assert!(
+        app.message_text()
+            .is_none_or(|message| !message.contains("正在保存")),
+        "不应留下保存中的提示"
     );
 }
 

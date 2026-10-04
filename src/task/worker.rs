@@ -12,8 +12,10 @@
 //! - `login`：互動式登入（驗證碼、簡訊、重試與失敗計數）。
 //! - `data`：課表、考勤流水與思源學堂瀏覽。
 //! - `homework`：作業載入的步進狀態機。
-//! - `tasks`：自訂義任務的加密存儲與操作。
 //! - `cache`：思源學堂課程／活動快取。
+//!
+//! 自訂義任務不在這裡：它們在專屬的任務服務執行緒上（見 `crate::task::tasks`），
+//! 否則網路請求會把「新增任務」這種純本機操作也拖慢。
 //!
 //! 調度原則：
 //!
@@ -42,17 +44,16 @@ use crate::task::protocol::{
     DataKey, Event, FailedTarget, Job, failed_target_of, is_account_switch_step, resource_of,
     site_of,
 };
+use crate::task::tasks::{self, TaskHandle};
 
 mod cache;
 mod credentials;
 mod data;
 mod homework;
 mod login;
-mod tasks;
 mod timing;
 
 use cache::{LmsCache, ScheduleCache};
-use tasks::TaskStore;
 use timing::LoadTiming;
 
 /// 單一任務（及其自動重試鏈）允許的自動重新登入次數上限。
@@ -187,8 +188,8 @@ struct Worker {
     relogin: ReloginBudgets,
     /// 思源學堂課程／活動快取。
     cache: LmsCache,
-    /// 自訂義任務（加密存儲；解鎖後才會載入）。
-    tasks: TaskStore,
+    /// 自訂義任務服務的控制代碼（任務資料在專屬執行緒上，見 `task::tasks`）。
+    tasks: TaskHandle,
     /// 課表快取（整學期課程；切換週次時重用）。
     schedule_cache: Option<ScheduleCache>,
     /// 使用者選擇的週次；`None` 代表跟隨當前週。
@@ -210,12 +211,31 @@ struct Worker {
 }
 
 /// 啟動背景工作執行緒，回傳（任務送出端, 事件接收端）。
+///
+/// 介面送出的所有任務都先進任務服務（見 [`crate::task::tasks`]）：任務操作
+/// 由服務自行處理（純本機，不會等網路），其餘任務原封不動轉給這裡的工作
+/// 執行緒。介面因此只面對一條通道，卻不必和網路請求搶排隊。
 pub fn spawn(config: Config, vault: Vault) -> AppResult<(Sender<Job>, Receiver<Event>)> {
+    spawn_with_tasks(config, vault, crate::io::tasks_path()?)
+}
+
+/// 啟動背景工作執行緒與任務服務，並指定任務檔路徑。
+///
+/// 供測試隔離資料目錄使用；正式路徑見 [`spawn`]。
+pub(crate) fn spawn_with_tasks(
+    config: Config,
+    vault: Vault,
+    tasks_path: PathBuf,
+) -> AppResult<(Sender<Job>, Receiver<Event>)> {
     let (job_tx, job_rx) = channel();
+    let (worker_tx, worker_rx) = channel();
     let (event_tx, event_rx) = channel();
 
+    tasks::serve(event_tx.clone(), worker_tx, job_rx, tasks_path)?;
+    let tasks = TaskHandle::new(job_tx.clone());
+
     let mut worker = Worker {
-        jobs: job_rx,
+        jobs: worker_rx,
         events: event_tx,
         vault,
         config,
@@ -241,7 +261,7 @@ pub fn spawn(config: Config, vault: Vault) -> AppResult<(Sender<Job>, Receiver<E
         timing: LoadTiming::default(),
         login_started: None,
         shutdown: false,
-        tasks: TaskStore::at_default_path()?,
+        tasks,
     };
 
     thread::Builder::new()
@@ -450,16 +470,21 @@ impl Worker {
             Job::SetAccessPolicy(policy) => self.set_access_policy(policy),
             Job::SetHomeworkTerm { term } => self.set_homework_term(&term),
             Job::SetScheduleWeek { week } => self.set_schedule_week(week),
-            Job::AddTask { task } => self.add_task(task),
-            Job::UpdateTask { id, task } => self.update_task(id, task),
-            Job::SetTaskDone { id, done } => self.set_task_done(id, done),
-            Job::SetTasksDone { ids, done } => self.set_tasks_done(&ids, done),
-            Job::DeleteTask { id } => self.delete_task(id),
-            Job::DeleteTasks { ids } => self.delete_tasks(&ids),
-            Job::DeleteCompletedTasks => self.delete_completed_tasks(),
             Job::AcceptAgreement => self.accept_agreement(),
             Job::CancelLogin => self.cancel_login(),
             Job::Shutdown => Ok(()),
+            // 自訂義任務由任務服務處理；InitTasks／RekeyTasks／LockTasks 只會
+            // 出現在服務的通道上（工作者自己也只送出、不會收到）。
+            Job::AddTask { .. }
+            | Job::UpdateTask { .. }
+            | Job::SetTaskDone { .. }
+            | Job::SetTasksDone { .. }
+            | Job::DeleteTask { .. }
+            | Job::DeleteTasks { .. }
+            | Job::DeleteCompletedTasks
+            | Job::InitTasks { .. }
+            | Job::RekeyTasks { .. }
+            | Job::LockTasks => Ok(()),
             // 資料任務由 [`Self::run_data_job`] 負責。
             Job::LoadSchedule { .. }
             | Job::LoadHomework { .. }

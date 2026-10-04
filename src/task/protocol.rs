@@ -9,6 +9,7 @@
 //! [`is_account_switch_step`]）由 [`Job`] 推導站點、失敗落點與資源識別碼。
 
 use std::path::PathBuf;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use crate::config::AccessPolicy;
@@ -19,6 +20,54 @@ use crate::domain::todo::Task;
 use crate::model::{ActivityDetailView, FlowData, ScheduleData};
 use crate::session::{AccessMode, SiteKind};
 use crate::sites::lms::{ActivityKind, LmsActivity, LmsCourse};
+
+/// 等待把手的共享狀態：結果插槽與喚醒用的條件變數。
+type ReplyState = Arc<(Mutex<Option<Result<(), String>>>, Condvar)>;
+
+/// 同步任務操作的等待把手。
+///
+/// 解鎖與修改口令必須等任務服務確認結果（換口令要在兩個檔案之間保持一致的
+/// 順序）。[`Job`] 需要 `Clone`，而回覆通道不可複製，因此以共享狀態與條件變數
+/// 實作；等待有上限，即使任務服務意外停止也不會讓工作者永久卡住。
+#[derive(Clone, Default)]
+pub struct TaskReply(ReplyState);
+
+impl std::fmt::Debug for TaskReply {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("TaskReply")
+    }
+}
+
+impl TaskReply {
+    /// 建立等待把手。
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 由任務服務填入結果並喚醒等待者。
+    pub fn resolve(&self, result: Result<(), String>) {
+        let (slot, ready) = &*self.0;
+        let mut slot = slot.lock().unwrap_or_else(|err| err.into_inner());
+        *slot = Some(result);
+        ready.notify_all();
+    }
+
+    /// 等待結果（任務服務只做本機檔案與密碼學運算，因此不會久等）。
+    pub fn wait(&self) -> Result<(), String> {
+        let (slot, ready) = &*self.0;
+        let mut guard = slot.lock().unwrap_or_else(|err| err.into_inner());
+        while guard.is_none() {
+            let (next, timeout) = ready
+                .wait_timeout(guard, Duration::from_secs(30))
+                .unwrap_or_else(|err| err.into_inner());
+            guard = next;
+            if timeout.timed_out() && guard.is_none() {
+                return Err("任务服务没有响应".to_owned());
+            }
+        }
+        guard.clone().unwrap_or(Ok(()))
+    }
+}
 
 /// 介面送到背景的任務。
 #[derive(Debug, Clone)]
@@ -171,6 +220,25 @@ pub enum Job {
     /// 沒有這個任務時，「登入互動期間資料任務一律延後」會讓關閉覆蓋層後的
     /// 重新整理永遠排不到：`r` 送出的任務只能躺在待執行佇列裡。
     CancelLogin,
+    /// 以口令載入任務檔（解鎖與建立保險庫後由工作者送出）。
+    ///
+    /// 這是內部訊息：任務服務才是任務檔的擁有者，介面不會送它。
+    InitTasks {
+        /// 加密口令。
+        passphrase: Secret,
+    },
+    /// 以新口令重新加密任務檔（修改口令時由工作者送出）。
+    ///
+    /// `reply` 讓工作者在寫入保險庫之前先確認結果；任務服務只做本機運算，
+    /// 因此這個等待很短。
+    RekeyTasks {
+        /// 新口令。
+        passphrase: Secret,
+        /// 結果把手。
+        reply: TaskReply,
+    },
+    /// 丟棄任務檔的記憶體金鑰（會話被停用時）。
+    LockTasks,
     /// 結束工作執行緒。
     Shutdown,
 }
@@ -205,8 +273,23 @@ impl Job {
             Self::SetAccessPolicy(_) => "访问模式".to_owned(),
             Self::AcceptAgreement => "用户协议".to_owned(),
             Self::CancelLogin => "取消登录".to_owned(),
+            Self::InitTasks { .. } | Self::RekeyTasks { .. } | Self::LockTasks => "任务".to_owned(),
             Self::Shutdown => String::new(),
         }
+    }
+
+    /// 是否為自訂義任務操作（由任務服務處理，不經過網路）。
+    pub fn is_task_op(&self) -> bool {
+        matches!(
+            self,
+            Self::AddTask { .. }
+                | Self::UpdateTask { .. }
+                | Self::SetTaskDone { .. }
+                | Self::SetTasksDone { .. }
+                | Self::DeleteTask { .. }
+                | Self::DeleteTasks { .. }
+                | Self::DeleteCompletedTasks
+        )
     }
 
     /// 是否為控制任務（登入、設定、憑證）；其餘為資料載入任務。

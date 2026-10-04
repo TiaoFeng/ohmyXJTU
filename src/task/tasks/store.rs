@@ -10,6 +10,8 @@
 //!
 //! 檔案無法讀取（損毀、或由其他口令建立）時不直接覆寫：先備份為
 //! `tasks.vault.bak` 再以空清單重新開始，並回報提示訊息。
+//!
+//! 這裡只有檔案本身；任務服務（見 [`super`]）負責在獨立執行緒上使用它。
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -20,9 +22,6 @@ use crate::credentials::envelope::{self, Sealed};
 use crate::domain::todo::{Task, sort_tasks};
 use crate::error::{AppError, AppResult};
 use crate::io;
-use crate::task::protocol::Event;
-
-use super::Worker;
 
 /// 任務檔的 AAD 前綴（與憑證保險庫的 `ohmyXJTU-vault` 區隔）。
 const AAD_PREFIX: &str = "ohmyXJTU-tasks";
@@ -36,7 +35,7 @@ struct TaskFile {
 }
 
 /// 任務存儲：記憶體中的任務清單＋加密的磁碟檔案。
-pub(super) struct TaskStore {
+pub(crate) struct TaskStore {
     path: PathBuf,
     tasks: Vec<Task>,
     next_id: u64,
@@ -47,7 +46,7 @@ pub(super) struct TaskStore {
 
 impl TaskStore {
     /// 使用指定路徑（便於測試）。
-    pub(super) fn at(path: impl Into<PathBuf>) -> Self {
+    pub(crate) fn at(path: impl Into<PathBuf>) -> Self {
         Self {
             path: path.into(),
             tasks: Vec::new(),
@@ -57,19 +56,14 @@ impl TaskStore {
         }
     }
 
-    /// 使用標準資料目錄下的任務檔。
-    pub(super) fn at_default_path() -> AppResult<Self> {
-        Ok(Self::at(io::tasks_path()?))
-    }
-
     /// 目前任務（已排序；測試用）。
     #[cfg(test)]
-    pub(super) fn tasks(&self) -> &[Task] {
+    pub(crate) fn tasks(&self) -> &[Task] {
         &self.tasks
     }
 
     /// 任務快照（排序後）。
-    pub(super) fn snapshot(&self) -> Vec<Task> {
+    pub(crate) fn snapshot(&self) -> Vec<Task> {
         self.tasks.clone()
     }
 
@@ -78,7 +72,7 @@ impl TaskStore {
     /// 檔案不存在時只準備好新信封（首次保存才落盤），避免從未使用任務的
     /// 使用者多出一個檔案。回傳需要告知使用者的提示（原檔無法讀取而備份、
     /// 權限過寬等）；檔案層級的讀取失敗（非「不存在」）仍向上傳播。
-    pub(super) fn init(&mut self, passphrase: &str) -> AppResult<Option<String>> {
+    pub(crate) fn init(&mut self, passphrase: &str) -> AppResult<Option<String>> {
         let mut notices: Vec<String> = Vec::new();
         self.unavailable = None;
         match io::read_private(&self.path) {
@@ -115,7 +109,7 @@ impl TaskStore {
     }
 
     /// 新增任務：識別碼由存儲指派。
-    pub(super) fn add(&mut self, mut task: Task) -> AppResult<()> {
+    pub(crate) fn add(&mut self, mut task: Task) -> AppResult<()> {
         self.apply(move |tasks, next_id| {
             task.id = *next_id;
             *next_id = next_id.saturating_add(1);
@@ -125,7 +119,7 @@ impl TaskStore {
     }
 
     /// 以新內容覆蓋指定任務（識別碼由參數決定，不受表單內容影響）。
-    pub(super) fn update(&mut self, id: u64, mut task: Task) -> AppResult<()> {
+    pub(crate) fn update(&mut self, id: u64, mut task: Task) -> AppResult<()> {
         self.apply(move |tasks, _| {
             let target = tasks
                 .iter_mut()
@@ -138,7 +132,7 @@ impl TaskStore {
     }
 
     /// 設定單一任務的完成狀態。
-    pub(super) fn set_done(&mut self, id: u64, done: bool) -> AppResult<()> {
+    pub(crate) fn set_done(&mut self, id: u64, done: bool) -> AppResult<()> {
         self.apply(move |tasks, _| {
             let target = tasks
                 .iter_mut()
@@ -150,7 +144,7 @@ impl TaskStore {
     }
 
     /// 設定多個任務的完成狀態；回傳實際變更的數量。
-    pub(super) fn set_done_many(&mut self, ids: &[u64], done: bool) -> AppResult<usize> {
+    pub(crate) fn set_done_many(&mut self, ids: &[u64], done: bool) -> AppResult<usize> {
         let ids: HashSet<u64> = ids.iter().copied().collect();
         self.apply(move |tasks, _| {
             let mut changed = 0;
@@ -165,7 +159,7 @@ impl TaskStore {
     }
 
     /// 刪除單一任務。
-    pub(super) fn delete(&mut self, id: u64) -> AppResult<()> {
+    pub(crate) fn delete(&mut self, id: u64) -> AppResult<()> {
         self.apply(move |tasks, _| {
             let before = tasks.len();
             tasks.retain(|task| task.id != id);
@@ -177,7 +171,7 @@ impl TaskStore {
     }
 
     /// 刪除多個任務；回傳刪除數量。
-    pub(super) fn delete_many(&mut self, ids: &[u64]) -> AppResult<usize> {
+    pub(crate) fn delete_many(&mut self, ids: &[u64]) -> AppResult<usize> {
         let ids: HashSet<u64> = ids.iter().copied().collect();
         self.apply(move |tasks, _| {
             let before = tasks.len();
@@ -187,7 +181,7 @@ impl TaskStore {
     }
 
     /// 刪除所有已完成任務；回傳刪除數量。
-    pub(super) fn delete_completed(&mut self) -> AppResult<usize> {
+    pub(crate) fn delete_completed(&mut self) -> AppResult<usize> {
         self.apply(|tasks, _| {
             let before = tasks.len();
             tasks.retain(|task| !task.completed);
@@ -199,7 +193,7 @@ impl TaskStore {
     ///
     /// 寫入成功後才替換記憶體中的信封；寫入失敗時金鑰與磁碟內容都維持原狀。
     /// 呼叫端負責與憑證保險庫之間的順序一致（見 `credentials::change_passphrase`）。
-    pub(super) fn rekey(&mut self, passphrase: &str) -> AppResult<()> {
+    pub(crate) fn rekey(&mut self, passphrase: &str) -> AppResult<()> {
         let plaintext = self.serialize()?;
         let (bytes, sealed) = envelope::seal(passphrase, AAD_PREFIX, &plaintext)?;
         io::write_private_atomic(&self.path, &bytes)?;
@@ -208,18 +202,18 @@ impl TaskStore {
     }
 
     /// 標記本會話無法使用任務存儲（解鎖時讀檔失敗）；之後的操作會回報此原因。
-    pub(super) fn mark_unavailable(&mut self, message: String) {
+    pub(crate) fn mark_unavailable(&mut self, message: String) {
         self.unavailable = Some(message);
     }
 
     /// 丟棄金鑰（工作階段停用時）：任務內容仍保留在記憶體，但無法再寫入。
-    pub(super) fn lock(&mut self) {
+    pub(crate) fn lock(&mut self) {
         self.sealed = None;
     }
 
     /// 任務檔路徑。
     #[cfg(test)]
-    pub(super) fn path(&self) -> &std::path::Path {
+    pub(crate) fn path(&self) -> &std::path::Path {
         &self.path
     }
 
@@ -298,111 +292,3 @@ impl TaskStore {
         PathBuf::from(path)
     }
 }
-
-/// 背景執行緒端的任務操作。
-///
-/// 這些都是控制任務：任務只涉及本地檔案，不應排在長查詢之後，也不受
-/// 登入流程影響（登入互動期間仍可新增／勾選任務）。
-impl Worker {
-    /// 解鎖後載入任務檔並回報快照。
-    ///
-    /// 任務檔讀取失敗不阻斷解鎖（登入與查詢都不依賴任務）；此時只提示並
-    /// 標記存儲不可用，後續的任務操作會回報同一個原因。
-    pub(super) fn init_tasks(&mut self, passphrase: &str) {
-        match self.tasks.init(passphrase) {
-            Ok(Some(notice)) => self.emit(Event::Notice(notice)),
-            Ok(None) => {}
-            Err(err) => {
-                let message = format!("任务文件不可用（{err}）；本次会话无法保存自定义任务");
-                self.tasks.mark_unavailable(message.clone());
-                self.emit(Event::Notice(message));
-            }
-        }
-        self.emit_tasks();
-    }
-
-    /// 回報任務快照（完整清單）。
-    pub(super) fn emit_tasks(&mut self) {
-        let snapshot = self.tasks.snapshot();
-        self.emit(Event::Tasks(snapshot));
-    }
-
-    /// 新增任務。
-    pub(super) fn add_task(&mut self, task: Task) -> AppResult<()> {
-        self.tasks.add(task)?;
-        self.emit_tasks();
-        self.emit(Event::Notice("已添加任务".to_owned()));
-        Ok(())
-    }
-
-    /// 以新內容覆蓋任務。
-    pub(super) fn update_task(&mut self, id: u64, task: Task) -> AppResult<()> {
-        self.tasks.update(id, task)?;
-        self.emit_tasks();
-        self.emit(Event::Notice("任务已更新".to_owned()));
-        Ok(())
-    }
-
-    /// 設定單一任務的完成狀態。
-    pub(super) fn set_task_done(&mut self, id: u64, done: bool) -> AppResult<()> {
-        self.tasks.set_done(id, done)?;
-        self.emit_tasks();
-        self.emit(Event::Notice(
-            if done {
-                "已标记完成"
-            } else {
-                "已标记未完成"
-            }
-            .to_owned(),
-        ));
-        Ok(())
-    }
-
-    /// 批次設定完成狀態（多選）。
-    pub(super) fn set_tasks_done(&mut self, ids: &[u64], done: bool) -> AppResult<()> {
-        let changed = self.tasks.set_done_many(ids, done)?;
-        self.emit_tasks();
-        let message = if changed == 0 {
-            "选中的任务状态没有变化".to_owned()
-        } else if done {
-            format!("已将 {changed} 个任务标记为完成")
-        } else {
-            format!("已将 {changed} 个任务标记为未完成")
-        };
-        self.emit(Event::Notice(message));
-        Ok(())
-    }
-
-    /// 刪除單一任務。
-    pub(super) fn delete_task(&mut self, id: u64) -> AppResult<()> {
-        self.tasks.delete(id)?;
-        self.emit_tasks();
-        self.emit(Event::Notice("已删除任务".to_owned()));
-        Ok(())
-    }
-
-    /// 批次刪除任務（多選）。
-    pub(super) fn delete_tasks(&mut self, ids: &[u64]) -> AppResult<()> {
-        let deleted = self.tasks.delete_many(ids)?;
-        self.emit_tasks();
-        self.emit(Event::Notice(format!("已删除 {deleted} 个任务")));
-        Ok(())
-    }
-
-    /// 刪除所有已完成任務。
-    pub(super) fn delete_completed_tasks(&mut self) -> AppResult<()> {
-        let deleted = self.tasks.delete_completed()?;
-        self.emit_tasks();
-        let message = if deleted == 0 {
-            "没有已完成的任务".to_owned()
-        } else {
-            format!("已删除 {deleted} 个已完成任务")
-        };
-        self.emit(Event::Notice(message));
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-#[path = "tests/tasks_test.rs"]
-mod tasks_test;

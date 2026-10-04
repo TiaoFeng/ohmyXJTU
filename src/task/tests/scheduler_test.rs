@@ -73,6 +73,7 @@ impl ThreadWorker {
 
         let (job_tx, job_rx) = std_channel();
         let (event_tx, event_rx) = std_channel();
+        let tasks = crate::task::tasks::detached();
         let mut worker = Worker {
             jobs: job_rx,
             events: event_tx,
@@ -101,6 +102,7 @@ impl ThreadWorker {
             timing: LoadTiming::default(),
             login_started: None,
             shutdown: false,
+            tasks,
         };
 
         let handle = thread::spawn(move || worker.run());

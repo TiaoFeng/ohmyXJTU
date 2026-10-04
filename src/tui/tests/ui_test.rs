@@ -3,6 +3,7 @@
 //! 中文標籤的顯示寬度是字元數的兩倍，因此「標籤補白、值區寬度、游標欄位」必須
 //! 由同一套版面計算決定；驗證碼與簡訊驗證的輸入框也必須真的畫出來。
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use ratatui::Terminal;
@@ -13,6 +14,7 @@ use crate::config::AccessPolicy;
 use crate::domain::attendance_match::LessonAttendance;
 use crate::domain::homework::{HomeworkGroup, HomeworkInput, HomeworkItem, aggregate};
 use crate::domain::semester::TermCode;
+use crate::domain::todo::{Priority, SortMode, Task};
 use crate::model::{ActivityDetailView, FlowData, LessonEntry, ScheduleData};
 use crate::session::{AccessMode, SiteKind};
 use crate::sites::attendance::{AttendanceStatus, FlowRecord};
@@ -23,7 +25,8 @@ use crate::sites::lms::{
 use crate::task::HomeworkIssue;
 use crate::tui::app::{
     AgreementState, App, FormState, HomeworkData, LmsLevel, LoginScreen, NavItem, Page, Screen,
-    SettingsState, TermPickerState,
+    SettingsState, TaskBatchMenuState, TaskConfirmState, TaskFormState, TaskMenuState,
+    TermPickerState,
 };
 use crate::tui::text::{InputLine, MASK_CHAR};
 use crate::tui::theme::THEME;
@@ -93,6 +96,30 @@ fn find_row(backend: &TestBackend, needle: &str) -> (u16, String) {
 fn column_of(row: &str, needle: &str) -> u16 {
     let offset = row.find(needle).expect("子字符串应存在于该列");
     u16::try_from(Line::from(&row[..offset]).width()).unwrap_or(u16::MAX)
+}
+
+/// 內容區（側邊欄之後）中，指定文字的起始欄位。
+///
+/// 側邊欄的導覽標籤可能與內容同名（例如「任务」），因此一律從內容區左界之後
+/// 開始找，不能直接在整列文字上搜尋。
+fn content_column(backend: &TestBackend, y: u16, content_x: u16, needle: &str) -> u16 {
+    let area = backend.buffer().area;
+    let mut text = String::new();
+    let mut columns: Vec<u16> = Vec::new();
+    let mut x = content_x + 1;
+
+    while x < area.x + area.width {
+        let symbol = backend.buffer()[(x, y)].symbol();
+        for character in symbol.chars() {
+            columns.push(x);
+            text.push(character);
+        }
+        let width = u16::try_from(Line::from(symbol).width()).unwrap_or(1);
+        x += width.max(1);
+    }
+
+    let offset = text.find(needle).expect("子字符串应存在于内容区");
+    columns[text[..offset].chars().count()]
 }
 
 #[test]
@@ -1173,7 +1200,7 @@ fn sidebar_left_aligns_labels_and_blinks_dots_before_text() {
     });
     let backend = terminal.backend();
     let schedule = find_sidebar_row(backend, "课表");
-    let homework = find_sidebar_row(backend, "作业");
+    let homework = find_sidebar_row(backend, "任务");
     let attendance = find_sidebar_row(backend, "考勤流水");
     let lms = find_sidebar_row(backend, "思源学堂");
 
@@ -1188,7 +1215,7 @@ fn sidebar_left_aligns_labels_and_blinks_dots_before_text() {
 
     // 標籤左對齊：所有項目共用同一個文字起始欄。
     let label_col = column_of(&schedule, "课表");
-    assert_eq!(column_of(&homework, "作业"), label_col, "标签应左对齐");
+    assert_eq!(column_of(&homework, "任务"), label_col, "标签应左对齐");
     assert_eq!(column_of(&attendance, "考勤流水"), label_col);
     assert_eq!(column_of(&lms, "思源学堂"), label_col);
 
@@ -2442,8 +2469,8 @@ fn footer_keeps_page_hints_on_narrow_terminals() {
     );
     assert!(footer.contains('…'), "应标注还有未显示的提示：{footer:?}");
 
-    // 寬終端仍列出完整提示。
-    let terminal = draw(200, HEIGHT, |frame| {
+    // 寬終端仍列出完整提示（提示段數隨功能增加，這裡留出足夠的欄寬）。
+    let terminal = draw(220, HEIGHT, |frame| {
         crate::tui::views::draw(frame, &mut app)
     });
     let footer = row_text(terminal.backend(), HEIGHT - 1);
@@ -2696,4 +2723,482 @@ fn activity_detail_reports_unreadable_description() {
     let text = screen_text(terminal.backend());
     assert!(text.contains("未取得说明正文"), "应显示原因：\n{text}");
     assert!(text.contains("顶层"), "应指出正文实际位置：\n{text}");
+}
+
+// ── 任務頁（自訂義任務） ─────────────────────────────────
+
+/// 測試用任務。
+fn todo(id: u64, content: &str, priority: Priority, completed: bool) -> Task {
+    Task {
+        id,
+        content: content.to_owned(),
+        description: None,
+        deadline: None,
+        priority,
+        completed,
+    }
+}
+
+/// 任務頁測試用資料（任務段在前、作業段在後）。
+fn task_page_app(tasks: Vec<Task>, items: Vec<HomeworkItem>) -> App {
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Homework;
+    app.tasks = tasks;
+    app.homework = Page::Ready(homework_data(items, None));
+    app
+}
+
+#[test]
+fn task_page_separates_sections_with_a_spacer_and_pink_headers() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00+08:00").expect("固定时间");
+    let items = aggregate(&[homework_input("待办作业", "2026-10-01 23:59:59", 0)], now);
+    let mut app = task_page_app(vec![todo(1, "写实验报告", Priority::High, false)], items);
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let backend = terminal.backend();
+    let text = screen_text(backend);
+
+    let (task_y, _) = find_row(backend, "  任务");
+    let (homework_y, _) = find_row(backend, "  作业");
+    assert!(task_y < homework_y, "任务段应排在作业段之前：\n{text}");
+    assert_eq!(task_y + 3, homework_y, "任务列后应留一列空白再接着作业段");
+
+    // 空白列只判斷內容區：側邊欄的導覽標籤與此無關。
+    let (_, title_row) = find_row(backend, "┌ 任务");
+    let content_x = column_of(&title_row, "┌ 任务");
+    let area = backend.buffer().area;
+    assert!(
+        (content_x + 1..area.x + area.width - 1)
+            .all(|x| backend.buffer()[(x, task_y + 2)].symbol() == " "),
+        "两段之间应留一列空白：\n{text}"
+    );
+
+    let (_, task_entry_row) = find_row(backend, "写实验报告");
+    let (_, homework_entry_row) = find_row(backend, "待办作业");
+    assert!(task_entry_row.contains('高'), "任务列应显示优先级");
+    assert!(
+        !task_entry_row.contains("  任务"),
+        "分段标题与任务列必须是不同行"
+    );
+    assert!(!homework_entry_row.is_empty());
+
+    // 兩段標題同色（粉紅強調），不以深淺灰區分。
+    assert_eq!(
+        backend.buffer()[(content_column(backend, task_y, content_x, "任务"), task_y)].fg,
+        THEME.accent,
+        "任务分段标题应为强调色"
+    );
+    assert_eq!(
+        backend.buffer()[(
+            content_column(backend, homework_y, content_x, "作业"),
+            homework_y
+        )]
+            .fg,
+        THEME.accent,
+        "作业分段标题应与任务同色"
+    );
+}
+
+#[test]
+fn task_rows_show_priority_state_and_deadline_without_greying_out() {
+    let mut task = todo(1, "写实验报告", Priority::High, false);
+    task.deadline = Some(
+        chrono::DateTime::parse_from_rfc3339("2026-10-05T12:00:00+08:00").expect("固定截止时间"),
+    );
+    let app_tasks = vec![task, todo(2, "复习", Priority::Low, false)];
+    let mut app = task_page_app(app_tasks, Vec::new());
+    // 選取第二列：反白列會覆蓋文字色，顏色斷言必須在未選取的列上進行。
+    app.homework_state.select(Some(1));
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let backend = terminal.backend();
+    let (row_y, row) = find_row(backend, "写实验报告");
+    assert!(row.contains('高'), "应显示优先级：\n{row}");
+    assert!(row.contains("待完成"), "应显示状态：\n{row}");
+    assert!(row.contains("2026-10-05 12:00"), "应显示截止时间：\n{row}");
+
+    // 未完成的任務維持一般文字色（不以灰色弱化）。
+    assert_eq!(
+        backend.buffer()[(column_of(&row, "写实验报告"), row_y)].fg,
+        THEME.text,
+        "任务内容应为一般文字色"
+    );
+
+    // 已完成的任務移到「已完成」分組，顏色不變。
+    app.homework_group = HomeworkGroup::Completed;
+    app.tasks[1].completed = true;
+    app.tasks.push(todo(3, "自习", Priority::Low, true));
+    app.homework_state.select(Some(1));
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let backend = terminal.backend();
+    let (done_y, done_row) = find_row(backend, "复习");
+    assert!(done_row.contains("已完成"), "应显示已完成：\n{done_row}");
+    assert_eq!(
+        backend.buffer()[(column_of(&done_row, "复习"), done_y)].fg,
+        THEME.text,
+        "已完成任务不得以灰色呈现"
+    );
+}
+
+#[test]
+fn task_page_marks_multi_select_checkboxes() {
+    let mut app = task_page_app(
+        vec![
+            todo(1, "写实验报告", Priority::High, false),
+            todo(2, "复习", Priority::Low, false),
+        ],
+        Vec::new(),
+    );
+    app.task_multi = Some(HashSet::from([1]));
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(text.contains("[x] "), "已勾选的任务应显示勾选框：\n{text}");
+    assert!(text.contains("[ ] "), "未勾选的任务应显示空框：\n{text}");
+    assert!(text.contains("space 勾选"), "底栏应提示多选按键：\n{text}");
+}
+
+#[test]
+fn task_detail_panel_shows_the_description_and_scrolls() {
+    let mut task = todo(1, "写实验报告", Priority::Medium, false);
+    task.description = Some(
+        (1..=30)
+            .map(|index| format!("第 {index} 行说明"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    let mut app = task_page_app(vec![task], Vec::new());
+    app.homework_detail = true;
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let backend = terminal.backend();
+    let text = screen_text(backend);
+    assert!(text.contains("任务详情"), "应显示任务详情标题：\n{text}");
+    assert!(text.contains("描述："), "应显示描述栏：\n{text}");
+    assert!(text.contains("第 1 行说明"), "应显示描述内容：\n{text}");
+    assert!(text.contains("优先级："), "详情应同时显示优先级：\n{text}");
+    assert!(
+        text.contains("PgUp/PgDn 滚动"),
+        "内容超过面板高度时应提示滚动：\n{text}"
+    );
+    assert!(app.homework_scroll.scrollable(), "面板应可滚动");
+}
+
+#[test]
+fn task_page_search_hint_and_empty_state() {
+    let mut app = task_page_app(
+        vec![todo(1, "写实验报告", Priority::High, false)],
+        Vec::new(),
+    );
+    app.task_filter = Some("不存在的任务".to_owned());
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(
+        text.contains("筛选“不存在的任务”：0 项"),
+        "应显示筛选提示与匹配数：\n{text}"
+    );
+    assert!(
+        text.contains("没有匹配的条目"),
+        "无匹配时应显示说明：\n{text}"
+    );
+    assert!(
+        text.contains("（esc 清除）"),
+        "筛选提示应说明如何清除：\n{text}"
+    );
+}
+
+#[test]
+fn task_form_popup_shows_fields_and_inline_error() {
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::TaskForm(Box::new(TaskFormState::add())));
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(text.contains("添加任务"), "应显示弹窗标题：\n{text}");
+    for label in ["内容", "描述", "截止", "优先级", "完成"] {
+        assert!(text.contains(label), "表单应显示 {label} 字段：\n{text}");
+    }
+    assert!(
+        text.contains("2026-12-31 12:30（可留空）"),
+        "截止字段应显示格式提示：\n{text}"
+    );
+    assert!(text.contains("^s 保存"), "应显示保存按键提示：\n{text}");
+    assert!(
+        text.contains("tab 切换字段"),
+        "应显示字段切换提示：\n{text}"
+    );
+
+    // 驗證失敗：錯誤就地顯示，欄位仍在。
+    if let Screen::TaskForm(form) = &mut app.screen {
+        form.error = Some("任务内容不能为空".to_owned());
+    }
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(
+        text.contains("任务内容不能为空"),
+        "应就地显示错误：\n{text}"
+    );
+    assert!(text.contains("内容"), "错误不得清空表单：\n{text}");
+}
+
+#[test]
+fn task_menu_and_confirm_popups_render() {
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::TaskMenu(TaskMenuState { index: 1 }));
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(text.contains("任务设置"), "应显示设置弹窗标题：\n{text}");
+    assert!(
+        text.contains("多选（批量操作）"),
+        "应列出多选选项：\n{text}"
+    );
+    assert!(
+        text.contains("删除所有已完成的任务"),
+        "应列出删除已完成选项：\n{text}"
+    );
+
+    app.set_screen(Screen::TaskConfirm(TaskConfirmState { count: 3 }));
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(text.contains("确认删除"), "应显示确认弹窗标题：\n{text}");
+    assert!(text.contains("3"), "应显示待删除数量：\n{text}");
+    assert!(text.contains("个已完成任务？"), "应显示确认问句：\n{text}");
+    assert!(text.contains("y 确认"), "应提示确认按键：\n{text}");
+}
+
+#[test]
+fn task_page_search_box_shows_the_query_and_cursor() {
+    let mut app = task_page_app(
+        vec![todo(1, "写实验报告", Priority::High, false)],
+        Vec::new(),
+    );
+    app.task_search = Some(InputLine::with_value("报告"));
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let backend = terminal.backend();
+    let (row_y, row) = find_row(backend, "搜索：报告");
+    let (tabs_y, _) = find_row(backend, "未完成 1");
+    assert!(
+        tabs_y < row_y,
+        "搜索框应在分组标签列之后：\n{}",
+        screen_text(backend)
+    );
+
+    // 游標應緊接在輸入內容之後（前綴 1+4+2 欄，內容為兩個全形字＝4 欄）。
+    let content_x = column_of(&row, "搜索");
+    assert_eq!(backend.cursor_position().y, row_y, "游标应在搜索框那一列");
+    assert_eq!(
+        backend.cursor_position().x,
+        content_x + 10,
+        "游标应在输入内容之后：\n{row}"
+    );
+}
+
+#[test]
+fn task_page_hides_the_search_box_when_no_search_is_open() {
+    let mut app = task_page_app(
+        vec![todo(1, "写实验报告", Priority::High, false)],
+        Vec::new(),
+    );
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(!text.contains("搜索："), "未搜尋時不應出现搜尋框：\n{text}");
+}
+
+#[test]
+fn task_batch_menu_lists_the_batch_operations() {
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::TaskBatchMenu(TaskBatchMenuState { index: 2 }));
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(text.contains("批量操作"), "应显示弹窗标题：\n{text}");
+    for label in ["标记完成", "标记未完成", "删除"] {
+        assert!(text.contains(label), "应列出 {label}：\n{text}");
+    }
+    assert!(text.contains("esc 返回"), "应提示返回按键：\n{text}");
+}
+
+#[test]
+fn task_form_edit_mode_prefills_and_shows_busy_state() {
+    let mut app = App::new(AccessPolicy::Auto);
+    let task = todo(7, "写实验报告", Priority::High, true);
+    app.set_screen(Screen::TaskForm(Box::new(TaskFormState::edit(&task))));
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(text.contains("编辑任务"), "编辑模式标题不同：\n{text}");
+    assert!(text.contains("写实验报告"), "应预填内容：\n{text}");
+    assert!(text.contains("高"), "应显示优先级：\n{text}");
+    assert!(text.contains("已完成"), "应显示完成状态：\n{text}");
+
+    if let Screen::TaskForm(form) = &mut app.screen {
+        form.busy = true;
+    }
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(text.contains("正在保存…"), "保存中应显示提示：\n{text}");
+}
+
+// ── 任務頁排序（^L） ─────────────────────────────────────
+
+/// 該列在內容區（側邊欄右框線之後）是否以分段標題開頭。
+///
+/// 側邊欄也有「任务」標籤，因此不能直接比對整列文字。
+fn has_section_header(row: &str) -> bool {
+    row.split_once('│')
+        .is_some_and(|(_, rest)| rest.starts_with("│  任务") || rest.starts_with("│  作业"))
+}
+
+#[test]
+fn sorted_task_page_mixes_rows_without_section_headers() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00+08:00").expect("固定时间");
+    let items = aggregate(&[homework_input("待办作业", "2026-10-01 23:59:59", 0)], now);
+    let mut app = task_page_app(vec![todo(1, "写实验报告", Priority::Low, false)], items);
+    app.task_sort = SortMode::Priority;
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let backend = terminal.backend();
+    let text = screen_text(backend);
+    let area = backend.buffer().area;
+
+    // 混合排序：內容區不再出現分段標題。
+    let headers: Vec<String> = (area.y..area.y + area.height)
+        .map(|y| row_text(backend, y))
+        .filter(|row| has_section_header(row))
+        .collect();
+    assert!(headers.is_empty(), "混合排序不应出现分段标题：{headers:?}");
+
+    // 作業（高）排在低優先級任務之前，兩列相鄰（沒有標題或空白列夾在中間）。
+    let (homework_y, _) = find_row(backend, "待办作业");
+    let (task_y, _) = find_row(backend, "写实验报告");
+    assert!(
+        homework_y < task_y,
+        "作业的优先级视为高，应排在低优先级任务前：\n{text}"
+    );
+    assert_eq!(homework_y + 1, task_y, "混合排序不应插入空白列：\n{text}");
+
+    // 標題列說明目前的排序方式（分段標題消失後仍看得出在按什麼排序）。
+    let (_, tabs_row) = find_row(backend, "排序：优先级");
+    assert!(
+        tabs_row.contains("任务与作业混合"),
+        "标题列应说明混合排序：\n{tabs_row}"
+    );
+}
+
+#[test]
+fn sort_prompt_replaces_the_footer_with_the_sort_keys() {
+    let mut app = task_page_app(
+        vec![todo(1, "写实验报告", Priority::High, false)],
+        Vec::new(),
+    );
+    // 排序提示開啟時，底欄只顯示排序相關的按鍵。
+    app.set_screen(Screen::Sort);
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let backend = terminal.backend();
+    let footer = row_text(backend, HEIGHT - 1);
+    assert!(
+        footer.contains("排序：[p] 优先级"),
+        "底栏应显示排序按键：{footer}"
+    );
+    assert!(
+        footer.contains("[d] 截止时间"),
+        "底栏应显示排序按键：{footer}"
+    );
+    assert!(footer.contains("esc 取消"), "底栏应显示取消提示：{footer}");
+    assert!(
+        !footer.contains("^a 添加"),
+        "排序提示应取代一般按键提示：{footer}"
+    );
+
+    // 關閉排序提示後恢復一般提示；提示段數多，這裡用寬終端確認 `^L` 仍在提示列中。
+    app.set_screen(Screen::Main);
+    let terminal = draw(220, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let footer = row_text(terminal.backend(), HEIGHT - 1);
+    assert!(footer.contains("^L 排序"), "任务页应提示 ^L：{footer}");
+    assert!(
+        !footer.contains("排序：[p]"),
+        "关闭后不应再显示排序提示：{footer}"
+    );
+}
+
+/// 通知尚未消失時按下 `^L`：底欄必須立刻換成排序提示（而不是繼續顯示通知）。
+#[test]
+fn pressing_sort_key_hides_the_pending_notice_immediately() {
+    let (jobs, _rx) = std::sync::mpsc::channel();
+    let mut app = task_page_app(
+        vec![todo(1, "写实验报告", Priority::High, false)],
+        Vec::new(),
+    );
+    app.set_message("作业已更新（用时 3.2s）");
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let before = row_text(terminal.backend(), HEIGHT - 1);
+    assert!(
+        before.contains("作业已更新"),
+        "测试前提：通知应显示在底栏：{before}"
+    );
+
+    crate::tui::handler::handle_key(
+        &mut app,
+        crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('l'),
+            crossterm::event::KeyModifiers::CONTROL,
+        ),
+        &jobs,
+    );
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let after = row_text(terminal.backend(), HEIGHT - 1);
+    assert!(
+        after.contains("排序：[p] 优先级"),
+        "按下 ^L 后底栏应立刻显示排序按键：{after}"
+    );
+    assert!(
+        !after.contains("作业已更新"),
+        "旧通知不应继续盖住画面提示：{after}"
+    );
 }

@@ -4,6 +4,8 @@ pub mod agreement;
 pub mod content;
 pub mod main_view;
 pub mod settings;
+pub mod task_form;
+pub mod task_menu;
 pub mod term_picker;
 
 use ratatui::Frame;
@@ -58,7 +60,14 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 None,
             );
         }
-        Screen::Main | Screen::Settings(_) | Screen::TermPicker(_) => main_view::draw(frame, app),
+        Screen::Main
+        | Screen::Sort
+        | Screen::Settings(_)
+        | Screen::TermPicker(_)
+        | Screen::TaskMenu(_)
+        | Screen::TaskBatchMenu(_)
+        | Screen::TaskConfirm(_)
+        | Screen::TaskForm(_) => main_view::draw(frame, app),
     }
 
     // 登入互動覆蓋層：底層（表單或主畫面）先完整繪製，彈窗只覆蓋自身區域，

@@ -5,7 +5,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
@@ -14,6 +14,7 @@ use crate::config::AccessPolicy;
 use crate::domain::attendance_match::LessonAttendance;
 use crate::domain::homework::HomeworkState;
 use crate::domain::semester::{TermCode, TermSource};
+use crate::domain::todo::{Priority, Task};
 use crate::error::NetworkKind;
 use crate::http::fake::{FakeClient, html, json};
 use crate::http::{Body, HttpClient, HttpRequest, HttpResponse, Method};
@@ -23,6 +24,7 @@ use crate::sites::lms::LmsSite;
 use crate::sites::lms::{BODY_FIELD_TYPE_NOTE, BODY_NOT_OBJECT_NOTE};
 use crate::sites::{attendance, lms};
 use crate::task::protocol::{DataKey, HomeworkUpdate};
+use crate::task::tasks::store::TaskStore;
 use crate::tui::app::{App, LoginScreen};
 use crate::tui::text::InputLine;
 
@@ -87,6 +89,8 @@ struct Harness {
     vault: Vault,
     /// 保持任務通道開啟（資料任務會檢查通道是否斷開）。
     _jobs: Sender<Job>,
+    /// 任務服務的送出端（測試直接以它送任務操作）。
+    _task_jobs: Sender<Job>,
     /// 持有暫存目錄，離開作用域時自動刪除。
     _dir: TempDir,
 }
@@ -163,6 +167,17 @@ impl Harness {
         let (job_tx, jobs) = channel();
         let (events, event_rx) = channel();
 
+        // 任務服務：與正式程式一樣獨立一條通道（任務操作不與網路排隊）。
+        let (task_tx, task_rx) = channel();
+        crate::task::tasks::serve(
+            events.clone(),
+            job_tx.clone(),
+            task_rx,
+            dir.path().join("tasks.vault"),
+        )
+        .expect("启动任务服务");
+        let tasks = crate::task::tasks::TaskHandle::new(task_tx.clone());
+
         Self {
             worker: Worker {
                 jobs,
@@ -191,10 +206,12 @@ impl Harness {
                 timing: LoadTiming::default(),
                 login_started: None,
                 shutdown: false,
+                tasks,
             },
             events: event_rx,
             vault,
             _jobs: job_tx,
+            _task_jobs: task_tx,
             _dir: dir,
         }
     }
@@ -209,6 +226,11 @@ impl Harness {
     /// 測試用設定檔路徑。
     fn config_path(&self) -> std::path::PathBuf {
         self._dir.path().join("config.json")
+    }
+
+    /// 測試用任務檔路徑。
+    fn tasks_path(&self) -> std::path::PathBuf {
+        self._dir.path().join("tasks.vault")
     }
 
     /// 直接標記考勤與思源學堂都已登入（跳過登入流程）。
@@ -256,6 +278,59 @@ impl Harness {
             collected.push(event);
         }
         collected
+    }
+
+    /// 收集事件：先等最多 `first` 等到第一則事件，之後只收連續空檔之前的後續事件。
+    ///
+    /// 任務服務是獨立執行緒：任務快照與提示比工作者的回報晚（解鎖後的第一次
+    /// 載入要跑 Argon2id，在測試建置下可能要數百毫秒），因此不能只靠固定等待。
+    fn collect_events(&mut self, first: Duration, idle: Duration) -> Vec<Event> {
+        let deadline = Instant::now() + first;
+        let mut collected = Vec::new();
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match self.events.recv_timeout(remaining) {
+            Ok(event) => collected.push(event),
+            Err(_) => return collected,
+        }
+        loop {
+            match self.events.recv_timeout(idle) {
+                Ok(event) => collected.push(event),
+                Err(_) => return collected,
+            }
+        }
+    }
+
+    /// 等到解鎖完成：憑證就緒與任務快照都收到為止。
+    ///
+    /// 任務服務是獨立執行緒：`VaultReady` 與任務快照的先後順序不固定，因此
+    /// 兩個都要等到。
+    fn wait_until_unlocked(&mut self) -> Vec<Event> {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut collected = Vec::new();
+        let mut ready = false;
+        let mut tasks = false;
+        while Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let Ok(event) = self.events.recv_timeout(remaining) else {
+                break;
+            };
+            match &event {
+                Event::VaultReady => ready = true,
+                Event::Tasks(_) => tasks = true,
+                _ => {}
+            }
+            collected.push(event);
+            if ready && tasks {
+                break;
+            }
+        }
+        collected
+    }
+
+    /// 送出任務操作給任務服務，並收集它回報的事件。
+    fn dispatch_task(&mut self, job: Job) -> Vec<Event> {
+        self._task_jobs.send(job).expect("送出任务操作");
+        self.collect_events(Duration::from_secs(20), Duration::from_millis(150))
     }
 
     /// 事件中是否出現符合條件的項目（取出後即不再保留）。
@@ -5631,4 +5706,277 @@ fn relogin_budget_is_kept_per_task() {
     assert!(budget.try_consume(&open), "重置后应重新取得额度");
     budget.clear();
     assert!(budget.try_consume(&homework), "清空后所有任务重新取得额度");
+}
+
+// ── 自訂義任務（任務服務） ──────────────────────────────
+
+/// 測試用自訂義任務。
+fn todo_task(content: &str) -> Task {
+    Task {
+        id: 0,
+        content: content.to_owned(),
+        description: None,
+        deadline: None,
+        priority: Priority::Low,
+        completed: false,
+    }
+}
+
+/// 事件中最後一次回報的任務快照。
+fn last_tasks(events: &[Event]) -> Option<Vec<Task>> {
+    events.iter().rev().find_map(|event| match event {
+        Event::Tasks(tasks) => Some(tasks.clone()),
+        _ => None,
+    })
+}
+
+#[test]
+fn unlocking_loads_the_encrypted_task_file() {
+    let mut harness = harness(fake_flow(0));
+    // 先以同一口令準備一份任務檔（模擬上一次使用留下的內容）。
+    {
+        let mut store = TaskStore::at(harness.tasks_path());
+        store.init("secret123").unwrap();
+        store.add(todo_task("写实验报告")).unwrap();
+        store.add(todo_task("复习")).unwrap();
+    }
+
+    harness
+        .dispatch(Job::Unlock {
+            passphrase: "secret123".into(),
+        })
+        .expect("解锁");
+
+    // 任務服務是非同步的：解鎖（送出 `InitTasks`）之後稍等一下才會有快照。
+    let events = harness.wait_until_unlocked();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::VaultReady)),
+        "解锁应回报凭证已就绪"
+    );
+    let tasks = last_tasks(&events).expect("解锁后应回报任务快照");
+    assert_eq!(tasks.len(), 2, "任务文件应在解锁时载入");
+}
+
+#[test]
+fn task_operations_report_snapshots_and_notices() {
+    let mut harness = harness(fake_flow(0));
+    harness
+        .dispatch(Job::Unlock {
+            passphrase: "secret123".into(),
+        })
+        .unwrap();
+    harness.wait_until_unlocked();
+
+    let events = harness.dispatch_task(Job::AddTask {
+        task: todo_task("甲"),
+    });
+    let tasks = last_tasks(&events).expect("新增后应回报快照");
+    assert_eq!(tasks.len(), 1);
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::Notice(message) if message == "已添加任务")),
+        "新增应附带提示"
+    );
+
+    let id = tasks[0].id;
+    let tasks = last_tasks(&harness.dispatch_task(Job::SetTaskDone { id, done: true })).unwrap();
+    assert!(tasks[0].completed, "标记完成后快照应反映状态");
+
+    let mut edited = tasks[0].clone();
+    edited.content = "甲（改）".to_owned();
+    edited.priority = Priority::High;
+    let tasks = last_tasks(&harness.dispatch_task(Job::UpdateTask { id, task: edited })).unwrap();
+    assert_eq!(tasks[0].content, "甲（改）");
+    assert_eq!(tasks[0].priority, Priority::High);
+
+    let tasks = last_tasks(&harness.dispatch_task(Job::SetTasksDone {
+        ids: vec![id],
+        done: false,
+    }))
+    .unwrap();
+    assert!(!tasks[0].completed);
+
+    let events = harness.dispatch_task(Job::DeleteTasks { ids: vec![id] });
+    assert!(last_tasks(&events).unwrap().is_empty());
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::Notice(message) if message == "已删除 1 个任务")),
+        "批次删除应附带数量"
+    );
+
+    // 找不到任務時回報失敗（服務自己回報，不經過工作者）。
+    let events = harness.dispatch_task(Job::DeleteTask { id });
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Failed {
+                target: FailedTarget::Tasks,
+                ..
+            }
+        )),
+        "任务失败应落在任务落点上：{events:?}"
+    );
+}
+
+#[test]
+fn deleting_completed_tasks_reports_the_count() {
+    let mut harness = harness(fake_flow(0));
+    harness
+        .dispatch(Job::Unlock {
+            passphrase: "secret123".into(),
+        })
+        .unwrap();
+    harness.dispatch_task(Job::AddTask {
+        task: todo_task("甲"),
+    });
+    let events = harness.dispatch_task(Job::AddTask {
+        task: todo_task("乙"),
+    });
+    let ids: Vec<u64> = last_tasks(&events)
+        .unwrap()
+        .iter()
+        .map(|task| task.id)
+        .collect();
+    harness.dispatch_task(Job::SetTasksDone { ids, done: true });
+
+    let events = harness.dispatch_task(Job::DeleteCompletedTasks);
+    assert!(last_tasks(&events).unwrap().is_empty());
+    assert!(
+        events.iter().any(
+            |event| matches!(event, Event::Notice(message) if message == "已删除 2 个已完成任务")
+        ),
+        "应回报删除数量"
+    );
+
+    // 沒有已完成任務時只提示，不報錯。
+    let events = harness.dispatch_task(Job::DeleteCompletedTasks);
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::Notice(message) if message == "没有已完成的任务"))
+    );
+}
+
+#[test]
+fn changing_the_passphrase_reencrypts_the_task_file() {
+    let mut harness = harness(fake_flow(0));
+    harness
+        .dispatch(Job::Unlock {
+            passphrase: "secret123".into(),
+        })
+        .unwrap();
+    harness.dispatch_task(Job::AddTask {
+        task: todo_task("换口令前的任务"),
+    });
+    harness
+        .dispatch(Job::ChangePassphrase {
+            old: "secret123".into(),
+            new: "new-passphrase-1".into(),
+        })
+        .expect("修改口令");
+
+    // 換口令會在寫入保險庫之前先同步等待任務檔重新加密（兩個檔案必須同口令）。
+    let mut reloaded = TaskStore::at(harness.tasks_path());
+    reloaded.init("new-passphrase-1").unwrap();
+    assert_eq!(
+        reloaded.tasks().len(),
+        1,
+        "换口令后任务文件应以新口令重新加密"
+    );
+    harness
+        .vault
+        .load("new-passphrase-1")
+        .expect("凭证也应以新口令解开");
+}
+
+#[test]
+fn task_save_failure_reports_the_tasks_target() {
+    let mut harness = harness(fake_flow(0));
+    harness
+        .dispatch(Job::Unlock {
+            passphrase: "secret123".into(),
+        })
+        .unwrap();
+    harness.wait_until_unlocked();
+    // 以同名目錄佔位，讓寫入必定失敗（寫入失敗時記憶體狀態必須回滾）。
+    std::fs::create_dir(harness.tasks_path()).unwrap();
+
+    let events = harness.dispatch_task(Job::AddTask {
+        task: todo_task("写不进去"),
+    });
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Failed {
+                target: FailedTarget::Tasks,
+                ..
+            }
+        )),
+        "保存失败应回报任务落点：{events:?}"
+    );
+}
+
+#[test]
+fn interface_sender_reaches_the_task_service() {
+    // 整合驗證：正式啟動路徑（工作者＋任務服務）下，介面送出的任務操作確實
+    // 由任務服務處理——而不是躺在工作者的佇列裡等網路。
+    let dir = TempDir::new().expect("建立暂存目录");
+    let path = dir.path().join("credentials.vault");
+    let vault = Vault::at(path);
+    vault
+        .store("secret123", &Credentials::new("3120000001", "pw-12345"))
+        .expect("写入测试凭据");
+    let config = Config {
+        access_policy: AccessPolicy::Direct,
+        save_path: Some(dir.path().join("config.json")),
+        ..Config::default()
+    };
+
+    let (jobs, events) =
+        crate::task::worker::spawn_with_tasks(config, vault, dir.path().join("tasks.vault"))
+            .expect("启动工作者与任务服务");
+
+    jobs.send(Job::Unlock {
+        passphrase: "secret123".into(),
+    })
+    .expect("送出解锁");
+
+    // 等到 `VaultReady`：介面在這之後才會操作任務。
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut unlocked = false;
+    while !unlocked && Instant::now() < deadline {
+        if let Ok(event) = events.recv_timeout(Duration::from_millis(200)) {
+            unlocked = matches!(event, Event::VaultReady);
+        }
+    }
+    assert!(unlocked, "应回报凭证已就绪");
+
+    jobs.send(Job::AddTask {
+        task: todo_task("通过介面新增"),
+    })
+    .expect("送出新增任务");
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut snapshot: Option<Vec<Task>> = None;
+    while snapshot.is_none() && Instant::now() < deadline {
+        if let Ok(Event::Tasks(tasks)) = events.recv_timeout(Duration::from_millis(200))
+            && !tasks.is_empty()
+        {
+            snapshot = Some(tasks);
+        }
+    }
+    assert_eq!(
+        snapshot.expect("任务服务应回报快照").len(),
+        1,
+        "任务应由任务服务写入并回报"
+    );
+
+    // 任務檔確實落在指定的路徑（沒有動到使用者的資料目錄）。
+    let mut store = TaskStore::at(dir.path().join("tasks.vault"));
+    store.init("secret123").expect("以同一口令载入");
+    assert_eq!(store.tasks().len(), 1);
 }

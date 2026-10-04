@@ -179,3 +179,103 @@ fn keeps_the_cursor_inside_a_narrow_field() {
     );
     assert_eq!(visible, "中a文");
 }
+
+// ── 多行描述輸入框 ───────────────────────────────────────
+
+#[test]
+fn text_area_splits_and_joins_lines() {
+    let mut area = TextArea::new("");
+    assert!(area.is_empty());
+    assert_eq!(area.value(), "");
+    assert_eq!(area.line_count(), 1, "空内容仍有一行");
+
+    for character in "第一行".chars() {
+        area.insert(character);
+    }
+    assert_eq!(area.value(), "第一行");
+    assert_eq!(area.row(), 0, "單行時游標在第一行");
+
+    // 在游標處（尾端）換行，游標移到新的一行。
+    area.insert('\n');
+    assert_eq!(area.line_count(), 2);
+    assert_eq!(area.row(), 1);
+    for character in "第二行".chars() {
+        area.insert(character);
+    }
+    assert_eq!(area.value(), "第一行\n第二行");
+
+    // 行首退格：與上一行合併，游標停在接縫處。
+    area.move_home();
+    area.backspace();
+    assert_eq!(area.value(), "第一行第二行");
+    assert_eq!(area.line_count(), 1);
+    assert_eq!(area.line(0).expect("第一行仍存在").value(), "第一行第二行");
+    assert_eq!(area.focused_line().cursor(), 3, "游标应停在合并处");
+
+    // 行尾刪除沒有任何效果（已是最後一行）。
+    area.move_end();
+    let before = area.value();
+    area.delete();
+    assert_eq!(area.value(), before);
+}
+
+#[test]
+fn text_area_edits_across_lines_with_arrows() {
+    let mut area = TextArea::new("甲\n乙");
+    assert_eq!(area.line_count(), 2);
+    assert_eq!(area.row(), 1, "以初值建立时游标在最后一行");
+    assert!(area.line(0).is_some_and(|line| line.value() == "甲"));
+    assert!(area.line(1).is_some_and(|line| line.value() == "乙"));
+    assert!(area.line(2).is_none());
+
+    // 上移：游標回到第一行的同一欄位（越界時夾取）。
+    area.move_up();
+    assert_eq!(area.row(), 0);
+    assert_eq!(area.focused_line().cursor(), 1, "應夾到該行長度");
+    area.move_down();
+    assert_eq!(area.row(), 1);
+
+    // 行首左移會接到上一行尾端；行尾右移會接到下一行開頭。
+    area.move_home();
+    area.move_left();
+    assert_eq!(area.row(), 0, "行首左移应移到上一行");
+    assert_eq!(area.focused_line().cursor(), 1, "并停在上一行尾端");
+    area.move_right();
+    assert_eq!(area.row(), 1, "行尾右移应移到下一行");
+    assert_eq!(area.focused_line().cursor(), 0, "并停在下一行开头");
+
+    // 行尾刪除會把下一行併入（在第 0 行的行尾）。
+    area.move_up();
+    area.move_end();
+    area.delete();
+    assert_eq!(area.value(), "甲乙");
+    assert_eq!(area.line_count(), 1);
+
+    // 邊界不越界：首行行首退格、末行行尾刪除都是空操作。
+    let mut boundary = TextArea::new("甲\n乙");
+    boundary.move_up();
+    boundary.move_home();
+    boundary.backspace();
+    assert_eq!(boundary.value(), "甲\n乙", "首行行首退格不得越界");
+    assert_eq!(boundary.row(), 0);
+    boundary.move_down();
+    boundary.move_end();
+    boundary.delete();
+    assert_eq!(boundary.value(), "甲\n乙", "末行行尾删除不得越界");
+    assert_eq!(boundary.row(), 1);
+}
+
+#[test]
+fn text_area_window_follows_the_cursor() {
+    let area = TextArea::new("一\n二\n三\n四\n五");
+    assert_eq!(area.row(), 4);
+    // 三行視窗、游標在最後一行：視窗往下移，讓游標行可見。
+    let start = area.window_start(3);
+    assert_eq!(start, 2, "視窗应滚动到游标所在行");
+
+    // 空行（只有換行）也算一行，仍能取到值。
+    let empty = TextArea::new("\n");
+    assert_eq!(empty.line_count(), 2, "换行符切出两个空行");
+    assert_eq!(empty.value(), "\n");
+    assert!(empty.is_empty(), "两行都空时视为空内容");
+}

@@ -4,6 +4,7 @@
 //! 考勤流水。呼叫端先以 [`super::row_width`] 取得可用列寬後傳入。
 
 use crate::domain::homework::HomeworkItem;
+use crate::domain::todo::Task;
 use crate::model::LessonEntry;
 use crate::sites::lms::LmsActivity;
 use crate::text::display_width;
@@ -130,6 +131,8 @@ const TITLE_MIN_WIDTH: usize = 6;
 const HOMEWORK_COURSE_MIN_WIDTH: usize = 6;
 /// 活動類型欄寬（最寬標籤「课程内容」為四個全角字）。
 const ACTIVITY_KIND_WIDTH: usize = 8;
+/// 任務列標籤欄（優先級）的寬度（「高」為兩個全角字）。
+const TASK_PRIORITY_WIDTH: usize = 2;
 
 /// 作業與活動清單的欄寬（單位為終端顯示欄）。
 ///
@@ -190,9 +193,30 @@ impl RowNeeds {
                 .unwrap_or(0),
         }
     }
+
+    /// 由自訂義任務列組出需求（標籤欄放優先級，寬度固定）。
+    pub(super) fn of_tasks(tasks: &[&Task]) -> Self {
+        Self {
+            label: TASK_PRIORITY_WIDTH,
+            title: tasks
+                .iter()
+                .map(|task| display_width(&task.content))
+                .max()
+                .unwrap_or(0),
+        }
+    }
+
+    /// 合併兩組需求（各欄取最大值）；任務頁的作業與任務共用同一組欄寬。
+    pub(super) fn merge(self, other: Self) -> Self {
+        Self {
+            label: self.label.max(other.label),
+            title: self.title.max(other.title),
+        }
+    }
 }
 
 /// 作業清單欄寬；終端過窄而無法完整顯示時回傳 `None`。
+#[cfg(test)]
 pub(super) fn homework_columns(available: usize, needs: RowNeeds) -> Option<RowColumns> {
     row_columns(
         available,
@@ -207,9 +231,40 @@ pub(super) fn activity_columns(available: usize, needs: RowNeeds) -> Option<RowC
     row_columns(available, ACTIVITY_KIND_WIDTH, 0, needs)
 }
 
-/// 作業清單可完整顯示所需的最小列寬。
+/// 作業清單可完整顯示所需的最小列寬（測試用；實際由 [`page_min_row_width`] 提供）。
+#[cfg(test)]
 pub(super) fn homework_min_row_width() -> usize {
     row_min_row_width(HOMEWORK_COURSE_MIN_WIDTH, HOMEWORK_STATE_WIDTH)
+}
+
+/// 任務頁清單欄寬（作業與任務共用同一組欄位骨架）。
+///
+/// `tasks_only` 為真（當前分組只有任務）時，標籤欄只需放優先級；否則至少要
+/// 放得下課程名稱。終端過窄而無法完整顯示時回傳 `None`。
+pub(super) fn page_columns(
+    available: usize,
+    needs: RowNeeds,
+    tasks_only: bool,
+) -> Option<RowColumns> {
+    row_columns(
+        available,
+        page_label_min(tasks_only),
+        HOMEWORK_STATE_WIDTH,
+        needs,
+    )
+}
+
+/// 任務頁清單可完整顯示所需的最小列寬。
+pub(super) fn page_min_row_width(tasks_only: bool) -> usize {
+    row_min_row_width(page_label_min(tasks_only), HOMEWORK_STATE_WIDTH)
+}
+
+fn page_label_min(tasks_only: bool) -> usize {
+    if tasks_only {
+        TASK_PRIORITY_WIDTH
+    } else {
+        HOMEWORK_COURSE_MIN_WIDTH
+    }
 }
 
 /// 活動清單可完整顯示所需的最小列寬。

@@ -867,6 +867,16 @@ pub struct App {
     pub schedule_week: Option<u32>,
     /// 學期總週數（切換週次的邊界）。
     pub schedule_total: Option<u32>,
+    /// 使用者以 `[`／`]` 指定、但尚未收到該週資料的目標週次。
+    ///
+    /// 課表載入是單步任務：切週指令要等已在執行中的舊週載入回報後才生效，
+    /// 那筆舊週結果仍會送達介面。套用課表事件前據此過濾週次不符的回應，避免
+    /// 畫面閃回舊週，或（新週載入失敗時）停在舊週的課程資料與標題。
+    ///
+    /// 與 `schedule_week` 分開：`schedule_week` 是「要顯示的週次」，而工作者在
+    /// 使用者從未切週且學期已結束／尚未開始時會回應正規化後的週次（與上次顯示
+    /// 的週次不同），拿它比對會誤丟合法結果。收到相符的資料後即清空。
+    pub schedule_pending_week: Option<u32>,
     /// 作業頁。
     pub homework: Page<HomeworkData>,
     /// 作業頁目前分組。
@@ -927,6 +937,7 @@ impl App {
             schedule: Page::Idle,
             schedule_week: None,
             schedule_total: None,
+            schedule_pending_week: None,
             homework: Page::Idle,
             homework_group: HomeworkGroup::Unfinished,
             term_options: Vec::new(),
@@ -1095,6 +1106,7 @@ impl App {
             self.schedule = Page::Idle;
             self.schedule_week = None;
             self.schedule_total = None;
+            self.schedule_pending_week = None;
             self.homework = Page::Idle;
             self.attendance = Page::Idle;
             // 舊帳號的課程、活動與詳情一律清空。

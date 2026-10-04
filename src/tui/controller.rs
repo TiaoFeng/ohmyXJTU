@@ -168,6 +168,10 @@ pub(super) fn change_group(app: &mut App, delta: i32) {
 /// 與切換課程／活動同理，舊週的課程不屬於目標週：清空內容（`reset_loading`）
 /// 而不是保留顯示，避免使用者以為看到的是目標週的課表。到邊界（第 1 週、
 /// 最後一週）時不動作。
+///
+/// 目標週次另記在 `schedule_pending_week`：已在執行中的舊週載入不會被作廢
+/// （切週指令要等它回報後才生效），其結果必須由 `event::apply_schedule`
+/// 依此欄位丟棄。
 pub(super) fn change_schedule_week(app: &mut App, jobs: &Sender<Job>, delta: i32) {
     if app.nav != NavItem::Schedule {
         return;
@@ -182,6 +186,7 @@ pub(super) fn change_schedule_week(app: &mut App, jobs: &Sender<Job>, delta: i32
 
     let target = u32::try_from(target).unwrap_or(1);
     app.schedule_week = Some(target);
+    app.schedule_pending_week = Some(target);
     app.schedule
         .reset_loading(format!("正在加载第 {target} 周…"));
     let _ = jobs.send(Job::SetScheduleWeek { week: target });

@@ -70,9 +70,13 @@ fn priority_cycles_and_labels() {
     assert_eq!(Priority::High.label(), "高");
     assert_eq!(Priority::Medium.label(), "中");
     assert_eq!(Priority::Low.label(), "低");
-    assert_eq!(Priority::High.next(), Priority::Medium);
-    assert_eq!(Priority::Low.next(), Priority::High);
-    assert_eq!(Priority::High.previous(), Priority::Low);
+    // `→` 的方向是「低 → 中 → 高 → 低」（`←` 反向），與畫面選項的直覺一致。
+    assert_eq!(Priority::Low.next(), Priority::Medium);
+    assert_eq!(Priority::Medium.next(), Priority::High);
+    assert_eq!(Priority::High.next(), Priority::Low);
+    assert_eq!(Priority::Low.previous(), Priority::High);
+    assert_eq!(Priority::Medium.previous(), Priority::Low);
+    assert_eq!(Priority::High.previous(), Priority::Medium);
     assert!(Priority::High < Priority::Low, "排序时高优先级在前");
 }
 

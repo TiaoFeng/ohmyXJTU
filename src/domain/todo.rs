@@ -45,21 +45,21 @@ impl Priority {
         }
     }
 
-    /// 下一個優先級（循環）。
+    /// 下一個優先級（循環；`→` 的方向：低 → 中 → 高 → 低）。
     pub fn next(self) -> Self {
+        match self {
+            Self::Low => Self::Medium,
+            Self::Medium => Self::High,
+            Self::High => Self::Low,
+        }
+    }
+
+    /// 上一個優先級（循環；`←` 的方向：高 → 中 → 低 → 高）。
+    pub fn previous(self) -> Self {
         match self {
             Self::High => Self::Medium,
             Self::Medium => Self::Low,
             Self::Low => Self::High,
-        }
-    }
-
-    /// 上一個優先級（循環）。
-    pub fn previous(self) -> Self {
-        match self {
-            Self::High => Self::Low,
-            Self::Medium => Self::High,
-            Self::Low => Self::Medium,
         }
     }
 

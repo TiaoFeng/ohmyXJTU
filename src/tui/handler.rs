@@ -36,6 +36,12 @@ enum LoginAction {
 
 /// 處理單一按鍵事件。
 pub fn handle_key(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
+    // 按下任何按鍵都算一次操作：先清掉上一則暫時訊息，讓底部提示列立刻換成
+    // 「目前畫面」的快捷鍵。否則像「作业已更新…」這種會停留數秒的通知，會蓋住
+    // 剛切換過去的畫面提示（例如按下 `^L` 進入排序提示卻看不到排序按鍵），
+    // 讓使用者以為操作沒有生效。動作本身可以再設定新的訊息。
+    app.clear_message();
+
     // Ctrl+C 一律可退出（含協議閱讀門與登入覆蓋層）。
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         app.quit = true;

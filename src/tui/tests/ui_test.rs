@@ -3161,3 +3161,44 @@ fn sort_prompt_replaces_the_footer_with_the_sort_keys() {
         "关闭后不应再显示排序提示：{footer}"
     );
 }
+
+/// 通知尚未消失時按下 `^L`：底欄必須立刻換成排序提示（而不是繼續顯示通知）。
+#[test]
+fn pressing_sort_key_hides_the_pending_notice_immediately() {
+    let (jobs, _rx) = std::sync::mpsc::channel();
+    let mut app = task_page_app(
+        vec![todo(1, "写实验报告", Priority::High, false)],
+        Vec::new(),
+    );
+    app.set_message("作业已更新（用时 3.2s）");
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let before = row_text(terminal.backend(), HEIGHT - 1);
+    assert!(
+        before.contains("作业已更新"),
+        "测试前提：通知应显示在底栏：{before}"
+    );
+
+    crate::tui::handler::handle_key(
+        &mut app,
+        crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('l'),
+            crossterm::event::KeyModifiers::CONTROL,
+        ),
+        &jobs,
+    );
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let after = row_text(terminal.backend(), HEIGHT - 1);
+    assert!(
+        after.contains("排序：[p] 优先级"),
+        "按下 ^L 后底栏应立刻显示排序按键：{after}"
+    );
+    assert!(
+        !after.contains("作业已更新"),
+        "旧通知不应继续盖住画面提示：{after}"
+    );
+}

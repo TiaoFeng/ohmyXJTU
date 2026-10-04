@@ -141,6 +141,13 @@ pub(super) fn activate(app: &mut App, jobs: &Sender<Job>) {
 
 /// 返回上一層（`esc`）：思源學堂逐層返回，其餘頁面收起詳情。
 pub(super) fn escape(app: &mut App) {
+    // 多選模式最優先（與提示列的「esc 退出多选」一致）：除了 `m` 之外，`esc`
+    // 也能離開，否則提示說了卻沒反應，使用者會以為卡住。
+    if app.task_multi.is_some() && app.nav == NavItem::Homework {
+        app.task_multi = None;
+        app.set_message("已退出多选");
+        return;
+    }
     match app.nav {
         NavItem::Lms => match app.lms.level {
             LmsLevel::Detail => app.lms.level = LmsLevel::Activities,

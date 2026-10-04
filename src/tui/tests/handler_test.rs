@@ -14,7 +14,7 @@ use crate::sites::lms::{ActivityKind, LmsActivity, LmsCourse};
 use crate::task::Job;
 use crate::tui::app::{
     AgreementState, App, FormKind, FormState, HomeworkData, LmsLevel, LoginScreen, NavItem, Page,
-    Screen, SettingsState, TaskConfirmState, TaskEntry, TaskFormMode,
+    Screen, SettingsState, TaskConfirmState, TaskEntry, TaskField, TaskFormMode,
 };
 use crate::tui::controller::FormValues;
 
@@ -1542,6 +1542,7 @@ fn task_form_description_accepts_multiple_lines() {
     press(&mut app, &jobs, KeyCode::Tab);
     press(&mut app, &jobs, KeyCode::Tab);
     press(&mut app, &jobs, KeyCode::Right);
+    press(&mut app, &jobs, KeyCode::Right);
     press(&mut app, &jobs, KeyCode::Tab);
     press(&mut app, &jobs, KeyCode::Char(' '));
     press_ctrl(&mut app, &jobs, 's');
@@ -1549,7 +1550,11 @@ fn task_form_description_accepts_multiple_lines() {
     match rx.try_recv() {
         Ok(Job::AddTask { task }) => {
             assert_eq!(task.description.as_deref(), Some("第一行\n第二行"));
-            assert_eq!(task.priority, Priority::High, "右方向键应由默认的低切到高");
+            assert_eq!(
+                task.priority,
+                Priority::High,
+                "按两次右方向键应由默认的低依次切到中、高"
+            );
             assert!(task.completed, "空格应切换完成状态");
         }
         other => panic!("应为新增任务任务，实际为 {other:?}"),
@@ -1606,6 +1611,13 @@ fn m_toggles_multi_select_and_space_checks_tasks() {
 
     press(&mut app, &jobs, KeyCode::Char('m'));
     assert!(app.task_multi.is_none(), "再次按 m 应退出多选");
+    assert_eq!(app.message_text(), Some("已退出多选"));
+
+    // `esc` 同樣能離開（提示列寫的就是「esc 退出多选」）。
+    press(&mut app, &jobs, KeyCode::Char('m'));
+    assert!(app.task_multi.is_some());
+    press(&mut app, &jobs, KeyCode::Esc);
+    assert!(app.task_multi.is_none(), "esc 应退出多选");
     assert_eq!(app.message_text(), Some("已退出多选"));
 }
 
@@ -1882,4 +1894,81 @@ fn switching_sort_keeps_the_selection_on_the_same_item() {
         "第一次作业",
         "切换排序后游标应留在同一个项目"
     );
+}
+
+// ── 按鍵立刻換掉提示列 ───────────────────────────────────
+
+#[test]
+fn key_press_replaces_the_previous_message_with_the_current_hints() {
+    let (jobs, _rx) = channel();
+    let mut app = task_page_app();
+    // 模擬背景通知還在顯示（會停留數秒）時使用者按下 `^L`。
+    app.set_message("作业已更新（用时 3.2s）");
+
+    press_ctrl(&mut app, &jobs, 'l');
+    assert!(matches!(app.screen, Screen::Sort), "^L 应进入排序提示");
+    assert!(
+        app.message_text().is_none(),
+        "按键后应立刻清掉上一则通知，让底部改显示排序按键：{:?}",
+        app.message_text()
+    );
+
+    // 動作本身設定的訊息仍要顯示（清除只發生在處理這次按鍵之前）。
+    press(&mut app, &jobs, KeyCode::Char('p'));
+    assert_eq!(app.task_sort, SortMode::Priority);
+    assert!(
+        app.message_text()
+            .is_some_and(|text| text.contains("已按优先级排序")),
+        "排序结果仍应提示：{:?}",
+        app.message_text()
+    );
+}
+
+#[test]
+fn any_key_clears_the_message_even_when_the_action_does_nothing() {
+    let (jobs, _rx) = channel();
+    let mut app = task_page_app();
+    app.set_message("已删除 2 个已完成任务");
+
+    // 未綁定的按鍵沒有動作，但仍代表使用者操作過一次。
+    press(&mut app, &jobs, KeyCode::Char('x'));
+    assert!(app.message_text().is_none(), "未绑定的按键也应清掉旧通知");
+}
+
+// ── 任務表單的優先級方向 ─────────────────────────────────
+
+#[test]
+fn task_form_priority_cycles_low_to_high_with_right_arrow() {
+    let (jobs, _rx) = channel();
+    let mut app = task_page_app();
+    press_ctrl(&mut app, &jobs, 'a');
+    // 焦點依序為 內容 → 描述 → 截止 → 優先級。
+    for _ in 0..3 {
+        press(&mut app, &jobs, KeyCode::Tab);
+    }
+    let Screen::TaskForm(form) = &app.screen else {
+        panic!("应停留在任务表单");
+    };
+    assert_eq!(form.focus, TaskField::Priority, "焦点应落在优先级字段");
+    assert_eq!(form.priority, Priority::Low, "默认优先级为低");
+
+    // `→`：低 → 中 → 高 → 低。
+    press(&mut app, &jobs, KeyCode::Right);
+    assert_eq!(task_form_priority(&app), Priority::Medium);
+    press(&mut app, &jobs, KeyCode::Right);
+    assert_eq!(task_form_priority(&app), Priority::High);
+    press(&mut app, &jobs, KeyCode::Right);
+    assert_eq!(task_form_priority(&app), Priority::Low, "应在高之后回到低");
+
+    // `←` 反向：低 → 高。
+    press(&mut app, &jobs, KeyCode::Left);
+    assert_eq!(task_form_priority(&app), Priority::High);
+}
+
+/// 目前任務表單的優先級。
+fn task_form_priority(app: &App) -> Priority {
+    match &app.screen {
+        Screen::TaskForm(form) => form.priority,
+        other => panic!("应在任务表单，实际为 {other:?}"),
+    }
 }

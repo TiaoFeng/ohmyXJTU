@@ -1602,6 +1602,14 @@ impl App {
         self.message = Some((message.into(), Instant::now()));
     }
 
+    /// 清除暫時訊息。
+    ///
+    /// 使用者按下任何按鍵時呼叫（見 `handler::handle_key`）：底部提示列會立刻
+    /// 換回「目前畫面」的快捷鍵，不會因為上一則通知還在而看起來毫無反應。
+    pub fn clear_message(&mut self) {
+        self.message = None;
+    }
+
     /// 前進一個動畫影格（供載入指示燈動畫使用）。
     pub fn advance_tick(&mut self) {
         self.tick = self.tick.wrapping_add(1);

@@ -115,6 +115,16 @@ impl ThreadWorker {
         let _ = self.jobs.send(job);
     }
 
+    /// 送出結束指令並等待工作執行緒真的結束。
+    ///
+    /// 用來確定「該送的請求都送完了」：若載入仍在進行，`run` 不會返回。
+    fn shutdown_and_join(&mut self) {
+        let _ = self.jobs.send(Job::Shutdown);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+
     /// 等待符合條件的事件（會依序消耗事件）。
     fn wait_event(&self, predicate: impl Fn(&Event) -> bool) -> bool {
         let deadline = Instant::now() + WAIT;
@@ -286,6 +296,76 @@ fn control_jobs_interrupt_homework_between_steps() {
             .iter()
             .any(|url| url.ends_with("/courses/4/activities")),
         "取消后不得再启动下一批查询：{seen:?}"
+    );
+}
+
+#[test]
+fn detail_prefetch_does_not_starve_control_jobs() {
+    // 一門課程含多項作業時，詳情預取必須以「一個波次（並行上限）」為界：
+    // 第一個詳情請求被擋住期間送出結束指令，不得把整門課程的詳情全部抓完
+    // 才處理。維持有界並行（一批最多 3 項），但不讓波次隨作業數成長。
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let (started_tx, started_rx) = std_channel::<()>();
+    let (release_tx, release_rx) = std_channel::<()>();
+    let started = Mutex::new(started_tx);
+    let release_rx = Mutex::new(release_rx);
+
+    let site_seen = Arc::clone(&seen);
+    let mut worker = ThreadWorker::new(move |request: &HttpRequest| {
+        let url = request.url.clone();
+        site_seen.lock().expect("lock").push(url.clone());
+
+        if url.ends_with("/api/my-courses") {
+            return Ok(json(serde_json::json!({ "courses": [
+                { "id": "1", "name": "编译原理", "semester": { "code": "2026-1" } },
+            ]})));
+        }
+        if url.ends_with("/timetable/semesters") {
+            return semester_response();
+        }
+        if url.ends_with("/courses/1/activities") {
+            // 六項作業：一批詳情就會是兩個波次。
+            return Ok(json(serde_json::json!({ "activities": (11..=16).map(|id| {
+                serde_json::json!({
+                    "id": id.to_string(), "type": "homework",
+                    "title": format!("作业{id}"),
+                    "end_time": "2099-12-31 23:59:59",
+                })
+            }).collect::<Vec<_>>() })));
+        }
+        if url.contains("/api/activities/") {
+            if url.ends_with("/api/activities/11") {
+                // 第一個詳情請求：擋住，讓測試有機會插入結束指令。
+                started
+                    .lock()
+                    .expect("lock")
+                    .send(())
+                    .expect("发送开始信号");
+                release_rx.lock().expect("lock").recv().expect("等待释放");
+            }
+            return Ok(json(serde_json::json!({
+                "id": "11", "type": "homework", "title": "作业",
+                "end_time": "2099-12-31 23:59:59",
+                "submit_by_group": false, "user_submit_count": 0,
+            })));
+        }
+        panic!("未预期的请求：{url}");
+    });
+
+    worker.send(Job::LoadHomework { force: false });
+    started_rx.recv_timeout(WAIT).expect("应开始查询详情");
+    worker.send(Job::Shutdown);
+    release_tx.send(()).expect("释放请求");
+    worker.shutdown_and_join();
+
+    let requested = seen.lock().expect("lock").clone();
+    let details = requested
+        .iter()
+        .filter(|url| url.contains("/api/activities/"))
+        .count();
+    assert!(
+        details <= 3,
+        "结束指令后不得继续抓取剩余详情（预取应以一个波次为界）：{requested:?}"
     );
 }
 

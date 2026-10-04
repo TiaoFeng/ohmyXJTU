@@ -4,7 +4,7 @@
 //! 調度核心插入控制任務；每項作業完成後節流地回報部分結果。學期判定
 //!（明確選擇 → 考勤當前學期 → 記憶 → 選擇器）與課程過濾也在此。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use chrono::Local;
@@ -31,6 +31,12 @@ const PROGRESS_EMIT_INTERVAL: usize = 10;
 /// 取傳輸層的併發上限：一批就是一個往返波次。批次之間仍會回到步進迴圈
 ///（排空控制任務），因此這個值也決定了「控制任務最多會被擋多久」。
 const ACTIVITY_BATCH: usize = crate::http::batch::MAX_CONCURRENT_REQUESTS;
+
+/// 每次補齊作業詳情的數量上限（同樣是一個往返波次）。
+///
+/// 詳情的總數隨作業數量成長，**不能**一次全部送出：那會讓「一門課含多項
+/// 作業」時的等待隨波次累加，期間無法處理控制任務，也無法輸出首批結果。
+const DETAIL_BATCH: usize = crate::http::batch::MAX_CONCURRENT_REQUESTS;
 
 /// 作業載入的步進階段。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +82,8 @@ struct HomeworkRunner {
     prefetched: HashMap<usize, ActivitiesOutcome>,
     /// 已併發預取、等待取用的活動詳情（鍵為活動識別碼）。
     prefetched_details: HashMap<String, DetailOutcome>,
+    /// 佇列中尚未預取詳情的作業識別碼（依處理順序），每步最多補一批。
+    pending_details: VecDeque<String>,
     /// 下一個活動的索引。
     activity_index: usize,
     /// 已彙總的輸入。
@@ -120,6 +128,7 @@ impl HomeworkRunner {
             activities: Vec::new(),
             prefetched: HashMap::new(),
             prefetched_details: HashMap::new(),
+            pending_details: VecDeque::new(),
             activity_index: 0,
             inputs: Vec::new(),
             failed_courses: 0,
@@ -471,6 +480,10 @@ impl Worker {
                     .cloned()
                     .ok_or_else(|| AppError::protocol("课程索引越界"))?;
                 // 詳情多已在同一批課程預取時一併抓回。
+                // 詳情多已在同一批課程預取時一併抓回；尚未補齊時只補一個波次。
+                if !runner.prefetched_details.contains_key(&activity.id) {
+                    self.prefetch_details(runner)?;
+                }
                 let detail = match runner.prefetched_details.remove(&activity.id) {
                     Some(detail) => detail,
                     None => {
@@ -543,8 +556,9 @@ impl Worker {
         self.timing
             .record(Phase::Activities, started, results.len());
 
-        // 預取時就只留作業，並把整批課程的作業一起收集起來：詳情一次抓整批，
-        // 才不會因為「每門課只有一兩項作業」而讓每一批只送出一個請求。
+        // 預取時就只留作業，並把整批課程的作業收進同一個待抓佇列：每批詳情
+        // 才湊得滿一個波次，不會因為「每門課只有一兩項作業」而一批只送一個
+        // 請求（詳情不可只在單門課程內批次）。
         let results: Vec<ActivitiesOutcome> = results
             .into_iter()
             .map(|result| result.map(|(activities, skipped)| (homework_only(activities), skipped)))
@@ -564,19 +578,16 @@ impl Worker {
             }
         }
 
-        let homework_ids: Vec<String> = results
-            .iter()
-            .filter_map(|result| result.as_ref().ok())
-            .flat_map(|(activities, _)| activities.iter().map(|activity| activity.id.clone()))
-            .collect();
-        if !homework_ids.is_empty() {
-            let started = self.timing.mark();
-            let details = self.lms_detail_batch(&homework_ids, runner.force)?;
-            self.timing.record(Phase::Detail, started, details.len());
-            for (activity_id, detail) in homework_ids.into_iter().zip(details) {
-                runner.prefetched_details.insert(activity_id, detail);
-            }
-        }
+        // 詳情只先排入待抓佇列、送出一個波次；其餘由後續步進補齊。一次把整批
+        // 課程的詳情全部送出去，會讓「一門課含多項作業」時的等待隨波次累加，
+        // 期間（也是首批結果出來之前）無法處理控制任務。
+        runner.pending_details.extend(
+            results
+                .iter()
+                .filter_map(|result| result.as_ref().ok())
+                .flat_map(|(activities, _)| activities.iter().map(|activity| activity.id.clone())),
+        );
+        self.prefetch_details(runner)?;
 
         let mut results = results.into_iter();
         let current = results
@@ -586,6 +597,29 @@ impl Worker {
             runner.prefetched.insert(start + offset + 1, result);
         }
         Ok(current)
+    }
+
+    /// 補齊尚未預取的作業詳情：一次最多送出一個波次。
+    ///
+    /// 每次呼叫只佔用工作執行緒一次往返的時間，之後就回到步進迴圈排空控制
+    /// 任務並檢查取消狀態；剩下的詳情由後續步進繼續補齊。取過的識別碼會
+    /// 離開佇列，因此不會重複請求。
+    fn prefetch_details(&mut self, runner: &mut HomeworkRunner) -> AppResult<()> {
+        let count = runner.pending_details.len().min(DETAIL_BATCH);
+        if count == 0 {
+            return Ok(());
+        }
+        let ids: Vec<String> = runner.pending_details.iter().take(count).cloned().collect();
+        let started = self.timing.mark();
+        let details = self.lms_detail_batch(&ids, runner.force)?;
+        self.timing.record(Phase::Detail, started, details.len());
+        for _ in 0..count {
+            runner.pending_details.pop_front();
+        }
+        for (activity_id, detail) in ids.into_iter().zip(details) {
+            runner.prefetched_details.insert(activity_id, detail);
+        }
+        Ok(())
     }
 
     /// 取得單一作業的提交摘要（詳情已由批次預取提供）。

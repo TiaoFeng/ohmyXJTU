@@ -4,14 +4,18 @@
 //! 建構 [`Job`] 或切換頁面／資源的邏輯都在這裡。事件套用（[`super::event`]）
 //! 也共用這裡的 [`request`] 與 [`ensure_page`]。
 
+use std::collections::HashSet;
 use std::sync::mpsc::Sender;
 
 use crate::credentials::{Credentials, Secret};
+use crate::domain::todo::{self, SortMode, Task};
 use crate::sites::lms::ActivityKind;
 use crate::task::Job;
 use crate::tui::app::{
-    App, FieldRole, FormKind, FormState, LmsLevel, NavItem, Screen, TermPickerState,
+    App, FieldRole, FormKind, FormState, LmsLevel, NavItem, Screen, TaskBatchMenuState, TaskEntry,
+    TaskField, TaskFormMode, TaskFormState, TaskMenuState, TermPickerState,
 };
+use crate::tui::text::InputLine;
 
 /// 加密口令的最短長度。
 ///
@@ -62,6 +66,15 @@ pub(super) fn activate(app: &mut App, jobs: &Sender<Job>) {
     match app.nav {
         NavItem::Schedule => app.schedule_detail = !app.schedule_detail,
         NavItem::Homework => {
+            // 多選模式：enter 開啟批量操作選單，而不是切換詳情。
+            if app.task_multi.is_some() {
+                if selected_task_ids(app).is_empty() {
+                    app.set_message("尚未选择任务（space 勾选）");
+                } else {
+                    app.set_screen(Screen::TaskBatchMenu(TaskBatchMenuState { index: 0 }));
+                }
+                return;
+            }
             app.homework_detail = !app.homework_detail;
             // 展開或收起都回到頂端：下次展開時從標題開始讀。
             app.homework_scroll.reset();
@@ -128,6 +141,13 @@ pub(super) fn activate(app: &mut App, jobs: &Sender<Job>) {
 
 /// 返回上一層（`esc`）：思源學堂逐層返回，其餘頁面收起詳情。
 pub(super) fn escape(app: &mut App) {
+    // 多選模式最優先（與提示列的「esc 退出多选」一致）：除了 `m` 之外，`esc`
+    // 也能離開，否則提示說了卻沒反應，使用者會以為卡住。
+    if app.task_multi.is_some() && app.nav == NavItem::Homework {
+        app.task_multi = None;
+        app.set_message("已退出多选");
+        return;
+    }
     match app.nav {
         NavItem::Lms => match app.lms.level {
             LmsLevel::Detail => app.lms.level = LmsLevel::Activities,
@@ -135,7 +155,16 @@ pub(super) fn escape(app: &mut App) {
             LmsLevel::Courses => {}
         },
         NavItem::Schedule => app.schedule_detail = false,
-        NavItem::Homework => app.homework_detail = false,
+        NavItem::Homework => {
+            // 篩選中時 esc 先清除篩選，再收起詳情（與 ui-ref 一致）。
+            if app.task_filter.is_some() {
+                app.task_filter = None;
+                app.homework_state.select(Some(0));
+                app.set_message("已清除筛选");
+            } else {
+                app.homework_detail = false;
+            }
+        }
         NavItem::Attendance => app.flow_detail = false,
     }
 }
@@ -161,6 +190,36 @@ pub(super) fn change_group(app: &mut App, delta: i32) {
         };
         app.set_selection(0);
     }
+}
+
+/// 任務頁項目的識別（排序改變後把選取錨定回同一個項目）。
+fn entry_id(entry: &TaskEntry<'_>) -> (u8, String) {
+    match entry {
+        TaskEntry::Task(task) => (0, task.id.to_string()),
+        TaskEntry::Homework(item) => (1, item.activity_id.clone()),
+    }
+}
+
+/// 套用任務頁的排序方式（`^L`）：立即生效並回到主畫面。
+///
+/// 排序只影響顯示順序；為了不讓游標跳到別的項目，切換前先記住目前選取的項目，
+/// 切換後在清單中找回它（找不到時回到第一項）。
+pub(super) fn set_task_sort(app: &mut App, mode: SortMode) {
+    let previous = app.selected_entry().map(|entry| entry_id(&entry));
+    app.task_sort = mode;
+    app.set_screen(Screen::Main);
+    let restored = previous
+        .and_then(|id| {
+            app.task_page_entries()
+                .iter()
+                .position(|entry| entry_id(entry) == id)
+        })
+        .unwrap_or(0);
+    app.set_selection(restored.min(app.page_len().saturating_sub(1)));
+    app.set_message(match mode {
+        SortMode::Default => "已恢复默认排序（任务在前、作业在后）".to_owned(),
+        _ => format!("已按{}排序（任务与作业混合）", mode.label()),
+    });
 }
 
 /// 切換課表週次（`[`／`]`）：標題立即顯示目標週，內容待新資料抵達。
@@ -253,13 +312,17 @@ pub(super) fn open_activity(app: &mut App, jobs: &Sender<Job>) {
 
 /// 作業頁：開啟目前選取作業所屬課程的作業列表（前端網址由工作執行緒組出）。
 fn open_homework(app: &mut App, jobs: &Sender<Job>) {
-    let target = app.homework.ready().and_then(|data| {
-        data.group_items(app.homework_group)
-            .get(app.page_selection())
-            .map(|item| (item.activity_id.clone(), item.course_id.clone()))
-    });
-    let Some((activity_id, course_id)) = target else {
-        app.set_message("请先选择要打开的作业");
+    let homework = match app.selected_entry() {
+        Some(TaskEntry::Homework(item)) => Some((item.activity_id.clone(), item.course_id.clone())),
+        _ => None,
+    };
+    let is_task = matches!(app.selected_entry(), Some(TaskEntry::Task(_)));
+    let Some((activity_id, course_id)) = homework else {
+        app.set_message(if is_task {
+            "自定义任务没有可打开的网页"
+        } else {
+            "请先选择要打开的作业"
+        });
         return;
     };
     app.set_message("正在打开作业网页…");
@@ -319,6 +382,221 @@ pub(super) fn open_term_picker(app: &mut App) {
         "选择要查看的学期".to_owned(),
     );
     app.set_screen(Screen::TermPicker(state));
+}
+
+// ── 自訂義任務（任務頁） ─────────────────────────────
+
+/// 目前選取項目的識別資訊。
+///
+/// 借用 `app` 取得的選取項目無法在後續操作中存活（會與 `&mut app` 衝突），
+/// 因此一律先轉成這個擁有所有權的小型列舉。
+enum Selected {
+    /// 自訂義任務。
+    Task {
+        /// 任務識別碼。
+        id: u64,
+        /// 任務內容（顯示於提示訊息）。
+        content: String,
+        /// 是否已完成。
+        completed: bool,
+    },
+    /// 思源學堂作業（只能檢視，不能編輯或刪除）。
+    Homework,
+}
+
+/// 讀取目前選取的項目。
+fn selected(app: &App) -> Option<Selected> {
+    app.selected_entry().map(|entry| match entry {
+        TaskEntry::Task(task) => Selected::Task {
+            id: task.id,
+            content: task.content.clone(),
+            completed: task.completed,
+        },
+        TaskEntry::Homework(_) => Selected::Homework,
+    })
+}
+
+/// 開啟新增任務的表單（`^A`）。
+pub(super) fn open_task_form(app: &mut App) {
+    if app.nav != NavItem::Homework {
+        return;
+    }
+    app.set_screen(Screen::TaskForm(Box::new(TaskFormState::add())));
+}
+
+/// 編輯目前選取的任務（`^E`）；作業列不可編輯。
+pub(super) fn edit_selected_task(app: &mut App) {
+    let task = match app.selected_entry() {
+        Some(TaskEntry::Task(task)) => Some(task.clone()),
+        _ => None,
+    };
+    let is_homework = matches!(app.selected_entry(), Some(TaskEntry::Homework(_)));
+    match task {
+        Some(task) => app.set_screen(Screen::TaskForm(Box::new(TaskFormState::edit(&task)))),
+        None if is_homework => app.set_message("只能修改自定义任务"),
+        None => {}
+    }
+}
+
+/// 切換目前選取任務的完成狀態（`space`）；作業列不可標記。
+pub(super) fn toggle_selected_task(app: &mut App, jobs: &Sender<Job>) {
+    if app.nav != NavItem::Homework {
+        return;
+    }
+    match selected(app) {
+        Some(Selected::Task { id, completed, .. }) => {
+            let _ = jobs.send(Job::SetTaskDone {
+                id,
+                done: !completed,
+            });
+        }
+        Some(Selected::Homework) => app.set_message("只能标记自定义任务"),
+        None => {}
+    }
+}
+
+/// 刪除目前選取的任務（`^D`）：第一次按下要求再按一次，第二次才刪除。
+pub(super) fn delete_selected_task(app: &mut App, jobs: &Sender<Job>) {
+    if app.nav != NavItem::Homework {
+        return;
+    }
+    match selected(app) {
+        Some(Selected::Task { id, content, .. }) => {
+            let confirmed = app
+                .task_pending_delete
+                .as_ref()
+                .is_some_and(|(pending, _)| *pending == id);
+            if confirmed {
+                app.task_pending_delete = None;
+                let _ = jobs.send(Job::DeleteTask { id });
+            } else {
+                app.set_message(format!("再按一次 ^D 删除「{content}」"));
+                app.task_pending_delete = Some((id, content));
+            }
+        }
+        Some(Selected::Homework) => app.set_message("只能删除自定义任务"),
+        None => {}
+    }
+}
+
+/// 進入或離開多選模式（`m`）。
+pub(super) fn toggle_task_multi(app: &mut App) {
+    if app.nav != NavItem::Homework {
+        return;
+    }
+    if app.task_multi.is_some() {
+        app.task_multi = None;
+        app.set_message("已退出多选");
+    } else {
+        app.task_multi = Some(HashSet::new());
+        app.set_screen(Screen::Main);
+        app.set_message("多选模式：space 勾选 · enter 批量操作 · esc 退出");
+    }
+}
+
+/// 多選模式：勾選或取消目前選取的任務（`space`）。
+pub(super) fn toggle_task_selection(app: &mut App) {
+    match selected(app) {
+        Some(Selected::Task { id, .. }) => {
+            if let Some(selection) = app.task_multi.as_mut()
+                && !selection.remove(&id)
+            {
+                selection.insert(id);
+            }
+        }
+        Some(Selected::Homework) => app.set_message("只能选择自定义任务"),
+        None => {}
+    }
+}
+
+/// 目前勾選的任務識別碼（依清單順序）。
+pub(super) fn selected_task_ids(app: &App) -> Vec<u64> {
+    let Some(selection) = app.task_multi.as_ref() else {
+        return Vec::new();
+    };
+    app.tasks
+        .iter()
+        .filter(|task| selection.contains(&task.id))
+        .map(|task| task.id)
+        .collect()
+}
+
+/// 開啟任務設置選單（`^T`）。
+pub(super) fn open_task_menu(app: &mut App) {
+    if app.nav != NavItem::Homework {
+        return;
+    }
+    app.set_screen(Screen::TaskMenu(TaskMenuState { index: 0 }));
+}
+
+/// 開啟任務搜尋輸入框（`^F`；以目前的篩選字預填）。
+pub(super) fn open_task_search(app: &mut App) {
+    if app.nav != NavItem::Homework {
+        return;
+    }
+    let input = InputLine::with_value(app.task_filter.clone().unwrap_or_default());
+    app.task_search = Some(input);
+}
+
+/// 清空任務表單目前聚焦的欄位（`^U`）。
+pub(super) fn clear_focused_task_field(app: &mut App) {
+    let Screen::TaskForm(form) = &mut app.screen else {
+        return;
+    };
+    match form.focus {
+        TaskField::Content => form.content.clear(),
+        TaskField::Description => form.description.focused_line_mut().clear(),
+        TaskField::Deadline => form.deadline.clear(),
+        TaskField::Priority | TaskField::Completed => {}
+    }
+}
+
+/// 送出任務表單（`^S`）；驗證失敗時就地顯示錯誤，不送出任務。
+pub(super) fn submit_task_form(app: &mut App, jobs: &Sender<Job>) {
+    let job = {
+        let Screen::TaskForm(form) = &app.screen else {
+            return;
+        };
+        match build_task_job(form) {
+            Ok(job) => job,
+            Err(message) => {
+                if let Screen::TaskForm(form) = &mut app.screen {
+                    form.error = Some(message);
+                }
+                return;
+            }
+        }
+    };
+    if let Screen::TaskForm(form) = &mut app.screen {
+        form.busy = true;
+        form.error = None;
+    }
+    let _ = jobs.send(job);
+}
+
+/// 將任務表單內容轉為任務；驗證失敗時回傳訊息。
+fn build_task_job(form: &TaskFormState) -> Result<Job, String> {
+    let content = form.content.value().trim().to_owned();
+    if content.is_empty() {
+        return Err("任务内容不能为空".to_owned());
+    }
+    let deadline = todo::parse_deadline_input(form.deadline.value())?;
+    let description = match form.description.value().trim() {
+        "" => None,
+        text => Some(text.to_owned()),
+    };
+    let task = Task {
+        id: 0,
+        content,
+        description,
+        deadline,
+        priority: form.priority,
+        completed: form.completed,
+    };
+    Ok(match form.mode {
+        TaskFormMode::Add => Job::AddTask { task },
+        TaskFormMode::Edit { id } => Job::UpdateTask { id, task },
+    })
 }
 
 /// 送出表單；驗證失敗時就地顯示錯誤，不送出任務。

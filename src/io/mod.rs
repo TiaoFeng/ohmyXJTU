@@ -3,5 +3,5 @@
 pub mod paths;
 pub mod secure_file;
 
-pub use paths::{captcha_path, config_path, data_dir, vault_path};
+pub use paths::{captcha_path, config_path, data_dir, tasks_path, vault_path};
 pub use secure_file::{ensure_private, read_private, restrict_permissions, write_private_atomic};

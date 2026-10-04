@@ -9,7 +9,7 @@ use ratatui::widgets::{List, ListItem, Paragraph};
 use crate::text::display_width;
 use crate::tui::app::{App, LmsLevel, NavItem, Screen};
 use crate::tui::theme::THEME;
-use crate::tui::views::{content, settings, term_picker};
+use crate::tui::views::{content, settings, task_form, task_menu, term_picker};
 
 /// 側邊欄寬度。
 const SIDEBAR_WIDTH: u16 = 22;
@@ -32,6 +32,18 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
     if let Screen::TermPicker(state) = &app.screen {
         term_picker::draw(frame, state);
+    }
+    if let Screen::TaskMenu(state) = &app.screen {
+        task_menu::draw_menu(frame, *state);
+    }
+    if let Screen::TaskBatchMenu(state) = &app.screen {
+        task_menu::draw_batch_menu(frame, *state);
+    }
+    if let Screen::TaskConfirm(state) = &app.screen {
+        task_menu::draw_confirm(frame, *state);
+    }
+    if let Screen::TaskForm(form) = &mut app.screen {
+        task_form::draw(frame, form.as_mut());
     }
 }
 
@@ -106,6 +118,9 @@ const HINT_ELLIPSIS: &str = " …";
 /// 詳情面板的捲動提示（終端不夠寬時最先保留的片段之一）。
 const SCROLL_HINT: &str = "PgUp/PgDn 滚动";
 
+/// 排序提示（`^L`）開啟時，底部只顯示這行按鍵說明。
+const SORT_HINT: &str = "排序：[p] 优先级  [d] 截止时间  [n] 默认  esc 取消";
+
 fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
     let line = match app.message_text() {
         Some(message) => Line::from(Span::styled(
@@ -131,6 +146,10 @@ fn hints(app: &App, width: u16) -> String {
         app.session_label(),
         app.access_policy.label()
     )];
+    if matches!(app.screen, Screen::Sort) {
+        segments.push(SORT_HINT.to_owned());
+        return fit_hints(&segments, width);
+    }
     if scrollable_panel(app) {
         segments.push(SCROLL_HINT.to_owned());
     }
@@ -166,9 +185,19 @@ fn page_hints(app: &App) -> Vec<String> {
     match app.nav {
         NavItem::Attendance => hints.push("n/p 翻页".to_owned()),
         NavItem::Homework => {
+            // 任務頁的互動模式（搜尋／多選）會接管大部分按鍵，提示以當下可用者為主。
+            if app.task_search.is_some() {
+                hints.push("enter 应用筛选".to_owned());
+                hints.push("esc 取消".to_owned());
+                return hints;
+            }
+            if app.task_multi.is_some() {
+                hints.push("space 勾选".to_owned());
+                hints.push("enter 批量操作".to_owned());
+                hints.push("esc 退出多选".to_owned());
+                return hints;
+            }
             hints.push("[ ] 分组".to_owned());
-            hints.push("s 学期".to_owned());
-            hints.push("o 打开网页".to_owned());
             hints.push(
                 if app.homework_detail {
                     "enter 收起详情"
@@ -177,6 +206,19 @@ fn page_hints(app: &App) -> Vec<String> {
                 }
                 .to_owned(),
             );
+            hints.push("^a 添加".to_owned());
+            hints.push("space 完成".to_owned());
+            hints.push("^e 编辑".to_owned());
+            hints.push("^d 删除".to_owned());
+            hints.push("m 多选".to_owned());
+            hints.push("^f 搜索".to_owned());
+            hints.push("^t 设置".to_owned());
+            hints.push("^L 排序".to_owned());
+            if app.task_filter.is_some() {
+                hints.push("esc 清除筛选".to_owned());
+            }
+            hints.push("s 学期".to_owned());
+            hints.push("o 打开网页".to_owned());
         }
         NavItem::Lms => match app.lms.level {
             LmsLevel::Courses => hints.push("enter 进入课程".to_owned()),

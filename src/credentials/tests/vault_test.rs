@@ -191,40 +191,13 @@ fn parse_failure_message_does_not_leak_plaintext() {
 /// AAD 由格式版本派生；現行 v1 必須與舊版常數位元組相同，否則既有憑證庫無法解密。
 #[test]
 fn aad_stays_compatible_with_previous_release() {
-    assert_eq!(aad(VERSION), b"ohmyXJTU-vault-v1");
+    use crate::credentials::envelope::{VERSION, aad};
+    assert_eq!(aad(AAD_PREFIX, VERSION), b"ohmyXJTU-vault-v1");
 }
 
 /// 以 `PASSPHRASE` 加密任意位元組，組出格式合法的憑證檔。
 fn seal(plaintext: &[u8]) -> Vec<u8> {
-    use chacha20poly1305::aead::{Aead as _, KeyInit as _, Payload};
-    use chacha20poly1305::{ChaCha20Poly1305, Nonce};
-
-    let mut salt = [0_u8; SALT_LEN];
-    let mut nonce = [0_u8; NONCE_LEN];
-    crate::random::fill(&mut salt).expect("盐值");
-    crate::random::fill(&mut nonce).expect("nonce");
-
-    let key = derive_key(PASSPHRASE, DEFAULT_KDF, &salt).expect("派生密钥");
-    let cipher = ChaCha20Poly1305::new((&*key).into());
-    let aad = aad(VERSION);
-    let ciphertext = cipher
-        .encrypt(
-            Nonce::from_slice(&nonce),
-            Payload {
-                msg: plaintext,
-                aad: &aad,
-            },
-        )
-        .expect("加密");
-
-    let mut out = Vec::with_capacity(HEADER_LEN + ciphertext.len());
-    out.extend_from_slice(MAGIC);
-    out.push(VERSION);
-    out.extend_from_slice(&DEFAULT_KDF.m_cost.to_le_bytes());
-    out.extend_from_slice(&DEFAULT_KDF.t_cost.to_le_bytes());
-    out.extend_from_slice(&DEFAULT_KDF.p_cost.to_le_bytes());
-    out.extend_from_slice(&salt);
-    out.extend_from_slice(&nonce);
-    out.extend_from_slice(&ciphertext);
-    out
+    crate::credentials::envelope::seal(PASSPHRASE, AAD_PREFIX, plaintext)
+        .expect("加密")
+        .0
 }

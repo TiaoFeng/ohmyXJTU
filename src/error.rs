@@ -131,6 +131,10 @@ pub enum AppError {
     #[error("凭证文件格式不正确：{0}")]
     VaultFile(String),
 
+    /// 找不到指定的自訂義任務（可能已被刪除）。
+    #[error("任务不存在（可能已被删除）")]
+    TaskNotFound,
+
     /// 設定檔或路徑相關錯誤。
     #[error("配置错误：{0}")]
     Config(String),

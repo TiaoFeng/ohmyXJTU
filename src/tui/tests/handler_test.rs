@@ -1,5 +1,6 @@
 //! 按鍵處理測試：表單驗證、任務送出與導航觸發載入。
 
+use std::collections::HashSet;
 use std::sync::mpsc::{Sender, channel};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -7,12 +8,13 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::config::AccessPolicy;
 use crate::domain::activity::ActivityGroup;
 use crate::domain::homework::{HomeworkInput, aggregate};
+use crate::domain::todo::{Priority, SortMode, Task};
 use crate::model::{ActivityDetailView, ScheduleData};
 use crate::sites::lms::{ActivityKind, LmsActivity, LmsCourse};
 use crate::task::Job;
 use crate::tui::app::{
     AgreementState, App, FormKind, FormState, HomeworkData, LmsLevel, LoginScreen, NavItem, Page,
-    Screen, SettingsState,
+    Screen, SettingsState, TaskConfirmState, TaskEntry, TaskField, TaskFormMode,
 };
 use crate::tui::controller::FormValues;
 
@@ -1389,4 +1391,584 @@ fn page_keys_scroll_detail_only_on_detail_pages() {
     app.nav = NavItem::Schedule;
     press(&mut app, &jobs, KeyCode::PageDown);
     assert_eq!(app.lms.detail_scroll.offset(), 5, "其他页面不得滚动");
+}
+
+// ── 任務頁（自訂義任務） ─────────────────────────────────
+
+/// 按下帶 control 修飾鍵的字元。
+fn press_ctrl(app: &mut App, jobs: &Sender<Job>, character: char) {
+    handle_key(
+        app,
+        KeyEvent::new(KeyCode::Char(character), KeyModifiers::CONTROL),
+        jobs,
+    );
+}
+
+/// 任務頁測試用資料：一筆未完成任務、一筆已完成任務與一筆未完成作業。
+///
+/// 未完成分組的順序為「任务段在前、作业段在后」：索引 0 是任務，索引 1 是作業。
+fn task_page_app() -> App {
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Homework;
+    app.tasks = vec![
+        Task {
+            id: 1,
+            content: "写实验报告".to_owned(),
+            description: Some("第三章".to_owned()),
+            deadline: None,
+            priority: Priority::High,
+            completed: false,
+        },
+        Task {
+            id: 2,
+            content: "复习".to_owned(),
+            description: None,
+            deadline: None,
+            priority: Priority::Low,
+            completed: true,
+        },
+    ];
+    app.homework = Page::Ready(homework_page("1", "a-1", 0));
+    app
+}
+
+#[test]
+fn control_a_adds_a_task_from_the_form() {
+    let (jobs, rx) = channel();
+    let mut app = task_page_app();
+
+    press_ctrl(&mut app, &jobs, 'a');
+    assert!(
+        matches!(app.screen, Screen::TaskForm(_)),
+        "^a 应打开添加任务表单"
+    );
+
+    type_text(&mut app, &jobs, "买教材");
+    // 欄位順序：內容 → 描述 → 截止。
+    press(&mut app, &jobs, KeyCode::Tab);
+    press(&mut app, &jobs, KeyCode::Tab);
+    type_text(&mut app, &jobs, "2026-12-31 12:30");
+    press_ctrl(&mut app, &jobs, 's');
+
+    match rx.try_recv() {
+        Ok(Job::AddTask { task }) => {
+            assert_eq!(task.content, "买教材");
+            assert_eq!(task.description, None, "描述留空时不写入");
+            assert_eq!(
+                task.deadline
+                    .map(|deadline| deadline.format("%Y-%m-%d %H:%M").to_string()),
+                Some("2026-12-31 12:30".to_owned()),
+                "截止时间应按校园时区解析"
+            );
+            assert_eq!(task.priority, Priority::Low, "默认优先级为低");
+            assert!(!task.completed);
+        }
+        other => panic!("应为新增任务任务，实际为 {other:?}"),
+    }
+    let Screen::TaskForm(form) = &app.screen else {
+        panic!("提交后应停留在任务表单");
+    };
+    assert!(form.busy, "提交后应显示正在保存");
+}
+
+#[test]
+fn task_form_reports_validation_errors_in_place() {
+    let (jobs, rx) = channel();
+    let mut app = task_page_app();
+    press_ctrl(&mut app, &jobs, 'a');
+
+    // 內容為空：就地報錯、不送出、不進入保存中。
+    press_ctrl(&mut app, &jobs, 's');
+    let Screen::TaskForm(form) = &app.screen else {
+        panic!("应停留在任务表单");
+    };
+    assert_eq!(form.error.as_deref(), Some("任务内容不能为空"));
+    assert!(!form.busy, "验证失败不得进入保存中");
+    assert!(rx.try_recv().is_err(), "验证失败不得送出任务");
+
+    // 截止時間格式錯誤：同樣就地報錯，且已輸入的內容保留。
+    type_text(&mut app, &jobs, "买教材");
+    press(&mut app, &jobs, KeyCode::Tab);
+    press(&mut app, &jobs, KeyCode::Tab);
+    type_text(&mut app, &jobs, "不是日期");
+    press_ctrl(&mut app, &jobs, 's');
+    let Screen::TaskForm(form) = &app.screen else {
+        panic!("应停留在任务表单");
+    };
+    assert!(
+        form.error
+            .as_deref()
+            .is_some_and(|error| error.contains("截止时间")),
+        "应提示截止时间格式：{:?}",
+        form.error
+    );
+    assert_eq!(form.content.value(), "买教材", "失败应保留已输入内容");
+    assert!(rx.try_recv().is_err(), "验证失败不得送出任务");
+
+    // `^u` 清空聚焦欄位後，空截止時間代表「沒有截止時間」。
+    press_ctrl(&mut app, &jobs, 'u');
+    press_ctrl(&mut app, &jobs, 's');
+    match rx.try_recv() {
+        Ok(Job::AddTask { task }) => {
+            assert_eq!(task.deadline, None, "空截止时间应视为没有截止时间");
+        }
+        other => panic!("应为新增任务任务，实际为 {other:?}"),
+    }
+    // 送出中的面板仍可用 `esc` 關閉：保存已在背景進行，不該把使用者鎖住。
+    press(&mut app, &jobs, KeyCode::Esc);
+    assert!(matches!(app.screen, Screen::Main), "esc 应关闭面板");
+    assert_eq!(app.message_text(), Some("面板已关闭，保存仍在进行"));
+}
+
+#[test]
+fn task_form_description_accepts_multiple_lines() {
+    let (jobs, rx) = channel();
+    let mut app = task_page_app();
+    press_ctrl(&mut app, &jobs, 'a');
+    type_text(&mut app, &jobs, "复习");
+    press(&mut app, &jobs, KeyCode::Tab);
+
+    type_text(&mut app, &jobs, "第一行");
+    press(&mut app, &jobs, KeyCode::Enter);
+    type_text(&mut app, &jobs, "第二行");
+    let Screen::TaskForm(form) = &app.screen else {
+        panic!("应停留在任务表单");
+    };
+    assert_eq!(form.description.value(), "第一行\n第二行", "描述应允许多行");
+    assert_eq!(form.description.line_count(), 2);
+
+    // 優先級與完成狀態以左右鍵切換（描述 → 截止 → 優先級 → 完成）。
+    press(&mut app, &jobs, KeyCode::Tab);
+    press(&mut app, &jobs, KeyCode::Tab);
+    press(&mut app, &jobs, KeyCode::Right);
+    press(&mut app, &jobs, KeyCode::Right);
+    press(&mut app, &jobs, KeyCode::Tab);
+    press(&mut app, &jobs, KeyCode::Char(' '));
+    press_ctrl(&mut app, &jobs, 's');
+
+    match rx.try_recv() {
+        Ok(Job::AddTask { task }) => {
+            assert_eq!(task.description.as_deref(), Some("第一行\n第二行"));
+            assert_eq!(
+                task.priority,
+                Priority::High,
+                "按两次右方向键应由默认的低依次切到中、高"
+            );
+            assert!(task.completed, "空格应切换完成状态");
+        }
+        other => panic!("应为新增任务任务，实际为 {other:?}"),
+    }
+}
+
+#[test]
+fn space_toggles_the_selected_task_and_refuses_homework() {
+    let (jobs, rx) = channel();
+    let mut app = task_page_app();
+
+    press(&mut app, &jobs, KeyCode::Char(' '));
+    assert!(
+        matches!(rx.try_recv(), Ok(Job::SetTaskDone { id: 1, done: true })),
+        "空格应标记选中的任务为已完成"
+    );
+
+    // 移到作業列：作業只能檢視，不能標記。
+    press(&mut app, &jobs, KeyCode::Down);
+    press(&mut app, &jobs, KeyCode::Char(' '));
+    assert!(rx.try_recv().is_err(), "作业不应送出标记任务");
+    assert_eq!(
+        app.message_text(),
+        Some("只能标记自定义任务"),
+        "应提示作业不可标记"
+    );
+}
+
+#[test]
+fn m_toggles_multi_select_and_space_checks_tasks() {
+    let (jobs, rx) = channel();
+    let mut app = task_page_app();
+
+    press(&mut app, &jobs, KeyCode::Char('m'));
+    let Some(selection) = app.task_multi.as_ref() else {
+        panic!("m 应进入多选模式");
+    };
+    assert!(selection.is_empty(), "进入多选时不应预先勾选");
+    assert!(rx.try_recv().is_err(), "进入多选不应送出任务");
+
+    press(&mut app, &jobs, KeyCode::Char(' '));
+    assert!(
+        app.task_multi.as_ref().is_some_and(|set| set.contains(&1)),
+        "空格应勾选当前任务"
+    );
+    assert!(rx.try_recv().is_err(), "多选模式下空格只勾选，不标记完成");
+
+    // 再按一次取消勾選。
+    press(&mut app, &jobs, KeyCode::Char(' '));
+    assert!(
+        app.task_multi.as_ref().is_some_and(HashSet::is_empty),
+        "再次按空格应取消勾选"
+    );
+
+    press(&mut app, &jobs, KeyCode::Char('m'));
+    assert!(app.task_multi.is_none(), "再次按 m 应退出多选");
+    assert_eq!(app.message_text(), Some("已退出多选"));
+
+    // `esc` 同樣能離開（提示列寫的就是「esc 退出多选」）。
+    press(&mut app, &jobs, KeyCode::Char('m'));
+    assert!(app.task_multi.is_some());
+    press(&mut app, &jobs, KeyCode::Esc);
+    assert!(app.task_multi.is_none(), "esc 应退出多选");
+    assert_eq!(app.message_text(), Some("已退出多选"));
+}
+
+#[test]
+fn enter_in_multi_select_opens_the_batch_menu() {
+    let (jobs, rx) = channel();
+    let mut app = task_page_app();
+
+    // 未勾選任何任務：只提示，不開選單。
+    press(&mut app, &jobs, KeyCode::Char('m'));
+    press(&mut app, &jobs, KeyCode::Enter);
+    assert!(matches!(app.screen, Screen::Main), "未勾选时不开选单");
+    assert_eq!(app.message_text(), Some("尚未选择任务（space 勾选）"));
+
+    // 勾選後開啟批量操作選單，enter 送出批量任務。
+    press(&mut app, &jobs, KeyCode::Char(' '));
+    press(&mut app, &jobs, KeyCode::Enter);
+    assert!(
+        matches!(app.screen, Screen::TaskBatchMenu(_)),
+        "enter 应打开批量操作选单"
+    );
+    press(&mut app, &jobs, KeyCode::Enter);
+    assert!(
+        matches!(
+            rx.try_recv(),
+            Ok(Job::SetTasksDone { ids, done: true }) if ids == vec![1]
+        ),
+        "默认选项应批量标记完成"
+    );
+    assert!(app.task_multi.is_none(), "送出后应退出多选");
+    assert!(matches!(app.screen, Screen::Main), "送出后应回到主画面");
+}
+
+#[test]
+fn control_t_menu_confirms_deleting_completed_tasks() {
+    let (jobs, rx) = channel();
+    let mut app = task_page_app();
+
+    press_ctrl(&mut app, &jobs, 't');
+    assert!(
+        matches!(app.screen, Screen::TaskMenu(_)),
+        "^t 应打开任务设置选单"
+    );
+    // 第二項是「删除所有已完成的任务」。
+    press(&mut app, &jobs, KeyCode::Down);
+    press(&mut app, &jobs, KeyCode::Enter);
+    assert!(
+        matches!(
+            app.screen,
+            Screen::TaskConfirm(TaskConfirmState { count: 1 })
+        ),
+        "应进入二次确认并带出已完成数量"
+    );
+    press(&mut app, &jobs, KeyCode::Char('y'));
+    assert!(
+        matches!(rx.try_recv(), Ok(Job::DeleteCompletedTasks)),
+        "y 应送出删除已完成任务"
+    );
+    assert!(matches!(app.screen, Screen::Main), "确认后应回到主画面");
+
+    // 沒有已完成任務時不進二次確認。
+    app.tasks.retain(|task| !task.completed);
+    press_ctrl(&mut app, &jobs, 't');
+    press(&mut app, &jobs, KeyCode::Down);
+    press(&mut app, &jobs, KeyCode::Enter);
+    assert!(matches!(app.screen, Screen::Main));
+    assert_eq!(app.message_text(), Some("没有已完成的任务"));
+
+    // esc 關閉選單。
+    press_ctrl(&mut app, &jobs, 't');
+    press(&mut app, &jobs, KeyCode::Esc);
+    assert!(matches!(app.screen, Screen::Main));
+}
+
+#[test]
+fn control_f_filters_by_keyword_and_escape_clears_it() {
+    let (jobs, rx) = channel();
+    let mut app = task_page_app();
+
+    press_ctrl(&mut app, &jobs, 'f');
+    assert!(app.task_search.is_some(), "^f 应打开搜索输入框");
+    type_text(&mut app, &jobs, "报告");
+    press(&mut app, &jobs, KeyCode::Enter);
+    assert_eq!(app.task_filter.as_deref(), Some("报告"));
+    assert!(app.task_search.is_none(), "套用后应关闭输入框");
+    assert!(
+        app.message_text()
+            .is_some_and(|message| message.contains("报告")),
+        "应提示筛选结果：{:?}",
+        app.message_text()
+    );
+    assert_eq!(app.task_filter_matches(), 1, "只剩内容含“报告”的任务");
+    assert!(!app.tasks.is_empty(), "筛选只影响显示，不删除数据");
+    assert!(rx.try_recv().is_err(), "筛选不触发任何任务");
+
+    // 主畫面的 esc 清除篩選。
+    press(&mut app, &jobs, KeyCode::Esc);
+    assert_eq!(app.task_filter, None);
+    assert_eq!(app.message_text(), Some("已清除筛选"));
+
+    // 再開搜尋但直接 enter：視為清除篩選。
+    press_ctrl(&mut app, &jobs, 'f');
+    press(&mut app, &jobs, KeyCode::Enter);
+    assert_eq!(app.task_filter, None);
+    assert_eq!(app.message_text(), Some("已清除筛选"));
+
+    // 搜尋中按 esc：取消並保留原篩選。
+    app.task_filter = Some("报告".to_owned());
+    press_ctrl(&mut app, &jobs, 'f');
+    press(&mut app, &jobs, KeyCode::Esc);
+    assert!(app.task_search.is_none());
+    assert_eq!(app.task_filter.as_deref(), Some("报告"), "取消不应清除筛选");
+    assert_eq!(app.message_text(), Some("已取消筛选"));
+}
+
+#[test]
+fn control_e_and_control_d_apply_to_tasks_only() {
+    let (jobs, rx) = channel();
+    let mut app = task_page_app();
+
+    press_ctrl(&mut app, &jobs, 'e');
+    let Screen::TaskForm(form) = &app.screen else {
+        panic!("^e 应打开编辑表单");
+    };
+    assert_eq!(form.mode, TaskFormMode::Edit { id: 1 });
+    assert_eq!(form.content.value(), "写实验报告", "应预填既有内容");
+    assert_eq!(form.description.value(), "第三章");
+    assert_eq!(form.priority, Priority::High);
+    press(&mut app, &jobs, KeyCode::Esc);
+
+    // 作業列不可編輯、不可刪除。
+    press(&mut app, &jobs, KeyCode::Down);
+    press_ctrl(&mut app, &jobs, 'e');
+    assert!(matches!(app.screen, Screen::Main));
+    assert_eq!(app.message_text(), Some("只能修改自定义任务"));
+    press_ctrl(&mut app, &jobs, 'd');
+    assert!(rx.try_recv().is_err(), "作业不得送出删除任务");
+    assert_eq!(app.message_text(), Some("只能删除自定义任务"));
+
+    // 任務需要按兩次 ^d；中間按下其他鍵會取消。
+    press(&mut app, &jobs, KeyCode::Up);
+    press_ctrl(&mut app, &jobs, 'd');
+    assert!(rx.try_recv().is_err(), "第一次 ^d 只提示，不删除");
+    assert_eq!(app.task_pending_delete.as_ref().map(|(id, _)| *id), Some(1));
+    assert!(
+        app.message_text()
+            .is_some_and(|message| message.contains("再按一次"))
+    );
+    press(&mut app, &jobs, KeyCode::Char('x'));
+    assert!(app.task_pending_delete.is_none(), "其他按键应取消待确认");
+
+    press_ctrl(&mut app, &jobs, 'd');
+    press_ctrl(&mut app, &jobs, 'd');
+    assert!(
+        matches!(rx.try_recv(), Ok(Job::DeleteTask { id: 1 })),
+        "第二次 ^d 才删除"
+    );
+    assert!(app.task_pending_delete.is_none());
+}
+
+#[test]
+fn task_keys_do_nothing_on_other_pages() {
+    let (jobs, rx) = channel();
+    let mut app = task_page_app();
+    app.nav = NavItem::Schedule;
+
+    for character in ['a', 'e', 'd', 'f', 't'] {
+        press_ctrl(&mut app, &jobs, character);
+    }
+    press(&mut app, &jobs, KeyCode::Char(' '));
+    press(&mut app, &jobs, KeyCode::Char('m'));
+
+    assert!(matches!(app.screen, Screen::Main), "其他页面不得开弹窗");
+    assert!(app.task_multi.is_none(), "其他页面不得进入多选");
+    assert!(app.task_search.is_none(), "其他页面不得开搜索");
+    assert!(rx.try_recv().is_err(), "其他页面不得送出任务任务");
+}
+
+// ── 任務頁排序（^L） ─────────────────────────────────────
+
+/// 目前選取項目的標籤（任務內容或作業標題）。
+fn selected_label(app: &App) -> String {
+    match app.selected_entry() {
+        Some(TaskEntry::Task(task)) => task.content.clone(),
+        Some(TaskEntry::Homework(item)) => item.title.clone(),
+        None => "<none>".to_owned(),
+    }
+}
+
+#[test]
+fn sort_keys_switch_the_mode_and_return_to_the_main_screen() {
+    let (jobs, _rx) = channel();
+    let mut app = task_page_app();
+
+    for (character, mode, label) in [
+        ('p', SortMode::Priority, "优先级"),
+        ('d', SortMode::Deadline, "截止时间"),
+        ('n', SortMode::Default, "默认"),
+    ] {
+        press_ctrl(&mut app, &jobs, 'l');
+        assert!(matches!(app.screen, Screen::Sort), "^L 应进入排序提示");
+        press(&mut app, &jobs, KeyCode::Char(character));
+        assert!(matches!(app.screen, Screen::Main), "选定后应回到主画面");
+        assert_eq!(app.task_sort, mode, "{character} 应套用 {label}");
+        assert!(
+            app.message_text().is_some_and(|text| text.contains(label)),
+            "提示应说明目前的排序方式：{:?}",
+            app.message_text()
+        );
+    }
+
+    // 大寫與其他按鍵的相容性：`P` 等同 `p`。
+    press_ctrl(&mut app, &jobs, 'l');
+    press(&mut app, &jobs, KeyCode::Char('P'));
+    assert_eq!(app.task_sort, SortMode::Priority);
+}
+
+#[test]
+fn sort_prompt_ignores_other_keys_and_esc_cancels() {
+    let (jobs, rx) = channel();
+    let mut app = task_page_app();
+    app.task_sort = SortMode::Priority;
+
+    press_ctrl(&mut app, &jobs, 'l');
+    for code in [KeyCode::Char('x'), KeyCode::Enter, KeyCode::Down] {
+        press(&mut app, &jobs, code);
+        assert!(
+            matches!(app.screen, Screen::Sort),
+            "{code:?} 不应离开排序提示"
+        );
+    }
+    assert_eq!(app.task_sort, SortMode::Priority, "未选定前不得改变排序");
+
+    press(&mut app, &jobs, KeyCode::Esc);
+    assert!(matches!(app.screen, Screen::Main), "esc 应取消并回到主画面");
+    assert_eq!(
+        app.task_sort,
+        SortMode::Priority,
+        "取消不得改变原本的排序方式"
+    );
+    assert!(rx.try_recv().is_err(), "排序是纯界面操作，不送任务");
+}
+
+#[test]
+fn sort_key_only_works_on_the_task_page() {
+    let (jobs, rx) = channel();
+    let mut app = task_page_app();
+    app.nav = NavItem::Schedule;
+
+    press_ctrl(&mut app, &jobs, 'l');
+    assert!(
+        matches!(app.screen, Screen::Main),
+        "其他页面不得进入排序提示"
+    );
+    assert_eq!(app.task_sort, SortMode::Default);
+    assert!(rx.try_recv().is_err(), "其他页面不得送出任务");
+}
+
+#[test]
+fn switching_sort_keeps_the_selection_on_the_same_item() {
+    let (jobs, _rx) = channel();
+    let mut app = task_page_app();
+    // 預設排序：未完成分組為「任务 → 作业」，選取作業（索引 1）。
+    app.set_selection(1);
+    assert_eq!(selected_label(&app), "第一次作业");
+
+    // 優先級排序：作業（高、有截止時間）排到任務（高、無截止）之前。
+    press_ctrl(&mut app, &jobs, 'l');
+    press(&mut app, &jobs, KeyCode::Char('p'));
+    assert_eq!(app.task_sort, SortMode::Priority);
+    assert_eq!(app.page_selection(), 0, "作业应排到第一列");
+    assert_eq!(
+        selected_label(&app),
+        "第一次作业",
+        "切换排序后游标应留在同一个项目"
+    );
+}
+
+// ── 按鍵立刻換掉提示列 ───────────────────────────────────
+
+#[test]
+fn key_press_replaces_the_previous_message_with_the_current_hints() {
+    let (jobs, _rx) = channel();
+    let mut app = task_page_app();
+    // 模擬背景通知還在顯示（會停留數秒）時使用者按下 `^L`。
+    app.set_message("作业已更新（用时 3.2s）");
+
+    press_ctrl(&mut app, &jobs, 'l');
+    assert!(matches!(app.screen, Screen::Sort), "^L 应进入排序提示");
+    assert!(
+        app.message_text().is_none(),
+        "按键后应立刻清掉上一则通知，让底部改显示排序按键：{:?}",
+        app.message_text()
+    );
+
+    // 動作本身設定的訊息仍要顯示（清除只發生在處理這次按鍵之前）。
+    press(&mut app, &jobs, KeyCode::Char('p'));
+    assert_eq!(app.task_sort, SortMode::Priority);
+    assert!(
+        app.message_text()
+            .is_some_and(|text| text.contains("已按优先级排序")),
+        "排序结果仍应提示：{:?}",
+        app.message_text()
+    );
+}
+
+#[test]
+fn any_key_clears_the_message_even_when_the_action_does_nothing() {
+    let (jobs, _rx) = channel();
+    let mut app = task_page_app();
+    app.set_message("已删除 2 个已完成任务");
+
+    // 未綁定的按鍵沒有動作，但仍代表使用者操作過一次。
+    press(&mut app, &jobs, KeyCode::Char('x'));
+    assert!(app.message_text().is_none(), "未绑定的按键也应清掉旧通知");
+}
+
+// ── 任務表單的優先級方向 ─────────────────────────────────
+
+#[test]
+fn task_form_priority_cycles_low_to_high_with_right_arrow() {
+    let (jobs, _rx) = channel();
+    let mut app = task_page_app();
+    press_ctrl(&mut app, &jobs, 'a');
+    // 焦點依序為 內容 → 描述 → 截止 → 優先級。
+    for _ in 0..3 {
+        press(&mut app, &jobs, KeyCode::Tab);
+    }
+    let Screen::TaskForm(form) = &app.screen else {
+        panic!("应停留在任务表单");
+    };
+    assert_eq!(form.focus, TaskField::Priority, "焦点应落在优先级字段");
+    assert_eq!(form.priority, Priority::Low, "默认优先级为低");
+
+    // `→`：低 → 中 → 高 → 低。
+    press(&mut app, &jobs, KeyCode::Right);
+    assert_eq!(task_form_priority(&app), Priority::Medium);
+    press(&mut app, &jobs, KeyCode::Right);
+    assert_eq!(task_form_priority(&app), Priority::High);
+    press(&mut app, &jobs, KeyCode::Right);
+    assert_eq!(task_form_priority(&app), Priority::Low, "应在高之后回到低");
+
+    // `←` 反向：低 → 高。
+    press(&mut app, &jobs, KeyCode::Left);
+    assert_eq!(task_form_priority(&app), Priority::High);
+}
+
+/// 目前任務表單的優先級。
+fn task_form_priority(app: &App) -> Priority {
+    match &app.screen {
+        Screen::TaskForm(form) => form.priority,
+        other => panic!("应在任务表单，实际为 {other:?}"),
+    }
 }

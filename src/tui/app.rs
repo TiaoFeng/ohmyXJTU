@@ -1,6 +1,6 @@
 //! TUI 應用狀態（畫面路由與各頁資料）。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -11,11 +11,12 @@ use crate::domain::activity::{self, ActivityGroup};
 use crate::domain::course_list::{self, CourseRow};
 use crate::domain::homework::{HomeworkGroup, HomeworkItem};
 use crate::domain::semester::TermCode;
+use crate::domain::todo::{self, PageRow, Priority, SortKey, SortMode, Task};
 use crate::model::{ActivityDetailView, FlowData, ScheduleData};
 use crate::session::{AccessMode, SiteKind};
 use crate::sites::lms::{LmsActivity, LmsCourse};
 use crate::task::{FailedTarget, HomeworkIssue};
-use crate::tui::text::InputLine;
+use crate::tui::text::{InputLine, TextArea};
 
 /// 訊息保留時間。
 const MESSAGE_TTL: Duration = Duration::from_secs(8);
@@ -45,7 +46,7 @@ impl NavItem {
     pub fn label(self) -> &'static str {
         match self {
             Self::Schedule => "课表",
-            Self::Homework => "作业",
+            Self::Homework => "任务",
             Self::Attendance => "考勤流水",
             Self::Lms => "思源学堂",
         }
@@ -269,6 +270,25 @@ impl HomeworkData {
     }
 }
 
+/// 任務頁目前選取的項目。
+#[derive(Debug, Clone, Copy)]
+pub enum TaskEntry<'a> {
+    /// 自訂義任務。
+    Task(&'a Task),
+    /// 思源學堂作業。
+    Homework(&'a HomeworkItem),
+}
+
+impl TaskEntry<'_> {
+    /// 所屬分組。
+    pub fn group(&self) -> HomeworkGroup {
+        match self {
+            Self::Task(task) => task.group(),
+            Self::Homework(item) => item.state.group(),
+        }
+    }
+}
+
 /// 學期選擇器狀態。
 #[derive(Debug, Default)]
 pub struct TermPickerState {
@@ -327,6 +347,203 @@ pub struct UpdatedAt {
     pub attendance: Option<String>,
     /// 思源學堂。
     pub lms: Option<String>,
+}
+
+/// 任務表單的模式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskFormMode {
+    /// 新增任務（識別碼由存儲指派）。
+    Add,
+    /// 編輯既有任務。
+    Edit {
+        /// 任務識別碼。
+        id: u64,
+    },
+}
+
+/// 任務表單的聚焦欄位。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskField {
+    /// 內容（必填）。
+    Content,
+    /// 描述（多行）。
+    Description,
+    /// 截止時間。
+    Deadline,
+    /// 優先級。
+    Priority,
+    /// 完成狀態。
+    Completed,
+}
+
+impl TaskField {
+    /// 全部欄位（畫面順序）。
+    pub const ALL: [Self; 5] = [
+        Self::Content,
+        Self::Description,
+        Self::Deadline,
+        Self::Priority,
+        Self::Completed,
+    ];
+
+    /// 下一個欄位（循環）。
+    pub fn next(self) -> Self {
+        match self {
+            Self::Content => Self::Description,
+            Self::Description => Self::Deadline,
+            Self::Deadline => Self::Priority,
+            Self::Priority => Self::Completed,
+            Self::Completed => Self::Content,
+        }
+    }
+
+    /// 上一個欄位（循環）。
+    pub fn previous(self) -> Self {
+        match self {
+            Self::Content => Self::Completed,
+            Self::Description => Self::Content,
+            Self::Deadline => Self::Description,
+            Self::Priority => Self::Deadline,
+            Self::Completed => Self::Priority,
+        }
+    }
+}
+
+/// 新增／編輯任務的表單狀態。
+#[derive(Debug, Clone)]
+pub struct TaskFormState {
+    /// 表單模式。
+    pub mode: TaskFormMode,
+    /// 內容。
+    pub content: InputLine,
+    /// 描述（多行）。
+    pub description: TextArea,
+    /// 截止時間（文字輸入，保存時解析）。
+    pub deadline: InputLine,
+    /// 優先級。
+    pub priority: Priority,
+    /// 是否已完成。
+    pub completed: bool,
+    /// 目前聚焦的欄位。
+    pub focus: TaskField,
+    /// 是否正在送出（等待工作者回報）。
+    pub busy: bool,
+    /// 驗證或保存失敗的原因（就地顯示）。
+    pub error: Option<String>,
+}
+
+impl TaskFormState {
+    /// 新增表單。
+    pub fn add() -> Self {
+        Self {
+            mode: TaskFormMode::Add,
+            content: InputLine::new(),
+            description: TextArea::new(""),
+            deadline: InputLine::new(),
+            priority: Priority::default(),
+            completed: false,
+            focus: TaskField::Content,
+            busy: false,
+            error: None,
+        }
+    }
+
+    /// 以既有任務預填編輯表單。
+    pub fn edit(task: &Task) -> Self {
+        Self {
+            mode: TaskFormMode::Edit { id: task.id },
+            content: InputLine::with_value(task.content.clone()),
+            description: TextArea::new(task.description.as_deref().unwrap_or_default()),
+            deadline: InputLine::with_value(
+                task.deadline
+                    .map(|deadline| deadline.format("%Y-%m-%d %H:%M").to_string())
+                    .unwrap_or_default(),
+            ),
+            priority: task.priority,
+            completed: task.completed,
+            focus: TaskField::Content,
+            busy: false,
+            error: None,
+        }
+    }
+
+    /// 切換到下一個欄位。
+    pub fn focus_next(&mut self) {
+        self.focus = self.focus.next();
+    }
+
+    /// 切換到上一個欄位。
+    pub fn focus_previous(&mut self) {
+        self.focus = self.focus.previous();
+    }
+}
+
+/// 任務設置選單（`^T`）的項目。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskMenuKind {
+    /// 進入多選模式（批量操作）。
+    Multi,
+    /// 刪除所有已完成任務。
+    DeleteCompleted,
+}
+
+impl TaskMenuKind {
+    /// 全部項目（畫面順序）。
+    pub const ALL: [Self; 2] = [Self::Multi, Self::DeleteCompleted];
+
+    /// 簡體中文標籤。
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Multi => "多选（批量操作）",
+            Self::DeleteCompleted => "删除所有已完成的任务",
+        }
+    }
+}
+
+/// 任務設置彈窗狀態。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TaskMenuState {
+    /// 目前選取的項目。
+    pub index: usize,
+}
+
+/// 多選後的批量操作。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskBatchOp {
+    /// 標記完成。
+    Done,
+    /// 標記未完成。
+    Undone,
+    /// 刪除。
+    Delete,
+}
+
+impl TaskBatchOp {
+    /// 全部操作（畫面順序）。
+    pub const ALL: [Self; 3] = [Self::Done, Self::Undone, Self::Delete];
+
+    /// 簡體中文標籤。
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Done => "标记完成",
+            Self::Undone => "标记未完成",
+            Self::Delete => "删除",
+        }
+    }
+}
+
+/// 多選批量操作選單狀態。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TaskBatchMenuState {
+    /// 目前選取的項目。
+    pub index: usize,
+}
+
+/// 刪除已完成任務的二次確認狀態。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TaskConfirmState {
+    /// 將被刪除的任務數。
+    pub count: usize,
 }
 
 /// 表單種類。
@@ -776,6 +993,16 @@ pub enum Screen {
     SettingsForm(FormState),
     /// 學期選擇器。
     TermPicker(TermPickerState),
+    /// 任務設置彈窗（`^T`）。
+    TaskMenu(TaskMenuState),
+    /// 多選後的批量操作選單。
+    TaskBatchMenu(TaskBatchMenuState),
+    /// 刪除已完成任務的二次確認。
+    TaskConfirm(TaskConfirmState),
+    /// 新增／編輯任務的表單彈窗。
+    TaskForm(Box<TaskFormState>),
+    /// 任務頁排序提示（`^L`）：只顯示提示列，畫面其餘部分照常。
+    Sort,
 }
 
 /// 可捲動內容的位移狀態。
@@ -881,6 +1108,18 @@ pub struct App {
     pub homework: Page<HomeworkData>,
     /// 作業頁目前分組。
     pub homework_group: HomeworkGroup,
+    /// 自訂義任務（本機資料；與帳號無關，換帳號時不清空）。
+    pub tasks: Vec<Task>,
+    /// 任務頁的搜尋關鍵字（`None` 表示未篩選；作業與任務都會被過濾）。
+    pub task_filter: Option<String>,
+    /// 任務頁的搜尋輸入框（開啟時獨占任務頁的按鍵）。
+    pub task_search: Option<InputLine>,
+    /// 任務頁的多選模式：已勾選的任務識別碼（`None` 表示不在多選模式）。
+    pub task_multi: Option<HashSet<u64>>,
+    /// 任務頁的排序方式（`^L`；只影響顯示，不改動資料）。
+    pub task_sort: SortMode,
+    /// `^D` 第一次按下後等待第二次確認的任務（識別碼、內容）。
+    pub task_pending_delete: Option<(u64, String)>,
     /// 最近一次得知的可選學期（供學期選擇器）。
     pub term_options: Vec<TermCode>,
     /// 考勤流水頁。
@@ -940,6 +1179,12 @@ impl App {
             schedule_pending_week: None,
             homework: Page::Idle,
             homework_group: HomeworkGroup::Unfinished,
+            tasks: Vec::new(),
+            task_filter: None,
+            task_search: None,
+            task_multi: None,
+            task_sort: SortMode::default(),
+            task_pending_delete: None,
             term_options: Vec::new(),
             attendance: Page::Idle,
             lms: LmsState::default(),
@@ -968,10 +1213,10 @@ impl App {
     pub fn page_len(&self) -> usize {
         match self.nav {
             NavItem::Schedule => self.schedule.ready().map_or(0, |data| data.lessons.len()),
-            NavItem::Homework => self
-                .homework
-                .ready()
-                .map_or(0, |data| data.group_count(self.homework_group)),
+            NavItem::Homework => todo::selectable_len(
+                self.task_group_items(self.homework_group).len(),
+                self.homework_group_items(self.homework_group).len(),
+            ),
             NavItem::Attendance => self.attendance.ready().map_or(0, |data| data.records.len()),
             NavItem::Lms => match self.lms.level {
                 LmsLevel::Courses => self.lms.courses.ready().map_or(0, Vec::len),
@@ -1109,6 +1354,12 @@ impl App {
             self.schedule_pending_week = None;
             self.homework = Page::Idle;
             self.attendance = Page::Idle;
+            // 自訂義任務屬於本機資料，與帳號無關：內容保留，只清掉任務頁的
+            // 暫時狀態（搜尋、多選、待確認刪除）。
+            self.task_filter = None;
+            self.task_search = None;
+            self.task_multi = None;
+            self.task_pending_delete = None;
             // 舊帳號的課程、活動與詳情一律清空。
             self.lms = LmsState::default();
             self.updated_at = UpdatedAt::default();
@@ -1157,6 +1408,103 @@ impl App {
         activity::counts(activities)
     }
 
+    /// 任務頁目前選取的項目（與列模型順序一致）。
+    pub fn selected_entry(&self) -> Option<TaskEntry<'_>> {
+        if self.nav != NavItem::Homework {
+            return None;
+        }
+        self.task_page_entries().get(self.page_selection()).copied()
+    }
+
+    /// 任務頁的可選取項目（依目前的排序方式排列）。
+    ///
+    /// 預設排序維持「任務段在前、作業段在後」；其餘排序方式把兩者混在一起，依
+    /// 排序鍵排列（作業的優先級一律視為「高」）。分組篩選與搜尋在兩者都適用。
+    pub fn task_page_entries(&self) -> Vec<TaskEntry<'_>> {
+        let group = self.homework_group;
+        let tasks = self.task_group_items(group);
+        let homework = self.homework_group_items(group);
+        if !self.task_sort.is_sorted() {
+            let mut entries: Vec<TaskEntry<'_>> = tasks.into_iter().map(TaskEntry::Task).collect();
+            entries.extend(homework.into_iter().map(TaskEntry::Homework));
+            return entries;
+        }
+        let mut keyed: Vec<(SortKey, TaskEntry<'_>)> = tasks
+            .iter()
+            .map(|task| (todo::task_sort_key(task), TaskEntry::Task(task)))
+            .chain(
+                homework
+                    .iter()
+                    .map(|item| (todo::homework_sort_key(item), TaskEntry::Homework(item))),
+            )
+            .collect();
+        keyed.sort_by(|left, right| todo::compare(self.task_sort, &left.0, &right.0));
+        keyed.into_iter().map(|(_, entry)| entry).collect()
+    }
+
+    /// 指定分組的作業（依搜尋關鍵字過濾；保持原本排序）。
+    pub fn homework_group_items(&self, group: HomeworkGroup) -> Vec<&HomeworkItem> {
+        let Some(data) = self.homework.ready() else {
+            return Vec::new();
+        };
+        let keyword = self.task_filter.as_deref();
+        data.group_items(group)
+            .into_iter()
+            .filter(|item| keyword.is_none_or(|keyword| item.matches(keyword)))
+            .collect()
+    }
+
+    /// 指定分組的自訂義任務（依搜尋關鍵字過濾；已排序）。
+    pub fn task_group_items(&self, group: HomeworkGroup) -> Vec<&Task> {
+        let keyword = self.task_filter.as_deref();
+        self.tasks
+            .iter()
+            .filter(|task| task.group() == group)
+            .filter(|task| keyword.is_none_or(|keyword| task.matches(keyword)))
+            .collect()
+    }
+
+    /// 指定分組的項目數（作業＋任務；不受搜尋過濾影響）。
+    pub fn page_group_count(&self, group: HomeworkGroup) -> usize {
+        let homework = self
+            .homework
+            .ready()
+            .map_or(0, |data| data.group_count(group));
+        let tasks = self
+            .tasks
+            .iter()
+            .filter(|task| task.group() == group)
+            .count();
+        homework + tasks
+    }
+
+    /// 任務頁目前的列模型。
+    ///
+    /// 預設排序分段顯示（任务段在前、作业段在后，只含非空分段）；混合排序則把
+    /// 排好的項目直接列成一串，不再插入分段標題與空白列。
+    pub fn task_page_rows(&self) -> Vec<PageRow<'_>> {
+        if !self.task_sort.is_sorted() {
+            let group = self.homework_group;
+            return todo::page_rows(
+                &self.task_group_items(group),
+                &self.homework_group_items(group),
+            );
+        }
+        self.task_page_entries()
+            .into_iter()
+            .map(|entry| match entry {
+                TaskEntry::Task(task) => PageRow::Task(task),
+                TaskEntry::Homework(item) => PageRow::Homework(item),
+            })
+            .collect()
+    }
+
+    /// 目前分組中符合搜尋關鍵字的項目數（作業＋任務）。
+    pub fn task_filter_matches(&self) -> usize {
+        let group = self.homework_group;
+        self.task_group_items(group).len() + self.homework_group_items(group).len()
+    }
+
     /// 設定目前頁面的選取索引。
     pub fn set_selection(&mut self, index: usize) {
         match self.nav {
@@ -1183,7 +1531,8 @@ impl App {
             | FailedTarget::Credentials
             | FailedTarget::ActivityOpen
             | FailedTarget::Settings
-            | FailedTarget::Agreement => {}
+            | FailedTarget::Agreement
+            | FailedTarget::Tasks => {}
         }
     }
 
@@ -1202,7 +1551,8 @@ impl App {
             | FailedTarget::Credentials
             | FailedTarget::ActivityOpen
             | FailedTarget::Settings
-            | FailedTarget::Agreement => {}
+            | FailedTarget::Agreement
+            | FailedTarget::Tasks => {}
         }
     }
 
@@ -1221,11 +1571,19 @@ impl App {
         self.screen = screen;
     }
 
-    /// 是否在主畫面（含設定彈窗與學期選擇器）。
+    /// 是否在主畫面（含設定、學期選擇器與任務彈窗）。
     pub fn is_main(&self) -> bool {
         matches!(
             self.screen,
-            Screen::Main | Screen::Settings(_) | Screen::SettingsForm(_) | Screen::TermPicker(_)
+            Screen::Main
+                | Screen::Settings(_)
+                | Screen::SettingsForm(_)
+                | Screen::TermPicker(_)
+                | Screen::TaskMenu(_)
+                | Screen::TaskBatchMenu(_)
+                | Screen::TaskConfirm(_)
+                | Screen::TaskForm(_)
+                | Screen::Sort
         )
     }
 
@@ -1242,6 +1600,14 @@ impl App {
     /// 顯示暫時訊息。
     pub fn set_message(&mut self, message: impl Into<String>) {
         self.message = Some((message.into(), Instant::now()));
+    }
+
+    /// 清除暫時訊息。
+    ///
+    /// 使用者按下任何按鍵時呼叫（見 `handler::handle_key`）：底部提示列會立刻
+    /// 換回「目前畫面」的快捷鍵，不會因為上一則通知還在而看起來毫無反應。
+    pub fn clear_message(&mut self) {
+        self.message = None;
     }
 
     /// 前進一個動畫影格（供載入指示燈動畫使用）。

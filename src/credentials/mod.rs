@@ -1,5 +1,6 @@
 //! 憑證儲存：以口令加解密帳號密碼，磁碟上不留明文。
 
+pub(crate) mod envelope;
 pub mod secret;
 pub mod vault;
 

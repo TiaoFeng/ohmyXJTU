@@ -9,6 +9,7 @@ use std::sync::mpsc::Sender;
 
 use crate::config::AccessPolicy;
 use crate::domain::homework::HomeworkGroup;
+use crate::domain::todo::Task;
 use crate::model::{ActivityDetailView, FlowData, ScheduleData};
 use crate::session::{AccessMode, SiteKind};
 use crate::sites::lms::LmsActivity;
@@ -16,7 +17,7 @@ use crate::task::{CoursesData, Event, FailedTarget, HomeworkUpdate, Job};
 
 use super::app::{
     App, FormKind, FormState, HomeworkData, LmsLevel, LoginScreen, Page, Screen, SettingsState,
-    TermPickerState,
+    TaskEntry, TermPickerState,
 };
 use super::controller;
 use super::text::InputLine;
@@ -53,6 +54,7 @@ pub(crate) fn apply_event(app: &mut App, event: Event, jobs: &Sender<Job>) {
             app.cancel_loading(target);
         }
         Event::Schedule(data) => apply_schedule(app, *data),
+        Event::Tasks(tasks) => apply_tasks(app, tasks),
         Event::Homework(update) => apply_homework(app, update),
         Event::HomeworkNeedsTerm {
             options,
@@ -263,7 +265,6 @@ fn apply_homework(app: &mut App, update: HomeworkUpdate) {
     };
     app.term_options = data.term_options.clone();
     app.updated_at.homework = Some(now_clock());
-    let len = data.group_count(app.homework_group);
     app.homework = match progress {
         // 部分結果：頁面維持載入中（資料持續可顯示），終態才轉為就緒。
         Some((done, total)) => Page::Loading {
@@ -275,7 +276,9 @@ fn apply_homework(app: &mut App, update: HomeworkUpdate) {
         },
         None => Page::Ready(data),
     };
-    // 夾取選取索引，避免分組內容變動後越界。
+    // 夾取選取索引，避免分組內容變動後越界（任務與作業共用同一組索引）。
+    let len = app.task_group_items(app.homework_group).len()
+        + app.homework_group_items(app.homework_group).len();
     let selected = app
         .homework_state
         .selected()
@@ -286,10 +289,34 @@ fn apply_homework(app: &mut App, update: HomeworkUpdate) {
         // 新一輪結果取代了畫面上的作業：詳情捲動回到頂端。
         app.homework_scroll.reset();
         app.set_message(format!(
-            "作业已更新：未完成 {unfinished} 项（用时 {:.1}s）",
+            "已更新作业：未完成 {unfinished} 项（用时 {:.1}s）",
             elapsed.as_secs_f32()
         ));
     }
+    app.ensure_main();
+}
+
+/// 任務快照更新：取代清單，並把選取錨定回原本的任務。
+///
+/// 任務可能因為標記完成而換分組（不在目前分組時就找不到），因此優先用識別碼
+/// 重新定位；找不到才把索引夾在新長度內。
+fn apply_tasks(app: &mut App, tasks: Vec<Task>) {
+    let previous = match app.selected_entry() {
+        Some(TaskEntry::Task(task)) => Some(task.id),
+        _ => None,
+    };
+    app.tasks = tasks;
+    let len = app.task_group_items(app.homework_group).len()
+        + app.homework_group_items(app.homework_group).len();
+    let fallback = app.page_selection().min(len.saturating_sub(1));
+    let selected = previous
+        .and_then(|id| {
+            app.task_group_items(app.homework_group)
+                .iter()
+                .position(|task| task.id == id)
+        })
+        .unwrap_or(fallback);
+    app.homework_state.select(Some(selected));
     app.ensure_main();
 }
 
@@ -452,6 +479,13 @@ fn apply_failure(
                 // 協議同意保存失敗：留在閱讀畫面就地顯示錯誤，可重試。
                 if let Some(state) = app.agreement.as_mut() {
                     state.fail(message.clone());
+                }
+            }
+            FailedTarget::Tasks => {
+                // 任務保存失敗：表單就地顯示錯誤並解除「保存中」，否則只在底欄提示。
+                if let Screen::TaskForm(form) = &mut app.screen {
+                    form.busy = false;
+                    form.error = Some(text.clone());
                 }
             }
             _ => {

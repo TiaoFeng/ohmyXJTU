@@ -10,7 +10,10 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::credentials::Secret;
 use crate::session::SiteKind;
 use crate::task::Job;
-use crate::tui::app::{App, FormKind, FormState, LoginScreen, NavItem, Screen, SettingsState};
+use crate::tui::app::{
+    App, FormKind, FormState, LoginScreen, NavItem, Screen, SettingsState, TaskBatchOp,
+    TaskConfirmState, TaskField, TaskMenuKind,
+};
 use crate::tui::text::InputLine;
 
 use super::controller;
@@ -52,10 +55,15 @@ pub fn handle_key(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
                 return;
             }
             KeyCode::Char('u') => {
-                if let Some(form) = app.form_mut()
-                    && let Some(field) = form.focused_mut()
-                {
-                    field.value.clear();
+                if app.form_mut().is_some() {
+                    if let Some(form) = app.form_mut()
+                        && let Some(field) = form.focused_mut()
+                    {
+                        field.value.clear();
+                    }
+                } else {
+                    // 任務表單不是憑證表單：清空它目前聚焦的欄位。
+                    controller::clear_focused_task_field(app);
                 }
                 return;
             }
@@ -76,6 +84,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
         }
         Screen::Settings(_) => handle_settings(app, key, jobs),
         Screen::TermPicker(_) => handle_term_picker(app, key, jobs),
+        Screen::TaskMenu(_) => handle_task_menu(app, key),
+        Screen::TaskBatchMenu(_) => handle_task_batch_menu(app, key, jobs),
+        Screen::TaskConfirm(_) => handle_task_confirm(app, key, jobs),
+        Screen::TaskForm(_) => handle_task_form(app, key, jobs),
         Screen::Main => handle_main(app, key, jobs),
     }
 }
@@ -86,6 +98,11 @@ pub fn handle_key(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
 pub fn handle_paste(app: &mut App, text: &str) {
     // 協議閱讀門開啟時不接受輸入。
     if app.agreement.is_some() {
+        return;
+    }
+    // 任務搜尋輸入框優先於底層畫面。
+    if let Some(input) = app.task_search.as_mut() {
+        insert_text(input, text);
         return;
     }
     // 登入覆蓋層優先於底層表單。
@@ -100,6 +117,23 @@ pub fn handle_paste(app: &mut App, text: &str) {
                 }
             }
             _ => {}
+        }
+        return;
+    }
+    // 任務表單：描述欄接受換行，其餘欄位忽略換行。
+    if let Screen::TaskForm(form) = &mut app.screen {
+        match form.focus {
+            TaskField::Content => insert_text(&mut form.content, text),
+            TaskField::Deadline => insert_text(&mut form.deadline, text),
+            TaskField::Description => {
+                for character in text.chars() {
+                    if character == '\r' {
+                        continue;
+                    }
+                    form.description.insert(character);
+                }
+            }
+            TaskField::Priority | TaskField::Completed => {}
         }
         return;
     }
@@ -439,7 +473,257 @@ fn handle_term_picker(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
     }
 }
 
+/// 是否為帶 Ctrl 的指定字元（`^D` 之類的組合鍵）。
+fn is_ctrl_char(key: &KeyEvent, character: char) -> bool {
+    key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char(character)
+}
+
+/// 是否為不含 Ctrl／Alt 的普通字元鍵。
+fn plain_char(key: &KeyEvent) -> Option<char> {
+    if key
+        .modifiers
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    {
+        return None;
+    }
+    match key.code {
+        KeyCode::Char(character) => Some(character),
+        _ => None,
+    }
+}
+
+/// 在任務選單（設置／批量操作）中移動選取。
+fn move_menu_index(app: &mut App, delta: i32, len: usize) {
+    if len == 0 {
+        return;
+    }
+    let step = if delta >= 0 { 1 } else { len - 1 };
+    match &mut app.screen {
+        Screen::TaskMenu(state) => state.index = (state.index + step) % len,
+        Screen::TaskBatchMenu(state) => state.index = (state.index + step) % len,
+        _ => {}
+    }
+}
+
+/// 任務設置彈窗（`^T`）：多選與刪除已完成。
+fn handle_task_menu(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') => move_menu_index(app, -1, TaskMenuKind::ALL.len()),
+        KeyCode::Down | KeyCode::Char('j') => move_menu_index(app, 1, TaskMenuKind::ALL.len()),
+        KeyCode::Esc => app.set_screen(Screen::Main),
+        KeyCode::Enter | KeyCode::Char('\n') => {
+            let index = match &app.screen {
+                Screen::TaskMenu(state) => state.index,
+                _ => return,
+            };
+            let Some(kind) = TaskMenuKind::ALL.get(index) else {
+                return;
+            };
+            match kind {
+                TaskMenuKind::Multi => {
+                    controller::toggle_task_multi(app);
+                }
+                TaskMenuKind::DeleteCompleted => {
+                    let count = app.tasks.iter().filter(|task| task.completed).count();
+                    if count == 0 {
+                        app.set_screen(Screen::Main);
+                        app.set_message("没有已完成的任务");
+                        return;
+                    }
+                    app.set_screen(Screen::TaskConfirm(TaskConfirmState { count }));
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// 多選後的批量操作選單。
+fn handle_task_batch_menu(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') => move_menu_index(app, -1, TaskBatchOp::ALL.len()),
+        KeyCode::Down | KeyCode::Char('j') => move_menu_index(app, 1, TaskBatchOp::ALL.len()),
+        KeyCode::Esc => app.set_screen(Screen::Main),
+        KeyCode::Enter | KeyCode::Char('\n') => {
+            let index = match &app.screen {
+                Screen::TaskBatchMenu(state) => state.index,
+                _ => return,
+            };
+            let Some(op) = TaskBatchOp::ALL.get(index) else {
+                return;
+            };
+            let ids = controller::selected_task_ids(app);
+            app.task_multi = None;
+            app.set_screen(Screen::Main);
+            if ids.is_empty() {
+                app.set_message("选中的任务已不存在");
+                return;
+            }
+            let job = match op {
+                TaskBatchOp::Done => Job::SetTasksDone { ids, done: true },
+                TaskBatchOp::Undone => Job::SetTasksDone { ids, done: false },
+                TaskBatchOp::Delete => Job::DeleteTasks { ids },
+            };
+            let _ = jobs.send(job);
+        }
+        _ => {}
+    }
+}
+
+/// 刪除已完成任務的二次確認（`y` 確認、`n`／`esc` 取消）。
+fn handle_task_confirm(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
+    match plain_char(&key) {
+        Some('y' | 'Y') => {
+            app.set_screen(Screen::Main);
+            let _ = jobs.send(Job::DeleteCompletedTasks);
+        }
+        Some('n' | 'N') => {
+            app.set_screen(Screen::Main);
+            app.set_message("已取消删除");
+        }
+        _ => {
+            if key.code == KeyCode::Esc {
+                app.set_screen(Screen::Main);
+                app.set_message("已取消删除");
+            }
+        }
+    }
+}
+
+/// 任務表單（新增／編輯）。
+///
+/// `tab` 切換欄位、描述欄 `enter` 換行、左右鍵切換選項、`^s` 保存、`esc` 取消。
+fn handle_task_form(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
+    // 送出中：忽略所有輸入，避免重複提交。
+    if matches!(&app.screen, Screen::TaskForm(form) if form.busy) {
+        return;
+    }
+    // 保存用組合鍵：描述欄的 enter 已經被「換行」佔用。
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        if key.code == KeyCode::Char('s') {
+            controller::submit_task_form(app, jobs);
+        }
+        return;
+    }
+
+    let Screen::TaskForm(form) = &mut app.screen else {
+        return;
+    };
+    let form = form.as_mut();
+    match key.code {
+        KeyCode::Esc => {
+            app.set_screen(Screen::Main);
+            return;
+        }
+        KeyCode::Tab => {
+            form.focus_next();
+            return;
+        }
+        KeyCode::BackTab => {
+            form.focus_previous();
+            return;
+        }
+        _ => {}
+    }
+    match form.focus {
+        TaskField::Content => edit_line(&mut form.content, key),
+        TaskField::Deadline => edit_line(&mut form.deadline, key),
+        TaskField::Description => match key.code {
+            KeyCode::Enter | KeyCode::Char('\n') => form.description.insert('\n'),
+            KeyCode::Up => form.description.move_up(),
+            KeyCode::Down => form.description.move_down(),
+            KeyCode::Left => form.description.move_left(),
+            KeyCode::Right => form.description.move_right(),
+            KeyCode::Home => form.description.move_home(),
+            KeyCode::End => form.description.move_end(),
+            KeyCode::Backspace => form.description.backspace(),
+            KeyCode::Delete => form.description.delete(),
+            KeyCode::Char(character) if plain_char(&key).is_some() => {
+                form.description.insert(character);
+            }
+            _ => {}
+        },
+        TaskField::Priority => match key.code {
+            KeyCode::Left | KeyCode::Up => form.priority = form.priority.previous(),
+            KeyCode::Right | KeyCode::Down => form.priority = form.priority.next(),
+            _ => {}
+        },
+        TaskField::Completed => match key.code {
+            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') => {
+                form.completed = !form.completed;
+            }
+            _ => {}
+        },
+    }
+}
+
+/// 任務搜尋輸入框：`enter` 套用、`esc` 取消，其餘按鍵編輯輸入。
+fn handle_task_search(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Enter | KeyCode::Char('\n') => {
+            let keyword = app
+                .task_search
+                .as_ref()
+                .map(|input| input.value().trim().to_owned());
+            app.task_filter = keyword.filter(|keyword| !keyword.is_empty());
+            app.task_search = None;
+            app.homework_state.select(Some(0));
+            let matches = app.task_filter_matches();
+            match &app.task_filter {
+                Some(keyword) => app.set_message(format!(
+                    "筛选“{keyword}”：当前分组 {matches} 项（esc 清除）"
+                )),
+                None => app.set_message("已清除筛选"),
+            }
+        }
+        KeyCode::Esc => {
+            app.task_search = None;
+            app.set_message("已取消筛选");
+        }
+        _ => {
+            if let Some(input) = app.task_search.as_mut() {
+                edit_line(input, key);
+            }
+        }
+    }
+}
+
 fn handle_main(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
+    // 任務頁的搜尋輸入框開啟時獨占按鍵（enter 套用、esc 取消）。
+    if app.nav == NavItem::Homework && app.task_search.is_some() {
+        handle_task_search(app, key);
+        return;
+    }
+    // `^D` 的二次確認：任何其他按鍵都會取消（與提示訊息保持一致）。
+    if app.task_pending_delete.is_some() && !is_ctrl_char(&key, 'd') {
+        app.task_pending_delete = None;
+    }
+    // 任務頁的組合鍵（新增、編輯、刪除、搜尋、設置）。
+    if app.nav == NavItem::Homework && key.modifiers.contains(KeyModifiers::CONTROL) {
+        match key.code {
+            KeyCode::Char('a') => {
+                controller::open_task_form(app);
+                return;
+            }
+            KeyCode::Char('e') => {
+                controller::edit_selected_task(app);
+                return;
+            }
+            KeyCode::Char('d') => {
+                controller::delete_selected_task(app, jobs);
+                return;
+            }
+            KeyCode::Char('f') => {
+                controller::open_task_search(app);
+                return;
+            }
+            KeyCode::Char('t') => {
+                controller::open_task_menu(app);
+                return;
+            }
+            _ => {}
+        }
+    }
     match key.code {
         KeyCode::Char('q') => app.quit = true,
         KeyCode::Left | KeyCode::Char('h') => {
@@ -458,6 +742,27 @@ fn handle_main(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
         KeyCode::Down | KeyCode::Char('j') => app.select_next(),
         KeyCode::Enter => controller::activate(app, jobs),
         KeyCode::Esc => controller::escape(app),
+        // 任務頁的單鍵操作（多選為普通鍵 `m`：`^M` 與 enter 同碼，不可靠）。
+        KeyCode::Char(' ')
+            if app.nav == NavItem::Homework
+                && !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            if app.task_multi.is_some() {
+                controller::toggle_task_selection(app);
+            } else {
+                controller::toggle_selected_task(app, jobs);
+            }
+        }
+        KeyCode::Char('m')
+            if app.nav == NavItem::Homework
+                && !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            controller::toggle_task_multi(app);
+        }
         KeyCode::Char('r') => {
             // 手動刷新：略過快取重新查詢。
             let nav = app.nav;

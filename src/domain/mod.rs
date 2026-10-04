@@ -6,3 +6,4 @@ pub mod course_list;
 pub mod homework;
 pub mod schedule;
 pub mod semester;
+pub mod todo;

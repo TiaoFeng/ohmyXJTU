@@ -1,5 +1,6 @@
 //! 背景事件套用測試。
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::mpsc::channel;
 use std::time::Duration;
@@ -7,13 +8,14 @@ use std::time::Duration;
 use crate::config::AccessPolicy;
 use crate::domain::homework::{HomeworkGroup, HomeworkInput, HomeworkState, aggregate};
 use crate::domain::semester::{TermCode, TermSource};
+use crate::domain::todo::{Priority, Task};
 use crate::model::{ActivityDetailView, FlowData, ScheduleData};
 use crate::session::{AccessMode, SiteKind};
 use crate::sites::lms::LmsCourse;
 use crate::task::{CoursesData, Event, FailedTarget, HomeworkUpdate, Job};
 use crate::tui::app::{
     AgreementState, App, FormState, HomeworkData, LmsLevel, LoginScreen, NavItem, Page, Screen,
-    SettingsState, TermPickerState,
+    SettingsState, TaskFormState, TermPickerState,
 };
 use crate::tui::controller;
 use crate::tui::text::InputLine;
@@ -368,7 +370,7 @@ fn homework_event_updates_groups_and_counts() {
     assert_eq!(data.group_count(HomeworkGroup::Completed), 0);
     assert_eq!(
         app.message_text(),
-        Some("作业已更新：未完成 1 项（用时 1.2s）")
+        Some("已更新作业：未完成 1 项（用时 1.2s）")
     );
 }
 
@@ -1569,4 +1571,115 @@ fn detail_updates_reset_scroll() {
         })),
     );
     assert_eq!(app.lms.detail_scroll.offset(), 0, "详情更新应回到顶端");
+}
+
+// ── 任務快照（自訂義任務） ───────────────────────────────
+
+/// 測試用任務。
+fn todo_task(id: u64, content: &str, completed: bool) -> Task {
+    Task {
+        id,
+        content: content.to_owned(),
+        description: None,
+        deadline: None,
+        priority: Priority::Low,
+        completed,
+    }
+}
+
+#[test]
+fn tasks_event_replaces_the_list_and_anchors_the_selection() {
+    let mut app = app();
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Homework;
+    app.tasks = vec![todo_task(1, "甲", false), todo_task(2, "乙", false)];
+    app.homework_state.select(Some(1));
+
+    // 背景端依排序鍵重新排列後回報：選取應跟著識別碼，而不是位置。
+    apply_event(
+        &mut app,
+        Event::Tasks(vec![todo_task(2, "乙", false), todo_task(1, "甲", false)]),
+    );
+    let unfinished = app.task_group_items(HomeworkGroup::Unfinished);
+    assert_eq!(unfinished.len(), 2);
+    assert_eq!(
+        unfinished[app.page_selection()].id,
+        2,
+        "选取应锚定在同一任务"
+    );
+
+    // 目前任務移到已完成分組（不在目前分組就找不到）：索引夾在新長度內。
+    apply_event(
+        &mut app,
+        Event::Tasks(vec![todo_task(1, "甲", false), todo_task(2, "乙", true)]),
+    );
+    assert_eq!(app.page_selection(), 0, "找不到原本的任务时应夹取索引");
+    assert_eq!(app.task_group_items(HomeworkGroup::Unfinished)[0].id, 1);
+    assert_eq!(
+        app.page_group_count(HomeworkGroup::Completed),
+        1,
+        "分组计数应包含自訂義任务"
+    );
+}
+
+#[test]
+fn tasks_failure_keeps_the_form_and_shows_the_error_in_place() {
+    let mut app = app();
+    app.set_screen(Screen::TaskForm(Box::new(TaskFormState::add())));
+    if let Screen::TaskForm(form) = &mut app.screen {
+        form.busy = true;
+    }
+
+    apply_event(
+        &mut app,
+        Event::Failed {
+            what: "任务".to_owned(),
+            message: "无法写入任务文件".to_owned(),
+            target: FailedTarget::Tasks,
+            site: None,
+            resource: None,
+        },
+    );
+
+    let Screen::TaskForm(form) = &app.screen else {
+        panic!("保存失败应留在任务表单，而不是关闭它");
+    };
+    assert!(!form.busy, "失败应解除保存中");
+    assert_eq!(form.error.as_deref(), Some("任务失败：无法写入任务文件"));
+    assert_eq!(app.message_text(), Some("任务失败：无法写入任务文件"));
+}
+
+#[test]
+fn tasks_event_keeps_the_task_form_open() {
+    let mut app = app();
+    app.set_screen(Screen::TaskForm(Box::new(TaskFormState::add())));
+    apply_event(&mut app, Event::Tasks(vec![todo_task(1, "甲", false)]));
+    assert!(
+        matches!(app.screen, Screen::TaskForm(_)),
+        "任务表单属于主画面，不得被背景快照关闭"
+    );
+}
+
+#[test]
+fn account_change_keeps_local_tasks_but_clears_task_page_state() {
+    let mut app = app();
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Homework;
+    app.tasks = vec![todo_task(1, "甲", false)];
+    app.task_filter = Some("甲".to_owned());
+    app.task_multi = Some(HashSet::from([1]));
+    app.task_pending_delete = Some((1, "甲".to_owned()));
+
+    apply_event(
+        &mut app,
+        Event::SessionsCleared {
+            account_changed: true,
+        },
+    );
+
+    assert_eq!(app.tasks.len(), 1, "本地任务与账号无关，换账号应保留");
+    assert!(app.task_filter.is_none(), "筛选属于暂时状态，应清除");
+    assert!(app.task_multi.is_none(), "多选属于暂时状态，应清除");
+    assert!(app.task_pending_delete.is_none(), "待确认删除应清除");
+    assert!(matches!(app.screen, Screen::Main));
 }

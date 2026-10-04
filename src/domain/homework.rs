@@ -17,7 +17,7 @@ use crate::sites::lms::ActivityContent;
 use crate::tone::Tone;
 
 /// 校園時區（中國標準時間，UTC+8）相對 UTC 的偏移秒數。
-const CAMPUS_UTC_OFFSET_SECS: i32 = 8 * 3600;
+pub(crate) const CAMPUS_UTC_OFFSET_SECS: i32 = 8 * 3600;
 
 /// 作業狀態。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,6 +165,16 @@ impl HomeworkItem {
     /// 是否已逾期。
     pub fn is_overdue(&self) -> bool {
         self.state == HomeworkState::Overdue
+    }
+
+    /// 關鍵字是否符合（作業標題或課程名稱，不分大小寫）。
+    pub fn matches(&self, keyword: &str) -> bool {
+        let keyword = keyword.trim().to_lowercase();
+        if keyword.is_empty() {
+            return true;
+        }
+        self.title.to_lowercase().contains(&keyword)
+            || self.course_name.to_lowercase().contains(&keyword)
     }
 }
 

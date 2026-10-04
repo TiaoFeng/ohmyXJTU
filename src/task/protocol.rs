@@ -15,6 +15,7 @@ use crate::config::AccessPolicy;
 use crate::credentials::{Credentials, Secret};
 use crate::domain::homework::HomeworkItem;
 use crate::domain::semester::{TermCode, TermSource};
+use crate::domain::todo::Task;
 use crate::model::{ActivityDetailView, FlowData, ScheduleData};
 use crate::session::{AccessMode, SiteKind};
 use crate::sites::lms::{ActivityKind, LmsActivity, LmsCourse};
@@ -109,6 +110,44 @@ pub enum Job {
         /// 學期代碼（`YYYY-YYYY+1-T`）。
         term: String,
     },
+    /// 新增自訂義任務。
+    AddTask {
+        /// 任務內容（識別碼由存儲指派）。
+        task: Task,
+    },
+    /// 以新內容覆蓋指定任務。
+    UpdateTask {
+        /// 任務識別碼。
+        id: u64,
+        /// 新內容。
+        task: Task,
+    },
+    /// 設定單一任務的完成狀態（`space`）。
+    SetTaskDone {
+        /// 任務識別碼。
+        id: u64,
+        /// 是否完成。
+        done: bool,
+    },
+    /// 批次設定多個任務的完成狀態（多選菜單）。
+    SetTasksDone {
+        /// 任務識別碼。
+        ids: Vec<u64>,
+        /// 是否完成。
+        done: bool,
+    },
+    /// 刪除單一任務（`^D` 連按兩次）。
+    DeleteTask {
+        /// 任務識別碼。
+        id: u64,
+    },
+    /// 批次刪除多個任務（多選菜單）。
+    DeleteTasks {
+        /// 任務識別碼。
+        ids: Vec<u64>,
+    },
+    /// 刪除所有已完成任務（`^T` 設置）。
+    DeleteCompletedTasks,
     /// 修改帳號。
     ChangeAccount {
         /// 原加密口令。
@@ -155,6 +194,12 @@ impl Job {
             | Self::LoadActivityDetail { .. } => "思源学堂".to_owned(),
             Self::OpenActivity { .. } => "打开活动".to_owned(),
             Self::SetHomeworkTerm { .. } => "学期选择".to_owned(),
+            Self::AddTask { .. } => "添加任务".to_owned(),
+            Self::UpdateTask { .. } => "修改任务".to_owned(),
+            Self::SetTaskDone { .. } | Self::SetTasksDone { .. } => "标记任务".to_owned(),
+            Self::DeleteTask { .. } | Self::DeleteTasks { .. } | Self::DeleteCompletedTasks => {
+                "删除任务".to_owned()
+            }
             Self::ChangeAccount { .. } => "修改账号".to_owned(),
             Self::ChangePassphrase { .. } => "修改口令".to_owned(),
             Self::SetAccessPolicy(_) => "访问模式".to_owned(),
@@ -284,6 +329,8 @@ pub enum Event {
     },
     /// 課表資料。
     Schedule(Box<ScheduleData>),
+    /// 自訂義任務的完整快照（解鎖後與每次異動後回報）。
+    Tasks(Vec<Task>),
     /// 作業載入更新（部分結果或最終結果）。
     Homework(HomeworkUpdate),
     /// 無法自動判定本學期，需要使用者選擇（附課程中出現的學期選項）。
@@ -382,6 +429,8 @@ pub enum FailedTarget {
     Login,
     /// 憑證操作（建立保險庫、解鎖、修改帳號或口令）。
     Credentials,
+    /// 自訂義任務（新增、修改、標記完成、刪除、換口令時重新加密）。
+    Tasks,
     /// 帳戶設定（訪問模式等）。
     Settings,
     /// 用户协议閱讀門（顯示與同意）。
@@ -481,6 +530,13 @@ pub(super) fn failed_target_of(job: &Job) -> FailedTarget {
         | Job::Unlock { .. }
         | Job::ChangeAccount { .. }
         | Job::ChangePassphrase { .. } => FailedTarget::Credentials,
+        Job::AddTask { .. }
+        | Job::UpdateTask { .. }
+        | Job::SetTaskDone { .. }
+        | Job::SetTasksDone { .. }
+        | Job::DeleteTask { .. }
+        | Job::DeleteTasks { .. }
+        | Job::DeleteCompletedTasks => FailedTarget::Tasks,
         _ => FailedTarget::Settings,
     }
 }

@@ -4,6 +4,8 @@ use chrono::NaiveDate;
 
 use super::*;
 use crate::domain::attendance_match::LessonAttendance;
+use crate::domain::homework::{HomeworkInput, aggregate};
+use crate::domain::todo::{PageRow, Priority, TASKS_HEADER, Task};
 use crate::model::{FlowData, LessonEntry, ScheduleData};
 use crate::sites::attendance::{AttendanceStatus, FlowRecord};
 use crate::sites::lms::LmsCourse;
@@ -360,4 +362,86 @@ fn clear_secrets_follows_field_roles() {
             }
         }
     }
+}
+
+// ── 任務頁列模型 ─────────────────────────────────────────
+
+/// 測試用任務。
+fn todo(id: u64, content: &str, completed: bool) -> Task {
+    Task {
+        id,
+        content: content.to_owned(),
+        description: None,
+        deadline: None,
+        priority: Priority::Low,
+        completed,
+    }
+}
+
+#[test]
+fn task_page_combines_tasks_and_homework_in_one_list() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00+08:00").expect("固定时间");
+    let input = HomeworkInput {
+        course_id: "1".to_owned(),
+        course_name: "编译原理".to_owned(),
+        activity_id: "a-1".to_owned(),
+        title: "第一次作业".to_owned(),
+        end_time: Some("2026-10-01 23:59:59".to_owned()),
+        description: None,
+        submit_by_group: Some(false),
+        submission_count: Some(0),
+        note: None,
+    };
+
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Homework;
+    app.tasks = vec![todo(1, "写实验报告", false), todo(2, "复习", true)];
+    app.homework = Page::Ready(HomeworkData {
+        items: aggregate(&[input], now),
+        ..HomeworkData::default()
+    });
+
+    assert_eq!(app.page_len(), 2, "未完成分组应含一任务与一作业");
+    assert_eq!(app.page_group_count(HomeworkGroup::Unfinished), 2);
+    assert_eq!(
+        app.page_group_count(HomeworkGroup::Completed),
+        1,
+        "分组计数应包含自訂義任务"
+    );
+
+    let rows = app.task_page_rows();
+    assert!(
+        matches!(rows.first(), Some(PageRow::Header(text)) if *text == TASKS_HEADER),
+        "任务段应排在最前面"
+    );
+    assert!(
+        matches!(rows.get(1), Some(PageRow::Task(_))),
+        "任务列应紧接在任务标题之后"
+    );
+    assert!(
+        rows.iter().any(|row| matches!(row, PageRow::Spacer)),
+        "两段之间应有一列空白"
+    );
+    assert!(
+        rows.iter().any(|row| matches!(row, PageRow::Homework(_))),
+        "作业段应接在任务段之后"
+    );
+
+    // 任務在前、作業在後：第一列是任務，第二列是作業，且首尾循環。
+    assert_eq!(app.page_selection(), 0);
+    app.select_next();
+    assert_eq!(app.page_selection(), 1, "下一列应是作业");
+    app.select_next();
+    assert_eq!(app.page_selection(), 0, "非空清单应首尾循环");
+
+    // 篩選同時作用於任務與作業，但不影響分組計數。
+    app.task_filter = Some("第一次作业".to_owned());
+    assert_eq!(app.page_len(), 1, "筛选后只剩匹配的作业");
+    assert_eq!(app.task_filter_matches(), 1);
+    assert_eq!(
+        app.page_group_count(HomeworkGroup::Unfinished),
+        2,
+        "分组计数不受筛选影响"
+    );
 }

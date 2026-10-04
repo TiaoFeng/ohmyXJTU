@@ -14,6 +14,7 @@ use crate::config::AccessPolicy;
 use crate::domain::attendance_match::LessonAttendance;
 use crate::domain::homework::HomeworkState;
 use crate::domain::semester::{TermCode, TermSource};
+use crate::domain::todo::{Priority, Task};
 use crate::error::NetworkKind;
 use crate::http::fake::{FakeClient, html, json};
 use crate::http::{Body, HttpClient, HttpRequest, HttpResponse, Method};
@@ -163,6 +164,8 @@ impl Harness {
         let (job_tx, jobs) = channel();
         let (events, event_rx) = channel();
 
+        let tasks = TaskStore::at(dir.path().join("tasks.vault"));
+
         Self {
             worker: Worker {
                 jobs,
@@ -191,6 +194,7 @@ impl Harness {
                 timing: LoadTiming::default(),
                 login_started: None,
                 shutdown: false,
+                tasks,
             },
             events: event_rx,
             vault,
@@ -209,6 +213,11 @@ impl Harness {
     /// 測試用設定檔路徑。
     fn config_path(&self) -> std::path::PathBuf {
         self._dir.path().join("config.json")
+    }
+
+    /// 測試用任務檔路徑。
+    fn tasks_path(&self) -> std::path::PathBuf {
+        self._dir.path().join("tasks.vault")
     }
 
     /// 直接標記考勤與思源學堂都已登入（跳過登入流程）。
@@ -5631,4 +5640,237 @@ fn relogin_budget_is_kept_per_task() {
     assert!(budget.try_consume(&open), "重置后应重新取得额度");
     budget.clear();
     assert!(budget.try_consume(&homework), "清空后所有任务重新取得额度");
+}
+
+// ── 自訂義任務 ────────────────────────────────────────
+
+/// 測試用自訂義任務。
+fn todo_task(content: &str) -> Task {
+    Task {
+        id: 0,
+        content: content.to_owned(),
+        description: None,
+        deadline: None,
+        priority: Priority::Low,
+        completed: false,
+    }
+}
+
+/// 事件中最後一次回報的任務快照。
+fn last_tasks(events: &[Event]) -> Option<Vec<Task>> {
+    events.iter().rev().find_map(|event| match event {
+        Event::Tasks(tasks) => Some(tasks.clone()),
+        _ => None,
+    })
+}
+
+#[test]
+fn unlocking_loads_the_encrypted_task_file() {
+    let mut harness = harness(fake_flow(0));
+    // 先以同一口令準備一份任務檔（模擬上一次使用留下的內容）。
+    {
+        let mut store = TaskStore::at(harness.tasks_path());
+        store.init("secret123").unwrap();
+        store.add(todo_task("写实验报告")).unwrap();
+        store.add(todo_task("复习")).unwrap();
+    }
+
+    harness
+        .dispatch(Job::Unlock {
+            passphrase: "secret123".into(),
+        })
+        .expect("解锁");
+
+    let events = harness.drain_events();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::VaultReady)),
+        "解锁应回报凭证已就绪"
+    );
+    let tasks = last_tasks(&events).expect("解锁后应回报任务快照");
+    assert_eq!(tasks.len(), 2, "任务文件应在解锁时载入");
+}
+
+#[test]
+fn task_operations_report_snapshots_and_notices() {
+    let mut harness = harness(fake_flow(0));
+    harness
+        .dispatch(Job::Unlock {
+            passphrase: "secret123".into(),
+        })
+        .unwrap();
+    harness.drain_events();
+
+    harness
+        .dispatch(Job::AddTask {
+            task: todo_task("甲"),
+        })
+        .unwrap();
+    let events = harness.drain_events();
+    let tasks = last_tasks(&events).expect("新增后应回报快照");
+    assert_eq!(tasks.len(), 1);
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::Notice(message) if message == "已添加任务")),
+        "新增应附带提示"
+    );
+
+    let id = tasks[0].id;
+    harness
+        .dispatch(Job::SetTaskDone { id, done: true })
+        .unwrap();
+    let tasks = last_tasks(&harness.drain_events()).unwrap();
+    assert!(tasks[0].completed, "标记完成后快照应反映状态");
+
+    let mut edited = tasks[0].clone();
+    edited.content = "甲（改）".to_owned();
+    edited.priority = Priority::High;
+    harness
+        .dispatch(Job::UpdateTask { id, task: edited })
+        .unwrap();
+    let tasks = last_tasks(&harness.drain_events()).unwrap();
+    assert_eq!(tasks[0].content, "甲（改）");
+    assert_eq!(tasks[0].priority, Priority::High);
+
+    harness
+        .dispatch(Job::SetTasksDone {
+            ids: vec![id],
+            done: false,
+        })
+        .unwrap();
+    assert!(!last_tasks(&harness.drain_events()).unwrap()[0].completed);
+
+    harness
+        .dispatch(Job::DeleteTasks { ids: vec![id] })
+        .unwrap();
+    let events = harness.drain_events();
+    assert!(last_tasks(&events).unwrap().is_empty());
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::Notice(message) if message == "已删除 1 个任务")),
+        "批次删除应附带数量"
+    );
+
+    // 找不到任務時回報失敗，且不改動內容。
+    let result = harness.dispatch(Job::DeleteTask { id });
+    assert!(
+        matches!(result, Err(AppError::TaskNotFound)),
+        "实际：{result:?}"
+    );
+    assert!(
+        harness.saw(|event| matches!(
+            event,
+            Event::Failed {
+                target: FailedTarget::Tasks,
+                ..
+            }
+        )),
+        "任务失败应落在任务落点上"
+    );
+}
+
+#[test]
+fn deleting_completed_tasks_reports_the_count() {
+    let mut harness = harness(fake_flow(0));
+    harness
+        .dispatch(Job::Unlock {
+            passphrase: "secret123".into(),
+        })
+        .unwrap();
+    harness
+        .dispatch(Job::AddTask {
+            task: todo_task("甲"),
+        })
+        .unwrap();
+    harness
+        .dispatch(Job::AddTask {
+            task: todo_task("乙"),
+        })
+        .unwrap();
+    let ids: Vec<u64> = last_tasks(&harness.drain_events())
+        .unwrap()
+        .iter()
+        .map(|task| task.id)
+        .collect();
+    harness
+        .dispatch(Job::SetTasksDone { ids, done: true })
+        .unwrap();
+    harness.drain_events();
+
+    harness.dispatch(Job::DeleteCompletedTasks).unwrap();
+    let events = harness.drain_events();
+    assert!(last_tasks(&events).unwrap().is_empty());
+    assert!(
+        events.iter().any(
+            |event| matches!(event, Event::Notice(message) if message == "已删除 2 个已完成任务")
+        ),
+        "应回报删除数量"
+    );
+
+    // 沒有已完成任務時只提示，不報錯。
+    harness.dispatch(Job::DeleteCompletedTasks).unwrap();
+    assert!(
+        harness
+            .saw(|event| matches!(event, Event::Notice(message) if message == "没有已完成的任务"))
+    );
+}
+
+#[test]
+fn changing_the_passphrase_reencrypts_the_task_file() {
+    let mut harness = harness(fake_flow(0));
+    harness
+        .dispatch(Job::Unlock {
+            passphrase: "secret123".into(),
+        })
+        .unwrap();
+    harness
+        .dispatch(Job::AddTask {
+            task: todo_task("换口令前的任务"),
+        })
+        .unwrap();
+    harness
+        .dispatch(Job::ChangePassphrase {
+            old: "secret123".into(),
+            new: "new-passphrase-1".into(),
+        })
+        .expect("修改口令");
+
+    let mut reloaded = TaskStore::at(harness.tasks_path());
+    reloaded.init("new-passphrase-1").unwrap();
+    assert_eq!(
+        reloaded.tasks().len(),
+        1,
+        "换口令后任务文件应以新口令重新加密"
+    );
+}
+
+#[test]
+fn task_save_failure_reports_the_tasks_target() {
+    let mut harness = harness(fake_flow(0));
+    harness
+        .dispatch(Job::Unlock {
+            passphrase: "secret123".into(),
+        })
+        .unwrap();
+    harness.drain_events();
+    // 以同名目錄佔位，讓寫入必定失敗（寫入失敗時記憶體狀態必須回滾）。
+    std::fs::create_dir(harness.tasks_path()).unwrap();
+
+    let result = harness.dispatch(Job::AddTask {
+        task: todo_task("写不进去"),
+    });
+    assert!(result.is_err(), "任务文件不可写时应当失败");
+    assert!(
+        harness.saw(|event| matches!(
+            event,
+            Event::Failed {
+                target: FailedTarget::Tasks,
+                ..
+            }
+        )),
+        "保存失败应回报任务落点"
+    );
 }

@@ -12,6 +12,7 @@
 //! - `login`：互動式登入（驗證碼、簡訊、重試與失敗計數）。
 //! - `data`：課表、考勤流水與思源學堂瀏覽。
 //! - `homework`：作業載入的步進狀態機。
+//! - `tasks`：自訂義任務的加密存儲與操作。
 //! - `cache`：思源學堂課程／活動快取。
 //!
 //! 調度原則：
@@ -47,9 +48,11 @@ mod credentials;
 mod data;
 mod homework;
 mod login;
+mod tasks;
 mod timing;
 
 use cache::{LmsCache, ScheduleCache};
+use tasks::TaskStore;
 use timing::LoadTiming;
 
 /// 單一任務（及其自動重試鏈）允許的自動重新登入次數上限。
@@ -184,6 +187,8 @@ struct Worker {
     relogin: ReloginBudgets,
     /// 思源學堂課程／活動快取。
     cache: LmsCache,
+    /// 自訂義任務（加密存儲；解鎖後才會載入）。
+    tasks: TaskStore,
     /// 課表快取（整學期課程；切換週次時重用）。
     schedule_cache: Option<ScheduleCache>,
     /// 使用者選擇的週次；`None` 代表跟隨當前週。
@@ -236,6 +241,7 @@ pub fn spawn(config: Config, vault: Vault) -> AppResult<(Sender<Job>, Receiver<E
         timing: LoadTiming::default(),
         login_started: None,
         shutdown: false,
+        tasks: TaskStore::at_default_path()?,
     };
 
     thread::Builder::new()
@@ -444,6 +450,13 @@ impl Worker {
             Job::SetAccessPolicy(policy) => self.set_access_policy(policy),
             Job::SetHomeworkTerm { term } => self.set_homework_term(&term),
             Job::SetScheduleWeek { week } => self.set_schedule_week(week),
+            Job::AddTask { task } => self.add_task(task),
+            Job::UpdateTask { id, task } => self.update_task(id, task),
+            Job::SetTaskDone { id, done } => self.set_task_done(id, done),
+            Job::SetTasksDone { ids, done } => self.set_tasks_done(&ids, done),
+            Job::DeleteTask { id } => self.delete_task(id),
+            Job::DeleteTasks { ids } => self.delete_tasks(&ids),
+            Job::DeleteCompletedTasks => self.delete_completed_tasks(),
             Job::AcceptAgreement => self.accept_agreement(),
             Job::CancelLogin => self.cancel_login(),
             Job::Shutdown => Ok(()),

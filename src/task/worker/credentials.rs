@@ -25,6 +25,8 @@ impl Worker {
         self.start_session(credentials)?;
         // 不預先登入任何站點：頁面載入需要時才按站點惰性登入。
         self.emit(Event::VaultReady);
+        // 首次建立保險庫即以此口令準備好任務信封（任務檔首次保存時才落盤）。
+        self.init_tasks(passphrase);
         Ok(())
     }
 
@@ -35,6 +37,8 @@ impl Worker {
         // 不預先登入任何站點：頁面載入需要時才按站點惰性登入。
         self.emit(Event::VaultReady);
         self.report_vault_permissions();
+        // 任務檔與保險庫共用同一組口令；解鎖後才有金鑰可以讀寫。
+        self.init_tasks(passphrase);
         Ok(())
     }
 
@@ -97,9 +101,25 @@ impl Worker {
         }
     }
 
-    /// 修改加密口令。
+    /// 修改加密口令：憑證保險庫與任務檔必須使用同一組口令。
+    ///
+    /// 兩者是獨立的檔案，無法一起原子寫入；順序固定為「先驗舊口令 → 先寫
+    /// 任務檔 → 再寫保險庫」，保險庫寫入失敗時把任務檔換回舊口令，避免留下
+    /// 「保險庫是新口令、任務檔是舊口令」的不一致狀態。
     pub(super) fn change_passphrase(&mut self, old: &str, new: &str) -> AppResult<()> {
-        self.vault.change_passphrase(old, new)?;
+        // 先以舊口令解密，驗證口令正確（失敗會回報 [`AppError::WrongPassphrase`]）。
+        let credentials = self.vault.load(old)?;
+        self.tasks.rekey(new)?;
+        if let Err(err) = self.vault.store(new, &credentials) {
+            // 保險庫仍是舊口令：把任務檔換回舊口令。回復失敗時明確回報，
+            // 讓使用者知道任務檔可能需要以舊口令重新解鎖。
+            if let Err(rollback) = self.tasks.rekey(old) {
+                self.emit(Event::Notice(format!(
+                    "口令修改失败，且任务文件未能还原（{rollback}）；请以原口令重新解锁"
+                )));
+            }
+            return Err(err);
+        }
         // 待存憑證是以舊口令加密的計畫：口令已改變，該計畫立即失效（並還原舊憑證），
         // 否則稍後登入成功會用舊口令覆寫保險庫，把新口令蓋回去。
         self.discard_pending_vault();
@@ -193,6 +213,8 @@ impl Worker {
         let reset = self.session.as_mut().map(|session| session.reset_session());
         if let Some(Err(err)) = reset {
             self.session = None;
+            // 會話停用後介面會回到解鎖畫面：任務金鑰一併丟棄，重新解鎖時重建。
+            self.tasks.lock();
             self.emit(Event::SessionDisabled(format!(
                 "无法建立新的会话，已停用当前会话：{err}"
             )));

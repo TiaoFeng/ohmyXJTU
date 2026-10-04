@@ -112,9 +112,38 @@ fn computes_week_numbers_and_windows() {
         1
     );
 
-    let (monday, sunday) = week_window(NaiveDate::from_ymd_opt(2026, 9, 10).unwrap());
+    // 第 1 週（學期開始日為週一）與第 3 週的範圍。
+    let (monday, sunday) = week_bounds(start, 1).expect("第 1 週");
     assert_eq!(monday, NaiveDate::from_ymd_opt(2026, 9, 7).unwrap());
     assert_eq!(sunday, NaiveDate::from_ymd_opt(2026, 9, 13).unwrap());
+    let (monday, sunday) = week_bounds(start, 3).expect("第 3 週");
+    assert_eq!(monday, NaiveDate::from_ymd_opt(2026, 9, 21).unwrap());
+    assert_eq!(sunday, NaiveDate::from_ymd_opt(2026, 9, 27).unwrap());
+}
+
+/// 學期開始日不是週一時，範圍仍以「開始日 + (週次-1)×7」錨定，
+/// 與課程日期（[`CourseSlot::date_in_week`]）落在同一組日期。
+#[test]
+fn anchors_week_bounds_to_semester_start() {
+    // 2026-09-09 是週三。
+    let start = NaiveDate::from_ymd_opt(2026, 9, 9).unwrap();
+    let (monday, sunday) = week_bounds(start, 1).expect("第 1 週");
+    assert_eq!(monday, start);
+    assert_eq!(sunday, NaiveDate::from_ymd_opt(2026, 9, 15).unwrap());
+    // 早於第 1 週的輸入視為第 1 週。
+    assert_eq!(week_bounds(start, 0).expect("第 1 週"), (monday, sunday));
+}
+
+#[test]
+fn bounds_weeks_by_the_last_course_week() {
+    // 課表最晚有課的週次就是上限（與參考實作的考勤來源一致）。
+    assert_eq!(total_weeks(Some(19), 12), 19);
+    // 今天已進入考試週（第 20 週）而課表只排到第 16 週時，上限至少涵蓋今天，
+    // 避免出現「第 N/M 周」而 N > M。
+    assert_eq!(total_weeks(Some(16), 20), 20);
+    // 沒有課表資料時以今天的週次為上限，不謊報教學週數。
+    assert_eq!(total_weeks(None, 7), 7);
+    assert_eq!(total_weeks(None, 0), 1);
 }
 
 #[test]

@@ -213,6 +213,9 @@ fn apply_session_disabled(app: &mut App, message: String) {
 }
 
 fn apply_schedule(app: &mut App, data: ScheduleData) {
+    // 週次與總週數先取出：切週載入期間資料已清空，標題仍能顯示目標週。
+    app.schedule_week = Some(data.week);
+    app.schedule_total = Some(data.total_weeks);
     app.schedule = Page::Ready(data);
     app.updated_at.schedule = Some(now_clock());
     app.schedule_state.select(Some(0));

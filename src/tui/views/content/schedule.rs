@@ -24,17 +24,7 @@ use super::{
 
 /// 依目前資料繪製課表頁。
 pub(super) fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
-    let title = app.schedule.ready().map_or_else(
-        || "课表".to_owned(),
-        |data| {
-            format!(
-                "课表 · {} · 第 {} 周{}",
-                data.semester,
-                data.week,
-                title_suffix(app.updated_at.schedule.as_ref(), app.schedule.is_loading())
-            )
-        },
-    );
+    let title = schedule_title(app);
 
     // 學期外提示與無法解析課程的警示都不屬於清單本身：各留一列提示，避免
     // 使用者誤解頁面內容（與作業頁的警示列同型）。
@@ -75,7 +65,7 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
     }
 
     if !has_lessons {
-        empty_note(frame, body_area, &title, "本周没有课程安排");
+        empty_note(frame, body_area, &title, "该周没有课程安排");
         return;
     }
 
@@ -103,6 +93,26 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
     render_list(frame, list_area, &title, items, &mut app.schedule_state);
     if let (Some(area), Some(lines)) = (detail_area, detail) {
         detail_panel(frame, area, "课程详情", lines);
+    }
+}
+
+/// 標題：學期（已知時）、週次（`第 N/M 周`）與更新狀態。
+///
+/// 切週載入期間資料已清空，但週次與總週數仍在 `App` 上，標題因此能立即反映
+/// 使用者選擇的週次（與考勤流水「第 N/M 页」同型）。
+fn schedule_title(app: &App) -> String {
+    let suffix = title_suffix(app.updated_at.schedule.as_ref(), app.schedule.is_loading());
+    match app.schedule.ready() {
+        Some(data) => format!(
+            "课表 · {} · 第 {}/{} 周{suffix}",
+            data.semester,
+            app.schedule_week.unwrap_or(data.week),
+            app.schedule_total.unwrap_or(data.total_weeks),
+        ),
+        None => match (app.schedule_week, app.schedule_total) {
+            (Some(week), Some(total)) => format!("课表 · 第 {week}/{total} 周{suffix}"),
+            _ => "课表".to_owned(),
+        },
     }
 }
 

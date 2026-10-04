@@ -49,7 +49,7 @@ mod homework;
 mod login;
 mod timing;
 
-use cache::LmsCache;
+use cache::{LmsCache, ScheduleCache};
 use timing::LoadTiming;
 
 /// 單一任務（及其自動重試鏈）允許的自動重新登入次數上限。
@@ -184,6 +184,10 @@ struct Worker {
     relogin: ReloginBudgets,
     /// 思源學堂課程／活動快取。
     cache: LmsCache,
+    /// 課表快取（整學期課程；切換週次時重用）。
+    schedule_cache: Option<ScheduleCache>,
+    /// 使用者選擇的週次；`None` 代表跟隨當前週。
+    schedule_week: Option<u32>,
     /// 本會話曾查得的考勤學期（供課程分區使用，不重複請求）。
     known_term: Option<TermCode>,
     /// 使用者在本工作階段按 `s` 明確選擇的學期。
@@ -225,6 +229,8 @@ pub fn spawn(config: Config, vault: Vault) -> AppResult<(Sender<Job>, Receiver<E
         homework_epoch: 0,
         relogin: ReloginBudgets::default(),
         cache: LmsCache::default(),
+        schedule_cache: None,
+        schedule_week: None,
         known_term: None,
         chosen_term: None,
         timing: LoadTiming::default(),
@@ -437,11 +443,12 @@ impl Worker {
             Job::ChangePassphrase { old, new } => self.change_passphrase(&old, &new),
             Job::SetAccessPolicy(policy) => self.set_access_policy(policy),
             Job::SetHomeworkTerm { term } => self.set_homework_term(&term),
+            Job::SetScheduleWeek { week } => self.set_schedule_week(week),
             Job::AcceptAgreement => self.accept_agreement(),
             Job::CancelLogin => self.cancel_login(),
             Job::Shutdown => Ok(()),
             // 資料任務由 [`Self::run_data_job`] 負責。
-            Job::LoadSchedule
+            Job::LoadSchedule { .. }
             | Job::LoadHomework { .. }
             | Job::LoadFlow { .. }
             | Job::LoadCourses { .. }
@@ -523,7 +530,7 @@ impl Worker {
     /// 執行一次單步請求，回傳要回報的事件。
     fn load_once(&mut self, job: &Job) -> AppResult<Option<Event>> {
         let event = match job {
-            Job::LoadSchedule => Event::Schedule(Box::new(self.load_schedule()?)),
+            Job::LoadSchedule { force } => Event::Schedule(Box::new(self.load_schedule(*force)?)),
             Job::LoadFlow { page } => Event::Flow(Box::new(self.load_flow(*page)?)),
             Job::LoadCourses { force } => Event::Courses(self.load_courses(*force)?),
             Job::LoadActivities { course_id, force } => Event::Activities {

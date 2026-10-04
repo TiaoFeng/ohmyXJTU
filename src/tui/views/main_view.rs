@@ -191,14 +191,17 @@ fn page_hints(app: &App) -> Vec<String> {
                 hints.push("esc 返回活动".to_owned());
             }
         },
-        NavItem::Schedule => hints.push(
-            if app.schedule_detail {
-                "enter 收起详情"
-            } else {
-                "enter 查看详情"
-            }
-            .to_owned(),
-        ),
+        NavItem::Schedule => {
+            hints.push(
+                if app.schedule_detail {
+                    "enter 收起详情"
+                } else {
+                    "enter 查看详情"
+                }
+                .to_owned(),
+            );
+            hints.push("[ ] 切换周次".to_owned());
+        }
     }
     hints
 }

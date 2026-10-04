@@ -37,6 +37,43 @@ fn vault_ready_moves_to_main_and_starts_loading() {
     assert!(app.schedule.is_loading(), "应触发当前页面的首次加载");
 }
 
+/// 課表事件同步週次與總週數；換帳號清除（回到當前週），切換訪問模式保留。
+#[test]
+fn schedule_event_tracks_the_week_and_account_change_clears_it() {
+    let mut app = app();
+    apply_event(
+        &mut app,
+        Event::Schedule(Box::new(ScheduleData {
+            semester: "2026-2027-1".to_owned(),
+            week: 5,
+            total_weeks: 23,
+            lessons: Vec::new(),
+            skipped: 0,
+            notice: None,
+        })),
+    );
+    assert_eq!(app.schedule_week, Some(5), "标题与边界应跟随课表事件");
+    assert_eq!(app.schedule_total, Some(23));
+
+    apply_event(
+        &mut app,
+        Event::SessionsCleared {
+            account_changed: false,
+        },
+    );
+    assert_eq!(app.schedule_week, Some(5), "切换访问模式应保留周次");
+
+    apply_event(
+        &mut app,
+        Event::SessionsCleared {
+            account_changed: true,
+        },
+    );
+    assert_eq!(app.schedule_week, None, "换账号后回到当前周");
+    assert_eq!(app.schedule_total, None);
+    assert!(app.schedule.is_idle());
+}
+
 #[test]
 fn captcha_event_resets_input_but_keeps_error() {
     let mut app = app();
@@ -136,12 +173,15 @@ fn data_events_fill_pages() {
         Event::Schedule(Box::new(ScheduleData {
             semester: "2026-2027-1".to_owned(),
             week: 3,
+            total_weeks: 23,
             lessons: Vec::new(),
             skipped: 0,
             notice: None,
         })),
     );
     assert!(app.schedule.ready().is_some());
+    assert_eq!(app.schedule_week, Some(3), "应同步课表周次");
+    assert_eq!(app.schedule_total, Some(23), "应同步总周数");
     assert!(matches!(app.screen, Screen::Main), "收到数据后应回到主画面");
 
     apply_event(

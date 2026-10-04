@@ -103,11 +103,11 @@ impl Worker {
             .schedule_cache
             .clone()
             .ok_or_else(|| AppError::config("课表缓存尚未建立"))?;
-        let week = self
-            .schedule_week
-            .unwrap_or_else(|| schedule::week_number(cache.start, today));
-        // 週次上限＝課表最晚有課的週次（至少涵蓋目前顯示的週次）。
-        let total = schedule::total_weeks(cache.max_week, week);
+        // 上限的「至少涵蓋」對象是**今天**的週次，不是使用者選定的週次：否則
+        // 往回翻週會讓上限一起變小，考試週往回翻就再也回不到本週。
+        let today_week = schedule::week_number(cache.start, today);
+        let week = self.schedule_week.unwrap_or(today_week);
+        let total = schedule::total_weeks(cache.max_week, today_week);
         let Some((monday, sunday)) = schedule::week_bounds(cache.start, week) else {
             return Err(AppError::protocol("周次超出可表示的日期范围"));
         };
@@ -161,8 +161,13 @@ impl Worker {
     /// 記住使用者選擇的週次並重新載入課表（`[`／`]`）。
     ///
     /// 週次保存在工作者狀態（如同作業的學期選擇）：任務本身只是觸發，因此
-    /// 佇列中至多保留一筆載入，連續切週只會執行最後一週；進行中的舊週結果
-    /// 由 [`Worker::load_once`] 丟棄。
+    /// 佇列中至多保留一筆載入，連續切週只會執行最後一週（新值在該筆執行時
+    /// 才被讀取）。
+    ///
+    /// 進行中的載入**不會**被作廢：單步任務只在執行前排空控制任務，因此切週
+    /// 指令要等該筆載入回報後才生效。使用者在載入途中又按了 `[`／`]` 時，介面
+    /// 會先收到前一週（真實資料）再收到最後選定的一週；最終狀態必為最後選定
+    /// 的週次。
     pub(super) fn set_schedule_week(&mut self, week: u32) -> AppResult<()> {
         if self.schedule_week == Some(week) {
             return Ok(());

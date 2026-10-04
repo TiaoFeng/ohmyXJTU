@@ -38,11 +38,11 @@ pub struct LessonEntry {
 pub struct ScheduleData {
     /// 學期說明，例如 `2026-2027-1`。
     pub semester: String,
-    /// 本週週次。
+    /// 目前顯示的週次（預設為本週）。
     pub week: u32,
-    /// 週次上限（切換週次的邊界）：課表最晚有課的週次，至少涵蓋目前顯示的週次。
+    /// 週次上限（切換週次的邊界）：課表最晚有課的週次，至少涵蓋今天的週次。
     pub total_weeks: u32,
-    /// 本週課程。
+    /// 該週課程。
     pub lessons: Vec<LessonEntry>,
     /// 因格式問題被跳過的課程筆數。
     pub skipped: usize,

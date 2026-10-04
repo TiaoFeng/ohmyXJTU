@@ -695,7 +695,7 @@ fn login_overlay_takes_keys_and_keeps_underlying_screen() {
 
 #[test]
 fn bracket_keys_switch_homework_group_only_on_homework_page() {
-    let (jobs, _rx) = channel();
+    let (jobs, rx) = channel();
     let mut app = App::new(AccessPolicy::Auto);
     app.set_screen(Screen::Main);
     app.nav = NavItem::Homework;
@@ -708,10 +708,17 @@ fn bracket_keys_switch_homework_group_only_on_homework_page() {
     press(&mut app, &jobs, KeyCode::Char('['));
     assert_eq!(app.homework_group, HomeworkGroup::Completed);
 
-    // 非作業頁不生效。
+    // 課表頁的同一組按鍵改為切換週次（見
+    // `bracket_keys_switch_schedule_week_on_schedule_page`）：不得連帶改動
+    // 作業分組；尚未載入課表時也不會送出任何任務。
     app.nav = NavItem::Schedule;
     press(&mut app, &jobs, KeyCode::Char(']'));
-    assert_eq!(app.homework_group, HomeworkGroup::Completed);
+    assert_eq!(
+        app.homework_group,
+        HomeworkGroup::Completed,
+        "课表页不应改动作业分组"
+    );
+    assert!(rx.try_recv().is_err(), "未载入课表时不应送出任务");
 }
 
 /// 課表頁的 `[`／`]` 切換週次：標題立即顯示目標週、內容進入載入中，

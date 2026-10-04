@@ -2900,6 +2900,51 @@ fn week_bound_follows_the_last_course_week_not_the_semester_end() {
     assert_eq!(schedule.lessons.len(), 1, "第 3 周仍有课程");
 }
 
+/// 考試週（教學週已結束）往回翻週時，週次上限不得跟著縮小：否則介面的
+/// `[`／`]` 會以上限為邊界，使用者再也翻不回本週（`r` 保留選定週次）。
+#[test]
+fn week_bound_does_not_shrink_when_paging_back_from_an_exam_week() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let today = chrono::Local::now().date_naive();
+    // 課程只排到第 19 週，今天是第 21 週（考試週）。
+    let (start, day_of_week) = semester_fixture_meeting_today(today, 21);
+    let end = (today + chrono::Duration::days(30)).to_string();
+    let mut harness = harness(schedule_site_with_weeks(
+        Arc::clone(&seen),
+        start,
+        end,
+        day_of_week,
+        "1-19",
+    ));
+    harness.login_both_sites();
+
+    harness
+        .dispatch(Job::LoadSchedule { force: false })
+        .expect("首次载入应当成功");
+    let first = schedule_event(&mut harness);
+    assert_eq!(first.week, 21, "今天是第 21 周");
+    assert_eq!(first.total_weeks, 21, "上限至少涵盖本周");
+
+    // 往回翻到最後一堂教學週：上限必須維持不變。
+    harness
+        .dispatch(Job::SetScheduleWeek { week: 19 })
+        .expect("切换周次应当成功");
+    run_queued(&mut harness);
+    let back = schedule_event(&mut harness);
+    assert_eq!(back.week, 19);
+    assert_eq!(back.total_weeks, 21, "往回翻周不应让上限缩小");
+    assert_eq!(back.lessons.len(), 1, "第 19 周仍有课程");
+
+    // 上限未變，因此可以再翻回本週。
+    harness
+        .dispatch(Job::SetScheduleWeek { week: 21 })
+        .expect("切回本周应当成功");
+    run_queued(&mut harness);
+    let again = schedule_event(&mut harness);
+    assert_eq!(again.week, 21);
+    assert_eq!(again.total_weeks, 21);
+}
+
 #[test]
 fn activity_detail_for_material_skips_submission_request() {
     let site = Arc::new(FakeHomeworkSite {

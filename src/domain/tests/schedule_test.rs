@@ -138,9 +138,10 @@ fn anchors_week_bounds_to_semester_start() {
 fn bounds_weeks_by_the_last_course_week() {
     // 課表最晚有課的週次就是上限（與參考實作的考勤來源一致）。
     assert_eq!(total_weeks(Some(19), 12), 19);
-    // 目前顯示的週次超出課表週次時（考試週）至少涵蓋它，避免 N > M。
+    // 今天已進入考試週（第 20 週）而課表只排到第 16 週時，上限至少涵蓋今天，
+    // 避免出現「第 N/M 周」而 N > M。
     assert_eq!(total_weeks(Some(16), 20), 20);
-    // 沒有課表資料時以顯示週次為上限，不謊報教學週數。
+    // 沒有課表資料時以今天的週次為上限，不謊報教學週數。
     assert_eq!(total_weeks(None, 7), 7);
     assert_eq!(total_weeks(None, 0), 1);
 }

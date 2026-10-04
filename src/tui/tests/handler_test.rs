@@ -8,13 +8,13 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::config::AccessPolicy;
 use crate::domain::activity::ActivityGroup;
 use crate::domain::homework::{HomeworkInput, aggregate};
-use crate::domain::todo::{Priority, Task};
+use crate::domain::todo::{Priority, SortMode, Task};
 use crate::model::{ActivityDetailView, ScheduleData};
 use crate::sites::lms::{ActivityKind, LmsActivity, LmsCourse};
 use crate::task::Job;
 use crate::tui::app::{
     AgreementState, App, FormKind, FormState, HomeworkData, LmsLevel, LoginScreen, NavItem, Page,
-    Screen, SettingsState, TaskConfirmState, TaskFormMode,
+    Screen, SettingsState, TaskConfirmState, TaskEntry, TaskFormMode,
 };
 use crate::tui::controller::FormValues;
 
@@ -1782,4 +1782,104 @@ fn task_keys_do_nothing_on_other_pages() {
     assert!(app.task_multi.is_none(), "其他页面不得进入多选");
     assert!(app.task_search.is_none(), "其他页面不得开搜索");
     assert!(rx.try_recv().is_err(), "其他页面不得送出任务任务");
+}
+
+// ── 任務頁排序（^L） ─────────────────────────────────────
+
+/// 目前選取項目的標籤（任務內容或作業標題）。
+fn selected_label(app: &App) -> String {
+    match app.selected_entry() {
+        Some(TaskEntry::Task(task)) => task.content.clone(),
+        Some(TaskEntry::Homework(item)) => item.title.clone(),
+        None => "<none>".to_owned(),
+    }
+}
+
+#[test]
+fn sort_keys_switch_the_mode_and_return_to_the_main_screen() {
+    let (jobs, _rx) = channel();
+    let mut app = task_page_app();
+
+    for (character, mode, label) in [
+        ('p', SortMode::Priority, "优先级"),
+        ('d', SortMode::Deadline, "截止时间"),
+        ('n', SortMode::Default, "默认"),
+    ] {
+        press_ctrl(&mut app, &jobs, 'l');
+        assert!(matches!(app.screen, Screen::Sort), "^L 应进入排序提示");
+        press(&mut app, &jobs, KeyCode::Char(character));
+        assert!(matches!(app.screen, Screen::Main), "选定后应回到主画面");
+        assert_eq!(app.task_sort, mode, "{character} 应套用 {label}");
+        assert!(
+            app.message_text().is_some_and(|text| text.contains(label)),
+            "提示应说明目前的排序方式：{:?}",
+            app.message_text()
+        );
+    }
+
+    // 大寫與其他按鍵的相容性：`P` 等同 `p`。
+    press_ctrl(&mut app, &jobs, 'l');
+    press(&mut app, &jobs, KeyCode::Char('P'));
+    assert_eq!(app.task_sort, SortMode::Priority);
+}
+
+#[test]
+fn sort_prompt_ignores_other_keys_and_esc_cancels() {
+    let (jobs, rx) = channel();
+    let mut app = task_page_app();
+    app.task_sort = SortMode::Priority;
+
+    press_ctrl(&mut app, &jobs, 'l');
+    for code in [KeyCode::Char('x'), KeyCode::Enter, KeyCode::Down] {
+        press(&mut app, &jobs, code);
+        assert!(
+            matches!(app.screen, Screen::Sort),
+            "{code:?} 不应离开排序提示"
+        );
+    }
+    assert_eq!(app.task_sort, SortMode::Priority, "未选定前不得改变排序");
+
+    press(&mut app, &jobs, KeyCode::Esc);
+    assert!(matches!(app.screen, Screen::Main), "esc 应取消并回到主画面");
+    assert_eq!(
+        app.task_sort,
+        SortMode::Priority,
+        "取消不得改变原本的排序方式"
+    );
+    assert!(rx.try_recv().is_err(), "排序是纯界面操作，不送任务");
+}
+
+#[test]
+fn sort_key_only_works_on_the_task_page() {
+    let (jobs, rx) = channel();
+    let mut app = task_page_app();
+    app.nav = NavItem::Schedule;
+
+    press_ctrl(&mut app, &jobs, 'l');
+    assert!(
+        matches!(app.screen, Screen::Main),
+        "其他页面不得进入排序提示"
+    );
+    assert_eq!(app.task_sort, SortMode::Default);
+    assert!(rx.try_recv().is_err(), "其他页面不得送出任务");
+}
+
+#[test]
+fn switching_sort_keeps_the_selection_on_the_same_item() {
+    let (jobs, _rx) = channel();
+    let mut app = task_page_app();
+    // 預設排序：未完成分組為「任务 → 作业」，選取作業（索引 1）。
+    app.set_selection(1);
+    assert_eq!(selected_label(&app), "第一次作业");
+
+    // 優先級排序：作業（高、有截止時間）排到任務（高、無截止）之前。
+    press_ctrl(&mut app, &jobs, 'l');
+    press(&mut app, &jobs, KeyCode::Char('p'));
+    assert_eq!(app.task_sort, SortMode::Priority);
+    assert_eq!(app.page_selection(), 0, "作业应排到第一列");
+    assert_eq!(
+        selected_label(&app),
+        "第一次作业",
+        "切换排序后游标应留在同一个项目"
+    );
 }

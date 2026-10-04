@@ -118,6 +118,9 @@ const HINT_ELLIPSIS: &str = " …";
 /// 詳情面板的捲動提示（終端不夠寬時最先保留的片段之一）。
 const SCROLL_HINT: &str = "PgUp/PgDn 滚动";
 
+/// 排序提示（`^L`）開啟時，底部只顯示這行按鍵說明。
+const SORT_HINT: &str = "排序：[p] 优先级  [d] 截止时间  [n] 默认  esc 取消";
+
 fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
     let line = match app.message_text() {
         Some(message) => Line::from(Span::styled(
@@ -143,6 +146,10 @@ fn hints(app: &App, width: u16) -> String {
         app.session_label(),
         app.access_policy.label()
     )];
+    if matches!(app.screen, Screen::Sort) {
+        segments.push(SORT_HINT.to_owned());
+        return fit_hints(&segments, width);
+    }
     if scrollable_panel(app) {
         segments.push(SCROLL_HINT.to_owned());
     }
@@ -206,6 +213,7 @@ fn page_hints(app: &App) -> Vec<String> {
             hints.push("m 多选".to_owned());
             hints.push("^f 搜索".to_owned());
             hints.push("^t 设置".to_owned());
+            hints.push("^L 排序".to_owned());
             if app.task_filter.is_some() {
                 hints.push("esc 清除筛选".to_owned());
             }

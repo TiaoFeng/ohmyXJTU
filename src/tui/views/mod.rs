@@ -61,6 +61,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             );
         }
         Screen::Main
+        | Screen::Sort
         | Screen::Settings(_)
         | Screen::TermPicker(_)
         | Screen::TaskMenu(_)

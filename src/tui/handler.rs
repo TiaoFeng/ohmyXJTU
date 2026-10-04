@@ -8,6 +8,7 @@ use std::sync::mpsc::Sender;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::credentials::Secret;
+use crate::domain::todo::SortMode;
 use crate::session::SiteKind;
 use crate::task::Job;
 use crate::tui::app::{
@@ -88,7 +89,24 @@ pub fn handle_key(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
         Screen::TaskBatchMenu(_) => handle_task_batch_menu(app, key, jobs),
         Screen::TaskConfirm(_) => handle_task_confirm(app, key, jobs),
         Screen::TaskForm(_) => handle_task_form(app, key, jobs),
+        Screen::Sort => handle_sort(app, key),
         Screen::Main => handle_main(app, key, jobs),
+    }
+}
+
+/// 排序提示（`^L`）：`p` 優先級、`d` 截止時間、`n` 預設，`esc` 取消。
+///
+/// 選定後立即套用並回到主畫面；其他按鍵一律忽略（與 `ui-ref` 相同）。
+fn handle_sort(app: &mut App, key: KeyEvent) {
+    if key.code == KeyCode::Esc {
+        app.set_screen(Screen::Main);
+        return;
+    }
+    match plain_char(&key).map(|character| character.to_ascii_lowercase()) {
+        Some('p') => controller::set_task_sort(app, SortMode::Priority),
+        Some('d') => controller::set_task_sort(app, SortMode::Deadline),
+        Some('n') => controller::set_task_sort(app, SortMode::Default),
+        _ => {}
     }
 }
 
@@ -724,6 +742,10 @@ fn handle_main(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
             }
             KeyCode::Char('t') => {
                 controller::open_task_menu(app);
+                return;
+            }
+            KeyCode::Char('l') => {
+                app.set_screen(Screen::Sort);
                 return;
             }
             _ => {}

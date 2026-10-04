@@ -11,7 +11,7 @@ use crate::domain::activity::{self, ActivityGroup};
 use crate::domain::course_list::{self, CourseRow};
 use crate::domain::homework::{HomeworkGroup, HomeworkItem};
 use crate::domain::semester::TermCode;
-use crate::domain::todo::{self, PageRow, Priority, Task};
+use crate::domain::todo::{self, PageRow, Priority, SortKey, SortMode, Task};
 use crate::model::{ActivityDetailView, FlowData, ScheduleData};
 use crate::session::{AccessMode, SiteKind};
 use crate::sites::lms::{LmsActivity, LmsCourse};
@@ -1001,6 +1001,8 @@ pub enum Screen {
     TaskConfirm(TaskConfirmState),
     /// 新增／編輯任務的表單彈窗。
     TaskForm(Box<TaskFormState>),
+    /// 任務頁排序提示（`^L`）：只顯示提示列，畫面其餘部分照常。
+    Sort,
 }
 
 /// 可捲動內容的位移狀態。
@@ -1114,6 +1116,8 @@ pub struct App {
     pub task_search: Option<InputLine>,
     /// 任務頁的多選模式：已勾選的任務識別碼（`None` 表示不在多選模式）。
     pub task_multi: Option<HashSet<u64>>,
+    /// 任務頁的排序方式（`^L`；只影響顯示，不改動資料）。
+    pub task_sort: SortMode,
     /// `^D` 第一次按下後等待第二次確認的任務（識別碼、內容）。
     pub task_pending_delete: Option<(u64, String)>,
     /// 最近一次得知的可選學期（供學期選擇器）。
@@ -1179,6 +1183,7 @@ impl App {
             task_filter: None,
             task_search: None,
             task_multi: None,
+            task_sort: SortMode::default(),
             task_pending_delete: None,
             term_options: Vec::new(),
             attendance: Page::Idle,
@@ -1403,19 +1408,38 @@ impl App {
         activity::counts(activities)
     }
 
-    /// 任務頁目前選取的項目（任務在前、作業在後，與列模型順序一致）。
+    /// 任務頁目前選取的項目（與列模型順序一致）。
     pub fn selected_entry(&self) -> Option<TaskEntry<'_>> {
         if self.nav != NavItem::Homework {
             return None;
         }
-        let tasks = self.task_group_items(self.homework_group);
-        let selection = self.page_selection();
-        if let Some(task) = tasks.get(selection) {
-            return Some(TaskEntry::Task(task));
+        self.task_page_entries().get(self.page_selection()).copied()
+    }
+
+    /// 任務頁的可選取項目（依目前的排序方式排列）。
+    ///
+    /// 預設排序維持「任務段在前、作業段在後」；其餘排序方式把兩者混在一起，依
+    /// 排序鍵排列（作業的優先級一律視為「高」）。分組篩選與搜尋在兩者都適用。
+    pub fn task_page_entries(&self) -> Vec<TaskEntry<'_>> {
+        let group = self.homework_group;
+        let tasks = self.task_group_items(group);
+        let homework = self.homework_group_items(group);
+        if !self.task_sort.is_sorted() {
+            let mut entries: Vec<TaskEntry<'_>> = tasks.into_iter().map(TaskEntry::Task).collect();
+            entries.extend(homework.into_iter().map(TaskEntry::Homework));
+            return entries;
         }
-        let index = selection.checked_sub(tasks.len())?;
-        let homework = self.homework_group_items(self.homework_group);
-        homework.get(index).map(|item| TaskEntry::Homework(item))
+        let mut keyed: Vec<(SortKey, TaskEntry<'_>)> = tasks
+            .iter()
+            .map(|task| (todo::task_sort_key(task), TaskEntry::Task(task)))
+            .chain(
+                homework
+                    .iter()
+                    .map(|item| (todo::homework_sort_key(item), TaskEntry::Homework(item))),
+            )
+            .collect();
+        keyed.sort_by(|left, right| todo::compare(self.task_sort, &left.0, &right.0));
+        keyed.into_iter().map(|(_, entry)| entry).collect()
     }
 
     /// 指定分組的作業（依搜尋關鍵字過濾；保持原本排序）。
@@ -1454,11 +1478,25 @@ impl App {
         homework + tasks
     }
 
-    /// 任務頁目前的列模型（任务段在前、作业段在后，只含非空分段）。
+    /// 任務頁目前的列模型。
+    ///
+    /// 預設排序分段顯示（任务段在前、作业段在后，只含非空分段）；混合排序則把
+    /// 排好的項目直接列成一串，不再插入分段標題與空白列。
     pub fn task_page_rows(&self) -> Vec<PageRow<'_>> {
-        let tasks = self.task_group_items(self.homework_group);
-        let homework = self.homework_group_items(self.homework_group);
-        todo::page_rows(&tasks, &homework)
+        if !self.task_sort.is_sorted() {
+            let group = self.homework_group;
+            return todo::page_rows(
+                &self.task_group_items(group),
+                &self.homework_group_items(group),
+            );
+        }
+        self.task_page_entries()
+            .into_iter()
+            .map(|entry| match entry {
+                TaskEntry::Task(task) => PageRow::Task(task),
+                TaskEntry::Homework(item) => PageRow::Homework(item),
+            })
+            .collect()
     }
 
     /// 目前分組中符合搜尋關鍵字的項目數（作業＋任務）。
@@ -1545,6 +1583,7 @@ impl App {
                 | Screen::TaskBatchMenu(_)
                 | Screen::TaskConfirm(_)
                 | Screen::TaskForm(_)
+                | Screen::Sort
         )
     }
 

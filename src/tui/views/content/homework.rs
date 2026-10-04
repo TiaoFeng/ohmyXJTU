@@ -297,6 +297,13 @@ fn homework_tabs(app: &App) -> Line<'static> {
             THEME.accent_style(),
         ));
     }
+    // 混合排序時分段標題不再出現，這裡說明目前的排序方式（任務與作業混在一起）。
+    if app.task_sort.is_sorted() {
+        spans.push(Span::styled(
+            format!("  排序：{}（任务与作业混合）", app.task_sort.label()),
+            THEME.accent_style(),
+        ));
+    }
     Line::from(spans)
 }
 

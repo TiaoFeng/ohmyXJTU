@@ -5,6 +5,7 @@
 
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, TimeZone};
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
 
 use crate::domain::homework::{CAMPUS_UTC_OFFSET_SECS, HomeworkGroup, HomeworkItem};
 use crate::tone::Tone;
@@ -283,6 +284,124 @@ pub fn visual_index(rows: &[PageRow<'_>], selection: usize) -> Option<usize> {
         }
     }
     None
+}
+
+/// 任務頁的排序方式（`^L`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SortMode {
+    /// 預設：任務段在前、作業段在後（分段顯示）。
+    #[default]
+    Default,
+    /// 依優先級（作業一律視為「高」）。
+    Priority,
+    /// 依截止時間（無截止時間者排最後）。
+    Deadline,
+}
+
+impl SortMode {
+    /// 顯示名稱（排序提示與標題列使用）。
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Default => "默认",
+            Self::Priority => "优先级",
+            Self::Deadline => "截止时间",
+        }
+    }
+
+    /// 是否為混合排序：任務與作業混在一起，不再分段。
+    pub fn is_sorted(self) -> bool {
+        self != Self::Default
+    }
+}
+
+/// 任務頁項目的排序鍵（任務與作業共用）。
+///
+/// 作業沒有優先級與本機識別碼：優先級一律視為 [`Priority::High`]，識別碼取活動
+/// 識別碼。截止時間以絕對瞬間比較（任務直接取欄位、作業解析 `end_time`）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SortKey {
+    /// 是否沒有截止時間（`0` ＝有、`1` ＝無；讓有截止時間者排前面）。
+    missing_deadline: u8,
+    /// 截止時間的絕對瞬間（無截止時間時為 0）。
+    deadline: i64,
+    /// 優先級（`Ord` 為高 → 低）。
+    priority: Priority,
+    /// 標題或內容（僅作穩定排序的第二鍵，不分大小寫）。
+    label: String,
+    /// 識別碼：任務取流水號（補零以維持數值順序）、作業取活動識別碼。
+    id: String,
+}
+
+impl SortKey {
+    /// 組出排序鍵。
+    fn new(deadline: Option<i64>, priority: Priority, label: &str, id: String) -> Self {
+        Self {
+            missing_deadline: u8::from(deadline.is_none()),
+            deadline: deadline.unwrap_or(0),
+            priority,
+            label: label.to_lowercase(),
+            id,
+        }
+    }
+}
+
+/// 自訂義任務的排序鍵。
+pub fn task_sort_key(task: &Task) -> SortKey {
+    SortKey::new(
+        task.deadline.map(|deadline| deadline.timestamp()),
+        task.priority,
+        &task.content,
+        format!("{:020}", task.id),
+    )
+}
+
+/// 思源學堂作業的排序鍵（優先級一律視為「高」）。
+pub fn homework_sort_key(item: &HomeworkItem) -> SortKey {
+    SortKey::new(
+        crate::domain::homework::parse_time(item.end_time.as_deref())
+            .map(|deadline| deadline.timestamp()),
+        Priority::High,
+        &item.title,
+        item.activity_id.clone(),
+    )
+}
+
+/// 依排序方式比較兩個排序鍵。
+///
+/// 優先級：優先級 → 截止時間 → 標題 → 識別碼；
+/// 截止時間：截止時間 → 優先級 → 標題 → 識別碼。
+/// 兩者的截止時間都是升序，沒有截止時間者一律排在同組最後。
+pub fn compare(mode: SortMode, left: &SortKey, right: &SortKey) -> Ordering {
+    match mode {
+        SortMode::Priority => (
+            left.priority,
+            left.missing_deadline,
+            left.deadline,
+            &left.label,
+            &left.id,
+        )
+            .cmp(&(
+                right.priority,
+                right.missing_deadline,
+                right.deadline,
+                &right.label,
+                &right.id,
+            )),
+        SortMode::Default | SortMode::Deadline => (
+            left.missing_deadline,
+            left.deadline,
+            left.priority,
+            &left.label,
+            &left.id,
+        )
+            .cmp(&(
+                right.missing_deadline,
+                right.deadline,
+                right.priority,
+                &right.label,
+                &right.id,
+            )),
+    }
 }
 
 #[cfg(test)]

@@ -14,7 +14,7 @@ use crate::config::AccessPolicy;
 use crate::domain::attendance_match::LessonAttendance;
 use crate::domain::homework::{HomeworkGroup, HomeworkInput, HomeworkItem, aggregate};
 use crate::domain::semester::TermCode;
-use crate::domain::todo::{Priority, Task};
+use crate::domain::todo::{Priority, SortMode, Task};
 use crate::model::{ActivityDetailView, FlowData, LessonEntry, ScheduleData};
 use crate::session::{AccessMode, SiteKind};
 use crate::sites::attendance::{AttendanceStatus, FlowRecord};
@@ -2469,8 +2469,8 @@ fn footer_keeps_page_hints_on_narrow_terminals() {
     );
     assert!(footer.contains('…'), "应标注还有未显示的提示：{footer:?}");
 
-    // 寬終端仍列出完整提示。
-    let terminal = draw(200, HEIGHT, |frame| {
+    // 寬終端仍列出完整提示（提示段數隨功能增加，這裡留出足夠的欄寬）。
+    let terminal = draw(220, HEIGHT, |frame| {
         crate::tui::views::draw(frame, &mut app)
     });
     let footer = row_text(terminal.backend(), HEIGHT - 1);
@@ -3072,4 +3072,92 @@ fn task_form_edit_mode_prefills_and_shows_busy_state() {
     });
     let text = screen_text(terminal.backend());
     assert!(text.contains("正在保存…"), "保存中应显示提示：\n{text}");
+}
+
+// ── 任務頁排序（^L） ─────────────────────────────────────
+
+/// 該列在內容區（側邊欄右框線之後）是否以分段標題開頭。
+///
+/// 側邊欄也有「任务」標籤，因此不能直接比對整列文字。
+fn has_section_header(row: &str) -> bool {
+    row.split_once('│')
+        .is_some_and(|(_, rest)| rest.starts_with("│  任务") || rest.starts_with("│  作业"))
+}
+
+#[test]
+fn sorted_task_page_mixes_rows_without_section_headers() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00+08:00").expect("固定时间");
+    let items = aggregate(&[homework_input("待办作业", "2026-10-01 23:59:59", 0)], now);
+    let mut app = task_page_app(vec![todo(1, "写实验报告", Priority::Low, false)], items);
+    app.task_sort = SortMode::Priority;
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let backend = terminal.backend();
+    let text = screen_text(backend);
+    let area = backend.buffer().area;
+
+    // 混合排序：內容區不再出現分段標題。
+    let headers: Vec<String> = (area.y..area.y + area.height)
+        .map(|y| row_text(backend, y))
+        .filter(|row| has_section_header(row))
+        .collect();
+    assert!(headers.is_empty(), "混合排序不应出现分段标题：{headers:?}");
+
+    // 作業（高）排在低優先級任務之前，兩列相鄰（沒有標題或空白列夾在中間）。
+    let (homework_y, _) = find_row(backend, "待办作业");
+    let (task_y, _) = find_row(backend, "写实验报告");
+    assert!(
+        homework_y < task_y,
+        "作业的优先级视为高，应排在低优先级任务前：\n{text}"
+    );
+    assert_eq!(homework_y + 1, task_y, "混合排序不应插入空白列：\n{text}");
+
+    // 標題列說明目前的排序方式（分段標題消失後仍看得出在按什麼排序）。
+    let (_, tabs_row) = find_row(backend, "排序：优先级");
+    assert!(
+        tabs_row.contains("任务与作业混合"),
+        "标题列应说明混合排序：\n{tabs_row}"
+    );
+}
+
+#[test]
+fn sort_prompt_replaces_the_footer_with_the_sort_keys() {
+    let mut app = task_page_app(
+        vec![todo(1, "写实验报告", Priority::High, false)],
+        Vec::new(),
+    );
+    // 排序提示開啟時，底欄只顯示排序相關的按鍵。
+    app.set_screen(Screen::Sort);
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let backend = terminal.backend();
+    let footer = row_text(backend, HEIGHT - 1);
+    assert!(
+        footer.contains("排序：[p] 优先级"),
+        "底栏应显示排序按键：{footer}"
+    );
+    assert!(
+        footer.contains("[d] 截止时间"),
+        "底栏应显示排序按键：{footer}"
+    );
+    assert!(footer.contains("esc 取消"), "底栏应显示取消提示：{footer}");
+    assert!(
+        !footer.contains("^a 添加"),
+        "排序提示应取代一般按键提示：{footer}"
+    );
+
+    // 關閉排序提示後恢復一般提示；提示段數多，這裡用寬終端確認 `^L` 仍在提示列中。
+    app.set_screen(Screen::Main);
+    let terminal = draw(220, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let footer = row_text(terminal.backend(), HEIGHT - 1);
+    assert!(footer.contains("^L 排序"), "任务页应提示 ^L：{footer}");
+    assert!(
+        !footer.contains("排序：[p]"),
+        "关闭后不应再显示排序提示：{footer}"
+    );
 }

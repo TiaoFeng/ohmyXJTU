@@ -186,3 +186,151 @@ fn task_round_trips_through_json() {
     assert!(!minimal.completed);
     assert_eq!(minimal.deadline, None);
 }
+
+// ── 排序 ────────────────────────────────────────────────
+
+/// 測試用作業（截止時間為原始字串，模擬思源學堂的回應）。
+fn homework(activity_id: &str, title: &str, end_time: Option<&str>) -> HomeworkItem {
+    HomeworkItem {
+        course_id: "1".to_owned(),
+        course_name: "编译原理".to_owned(),
+        activity_id: activity_id.to_owned(),
+        title: title.to_owned(),
+        end_time: end_time.map(str::to_owned),
+        description: None,
+        submit_by_group: Some(false),
+        state: crate::domain::homework::HomeworkState::Pending,
+        note: None,
+    }
+}
+
+/// 依排序方式排序任務與作業的混合清單，回傳顯示用的標籤。
+fn mixed(mode: SortMode) -> Vec<String> {
+    let tasks = [
+        task(1, "整理笔记", Some(at(20, 0, 0)), Priority::High),
+        task(2, "写实验报告", None, Priority::Low),
+        task(3, "复习", Some(at(9, 0, 0)), Priority::Medium),
+    ];
+    let homework = [
+        homework("a-1", "第一次作业", Some("2026-12-30T12:00:00Z")),
+        homework("a-2", "第二次作业", None),
+    ];
+    let mut keyed: Vec<(SortKey, String)> = tasks
+        .iter()
+        .map(|task| (task_sort_key(task), format!("任务:{}", task.content)))
+        .chain(
+            homework
+                .iter()
+                .map(|item| (homework_sort_key(item), format!("作业:{}", item.title))),
+        )
+        .collect();
+    keyed.sort_by(|left, right| compare(mode, &left.0, &right.0));
+    keyed.into_iter().map(|(_, label)| label).collect()
+}
+
+#[test]
+fn sort_modes_are_labelled_and_only_default_is_unsorted() {
+    assert_eq!(SortMode::default(), SortMode::Default);
+    assert_eq!(SortMode::Default.label(), "默认");
+    assert_eq!(SortMode::Priority.label(), "优先级");
+    assert_eq!(SortMode::Deadline.label(), "截止时间");
+    assert!(!SortMode::Default.is_sorted());
+    assert!(SortMode::Priority.is_sorted());
+    assert!(SortMode::Deadline.is_sorted());
+}
+
+#[test]
+fn priority_sort_treats_homework_as_high_priority() {
+    // 作業沒有優先級 → 視為「高」；同優先級內再依截止時間（a-1 較早），
+    // 沒有截止時間者排在同優先級的最後。
+    assert_eq!(
+        mixed(SortMode::Priority),
+        vec![
+            "作业:第一次作业", // 高（作業）・截止 2026-12-30
+            "任务:整理笔记",   // 高・截止 20:00
+            "作业:第二次作业", // 高（作業）但无截止
+            "任务:复习",       // 中
+            "任务:写实验报告", // 低・无截止
+        ]
+    );
+}
+
+#[test]
+fn deadline_sort_puts_the_earliest_first_and_missing_deadlines_last() {
+    assert_eq!(
+        mixed(SortMode::Deadline),
+        vec![
+            "作业:第一次作业", // 2026-12-30 20:00
+            "任务:复习",       // 2026-12-31 09:00
+            "任务:整理笔记",   // 2026-12-31 20:00
+            "作业:第二次作业", // 无截止（高）
+            "任务:写实验报告", // 无截止（低）
+        ]
+    );
+}
+
+#[test]
+fn sort_breaks_ties_deterministically() {
+    // 同優先級、同截止時間 → 依標題（不分大小寫）：作业的 Pending 標題較小。
+    let tasks = [task(1, "Zeta", Some(at(9, 0, 0)), Priority::High)];
+    let homework = [homework("a-1", "alpha", Some("2026-12-31T01:00:00Z"))];
+    let mut keyed = vec![
+        (task_sort_key(&tasks[0]), "任务"),
+        (homework_sort_key(&homework[0]), "作业"),
+    ];
+    keyed.sort_by(|left, right| compare(SortMode::Priority, &left.0, &right.0));
+    assert_eq!(
+        keyed.iter().map(|(_, label)| *label).collect::<Vec<_>>(),
+        vec!["作业", "任务"],
+        "同优先级同截止时间时依标题排序"
+    );
+
+    // 標題也相同時，作業與任務的識別碼仍讓順序完全決定（不依賴來源順序）。
+    let mut reversed = keyed;
+    reversed.reverse();
+    reversed.sort_by(|left, right| compare(SortMode::Priority, &left.0, &right.0));
+    assert_eq!(
+        reversed.iter().map(|(_, label)| *label).collect::<Vec<_>>(),
+        vec!["作业", "任务"]
+    );
+}
+
+#[test]
+fn sort_keys_use_display_free_deadlines_and_numeric_task_ids() {
+    // 未帶時區的截止時間視為校園時區（與 `parse_time` 一致），可與任務的截止時間
+    // 直接比較瞬間；帶時區者先換算（`Z` ＝ UTC）。
+    let item = homework("a-1", "第一次作业", Some("2026-12-31 09:00:00"));
+    let key = homework_sort_key(&item);
+    assert_eq!(key.deadline, at(9, 0, 0).timestamp());
+    assert_eq!(key.missing_deadline, 0);
+    assert_eq!(key.priority, Priority::High, "作业一律视为高优先级");
+    assert_eq!(
+        homework_sort_key(&homework("a-1", "第一次作业", Some("2026-12-31T01:00:00Z"))).deadline,
+        at(9, 0, 0).timestamp(),
+        "UTC 的截止时间应换算成同一瞬间"
+    );
+    assert_eq!(
+        homework_sort_key(&homework("a-1", "第一次作业", None)).missing_deadline,
+        1
+    );
+
+    // 任務識別碼補零，讓字串比較等同數值比較。
+    assert_eq!(
+        task_sort_key(&task(9, "a", None, Priority::Low)).id,
+        "0".repeat(19) + "9"
+    );
+    let (small, large) = (
+        task_sort_key(&task(9, "a", None, Priority::Low)),
+        task_sort_key(&task(10, "a", None, Priority::Low)),
+    );
+    assert_eq!(
+        compare(SortMode::Priority, &small, &large),
+        std::cmp::Ordering::Less,
+        "任务识别码补零后应按数值比较"
+    );
+
+    // 無截止時間：以 missing_deadline 區分，deadline 一律為 0。
+    let key = task_sort_key(&task(1, "a", None, Priority::Low));
+    assert_eq!(key.missing_deadline, 1);
+    assert_eq!(key.deadline, 0);
+}

@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use chrono::{Datelike as _, Duration, NaiveDate};
+use chrono::{Duration, NaiveDate};
 
 use crate::sites::attendance::TimetableCourse;
 
@@ -135,10 +135,15 @@ pub fn merge_courses(courses: &[TimetableCourse]) -> Vec<CourseSlot> {
         .collect()
 }
 
-/// 週一至週日。
-pub fn week_window(today: NaiveDate) -> (NaiveDate, NaiveDate) {
-    let monday = today - Duration::days(i64::from(today.weekday().num_days_from_monday()));
-    (monday, monday + Duration::days(6))
+/// 第 `week` 週的週一與週日。
+///
+/// 以學期開始日為第 1 週第 1 天錨定（與 [`CourseSlot::date_in_week`] 同一套
+/// 公式）：無論學期開始日為星期幾，課程日期與考勤查詢範圍都落在同一組日期。
+pub fn week_bounds(semester_start: NaiveDate, week: u32) -> Option<(NaiveDate, NaiveDate)> {
+    let week_offset = i64::from(week.max(1) - 1) * 7;
+    let monday = semester_start.checked_add_signed(Duration::days(week_offset))?;
+    let sunday = monday.checked_add_signed(Duration::days(6))?;
+    Some((monday, sunday))
 }
 
 /// 由學期開始日計算第幾週；日期早於學期時回傳第 1 週。
@@ -162,6 +167,26 @@ pub fn semester_length(term_name: &str) -> u32 {
 /// 將週次夾在學期範圍內，避免超出學期的日期被計算出來。
 pub fn clamp_week(week: u32, term_name: &str) -> u32 {
     week.clamp(1, semester_length(term_name))
+}
+
+/// 學期總週數：取「學期結束日所在週」與「課程最大週次」的較大者；
+/// 兩者皆缺時回退教學週數（一般學期 22、小學期 8）。
+///
+/// 用於課表切週的邊界：結束日涵蓋考試週時以結束日為準，課程若聲明更長的
+/// 週次（調課等）也能瀏覽到；學校資料都不完整時至少給出教學週數。
+pub fn total_weeks(
+    semester_start: NaiveDate,
+    semester_end: Option<NaiveDate>,
+    max_course_week: Option<u32>,
+    term_name: &str,
+) -> u32 {
+    let from_end = semester_end.map(|end| week_number(semester_start, end));
+    [from_end, max_course_week]
+        .into_iter()
+        .flatten()
+        .max()
+        .unwrap_or_else(|| semester_length(term_name))
+        .max(1)
 }
 
 fn non_empty(value: String) -> Option<String> {

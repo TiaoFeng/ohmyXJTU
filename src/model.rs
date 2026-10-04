@@ -40,6 +40,8 @@ pub struct ScheduleData {
     pub semester: String,
     /// 本週週次。
     pub week: u32,
+    /// 學期總週數（切換週次的邊界）。
+    pub total_weeks: u32,
     /// 本週課程。
     pub lessons: Vec<LessonEntry>,
     /// 因格式問題被跳過的課程筆數。

@@ -812,7 +812,7 @@ fn no_data_states_are_plain_notes_not_failures() {
     app.schedule = Page::Ready(schedule_data(Vec::new()));
     let text = main_text(&mut app);
     assert!(
-        text.contains("本周没有课程安排"),
+        text.contains("该周没有课程安排"),
         "课表空结果应显示说明：\n{text}"
     );
     assert!(!text.contains("加载失败"), "空结果不得显示为失败：\n{text}");
@@ -1253,6 +1253,7 @@ fn schedule_data(lessons: Vec<LessonEntry>) -> ScheduleData {
     ScheduleData {
         semester: "2026-2027-1".to_owned(),
         week: 4,
+        total_weeks: 23,
         lessons,
         skipped: 0,
         notice: None,
@@ -2065,8 +2066,50 @@ fn schedule_renders_notice_above_empty_state() {
         "应显示学期外提示：\n{text}"
     );
     assert!(
-        text.contains("本周没有课程安排"),
+        text.contains("该周没有课程安排"),
         "空状态提示应保留：\n{text}"
+    );
+}
+
+/// 標題顯示週次與總週數（`第 N/M 周`）。
+#[test]
+fn schedule_title_shows_the_week_and_total() {
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Schedule;
+    app.schedule = Page::Ready(schedule_data(Vec::new()));
+    app.schedule_week = Some(4);
+    app.schedule_total = Some(23);
+
+    let text = main_text(&mut app);
+    assert!(
+        text.contains("第 4/23 周"),
+        "标题应显示周次与总周数：\n{text}"
+    );
+}
+
+/// 切週載入期間：標題立即顯示目標週，內容清空並顯示載入說明。
+#[test]
+fn switching_week_shows_the_target_week_while_loading() {
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Schedule;
+    app.schedule_week = Some(6);
+    app.schedule_total = Some(23);
+    app.schedule.reset_loading("正在加载第 6 周…");
+
+    let text = main_text(&mut app);
+    assert!(
+        text.contains("第 6/23 周"),
+        "标题应立即显示目标周：\n{text}"
+    );
+    assert!(
+        text.contains("正在加载第 6 周…"),
+        "内容应显示加载说明：\n{text}"
+    );
+    assert!(
+        text.contains("[ ] 切换周次"),
+        "底栏应提示切周按键：\n{text}"
     );
 }
 

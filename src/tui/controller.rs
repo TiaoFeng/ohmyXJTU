@@ -37,7 +37,7 @@ pub(super) fn request(app: &mut App, jobs: &Sender<Job>, nav: NavItem, force: bo
     match nav {
         NavItem::Schedule => {
             app.schedule.start_loading("正在加载课表与考勤记录…");
-            let _ = jobs.send(Job::LoadSchedule);
+            let _ = jobs.send(Job::LoadSchedule { force });
         }
         NavItem::Homework => {
             app.homework
@@ -161,6 +161,30 @@ pub(super) fn change_group(app: &mut App, delta: i32) {
         };
         app.set_selection(0);
     }
+}
+
+/// 切換課表週次（`[`／`]`）：標題立即顯示目標週，內容待新資料抵達。
+///
+/// 與切換課程／活動同理，舊週的課程不屬於目標週：清空內容（`reset_loading`）
+/// 而不是保留顯示，避免使用者以為看到的是目標週的課表。到邊界（第 1 週、
+/// 最後一週）時不動作。
+pub(super) fn change_schedule_week(app: &mut App, jobs: &Sender<Job>, delta: i32) {
+    if app.nav != NavItem::Schedule {
+        return;
+    }
+    let (Some(week), Some(total)) = (app.schedule_week, app.schedule_total) else {
+        return;
+    };
+    let target = i32::try_from(week).unwrap_or(1) + delta;
+    if target < 1 || target > i32::try_from(total).unwrap_or(1) {
+        return;
+    }
+
+    let target = u32::try_from(target).unwrap_or(1);
+    app.schedule_week = Some(target);
+    app.schedule
+        .reset_loading(format!("正在加载第 {target} 周…"));
+    let _ = jobs.send(Job::SetScheduleWeek { week: target });
 }
 
 /// 詳情內容的捲動指令（PgUp／PgDn／Home／End）。

@@ -1,12 +1,20 @@
-//! 思源學堂課程／活動快取。
+//! 課程資料快取：思源學堂（`LmsCache`）與課表（`ScheduleCache`）。
 //!
 //! `LmsCache` 只負責儲存（記憶體、有效期五分鐘）；`impl Worker` 的 `lms_*`
 //! 方法是快取的前門：有效期內直接重用，`force`（使用者按 `r`）一律略過快取
 //! 重新查詢。帳號或訪問模式變更時由調度核心呼叫 `LmsCache::clear`。
+//!
+//! `ScheduleCache` 保存整學期課表（合併後的時段與學期資訊）：課表端點一次
+//! 回傳整學期課程，本週只是客戶端過濾的結果，因此切換週次只需重查該週的
+//! 考勤記錄。它沒有有效期——使用者按 `r` 或帳號／訪問模式變更時重建
+//!（`Worker::load_schedule`）。
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use chrono::NaiveDate;
+
+use crate::domain::schedule::CourseSlot;
 use crate::error::{AppError, AppResult};
 use crate::http::HttpRequest;
 use crate::session::SiteKind;
@@ -23,6 +31,28 @@ pub(super) type ActivitiesOutcome = AppResult<(Vec<LmsActivity>, usize)>;
 
 /// 單項活動詳情的查詢結果。
 pub(super) type DetailOutcome = AppResult<LmsActivity>;
+
+/// 課表快取：整學期課程（合併後）與學期資訊。
+///
+/// 保存整學期課程後，切換週次只需重查該週的考勤記錄；`force`（使用者按
+/// `r`）或帳號／訪問模式變更時重建（`Worker::load_schedule`）。
+#[derive(Clone)]
+pub(super) struct ScheduleCache {
+    /// 學期顯示標籤（例如 `2026-2027-1`）。
+    pub(super) label: String,
+    /// 學期開始日（週次計算的錨點）。
+    pub(super) start: NaiveDate,
+    /// 學期結束日（可解析時）。
+    pub(super) end: Option<NaiveDate>,
+    /// 學期代碼（`YYYY-YYYY+1-T`；無法識別時為 `None`）。
+    pub(super) term: Option<String>,
+    /// 合併後的課程時段。
+    pub(super) slots: Vec<CourseSlot>,
+    /// 因週次格式問題被跳過的課程筆數。
+    pub(super) skipped: usize,
+    /// 課程聲明的最大週次。
+    pub(super) max_week: Option<u32>,
+}
 
 /// 思源學堂課程／活動快取（記憶體、有效期五分鐘）。
 #[derive(Default)]

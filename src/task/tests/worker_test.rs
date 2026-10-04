@@ -16,7 +16,7 @@ use crate::domain::homework::HomeworkState;
 use crate::domain::semester::{TermCode, TermSource};
 use crate::error::NetworkKind;
 use crate::http::fake::{FakeClient, html, json};
-use crate::http::{HttpClient, HttpRequest, HttpResponse, Method};
+use crate::http::{Body, HttpClient, HttpRequest, HttpResponse, Method};
 use crate::session::AccessMode;
 use crate::sites::attendance::{AttendanceSite, AttendanceStatus};
 use crate::sites::lms::LmsSite;
@@ -184,6 +184,8 @@ impl Harness {
                 homework_epoch: 0,
                 relogin: ReloginBudgets::default(),
                 cache: LmsCache::default(),
+                schedule_cache: None,
+                schedule_week: None,
                 known_term: None,
                 chosen_term: None,
                 timing: LoadTiming::default(),
@@ -684,7 +686,7 @@ fn offline_relogin_failure_settles_page_and_reports_login_failure() {
 
     // 考勤站點尚未登入：資料任務先回報工作階段失效，再嘗試自動重登。
     harness
-        .dispatch(Job::LoadSchedule)
+        .dispatch(Job::LoadSchedule { force: false })
         .expect("数据任务失败不应冒泡为任务错误");
 
     let events = harness.drain_events();
@@ -755,7 +757,7 @@ fn relogin_progress_is_followed_by_a_page_failure_when_the_login_breaks() {
     });
 
     harness
-        .dispatch(Job::LoadSchedule)
+        .dispatch(Job::LoadSchedule { force: false })
         .expect("数据任务失败不应冒泡为任务错误");
 
     let events = harness.drain_events();
@@ -796,9 +798,9 @@ fn cancel_login_drops_pending_login_state() {
     harness.worker.flow = Some(LoginFlow {
         site: SiteKind::Attendance,
         driver: Box::new(driver),
-        retry: Some(Job::LoadSchedule),
+        retry: Some(Job::LoadSchedule { force: false }),
     });
-    harness.worker.retry = Some(Job::LoadSchedule);
+    harness.worker.retry = Some(Job::LoadSchedule { force: false });
     // 模擬「使用者重新輸入密碼後嘗試登入」的當下狀態。
     harness.worker.credentials = Some(Credentials::new("3120000001", "typed-password"));
     harness.worker.pending_vault = Some(PendingVault {
@@ -880,7 +882,10 @@ fn cancel_login_settles_the_waiting_page() {
 #[test]
 fn merge_upgrades_queued_non_forced_job_in_place() {
     let mut harness = harness(|_request: &HttpRequest| panic!("合并不应触发网络请求"));
-    harness.worker.pending_data.push_back(Job::LoadSchedule);
+    harness
+        .worker
+        .pending_data
+        .push_back(Job::LoadSchedule { force: false });
     harness
         .worker
         .pending_data
@@ -892,7 +897,10 @@ fn merge_upgrades_queued_non_forced_job_in_place() {
 
     let queued: Vec<&Job> = harness.worker.pending_data.iter().collect();
     assert_eq!(queued.len(), 2, "同键任务应原位升级而不是追加");
-    assert!(matches!(queued[0], Job::LoadSchedule), "无关任务位置不变");
+    assert!(
+        matches!(queued[0], Job::LoadSchedule { .. }),
+        "无关任务位置不变"
+    );
     assert!(
         matches!(queued[1], Job::LoadCourses { force: true }),
         "非强制任务应原位升级为强制"
@@ -924,14 +932,19 @@ fn merge_never_downgrades_forced_job() {
 #[test]
 fn merge_drops_duplicates_of_unforced_jobs() {
     let mut harness = harness(|_request: &HttpRequest| panic!("合并不应触发网络请求"));
-    harness.worker.pending_data.push_back(Job::LoadSchedule);
+    harness
+        .worker
+        .pending_data
+        .push_back(Job::LoadSchedule { force: false });
     harness
         .worker
         .pending_data
         .push_back(Job::LoadFlow { page: 1 });
 
     // 同鍵重複：丟棄；不同頁碼是不同資源鍵，允許並存。
-    harness.worker.merge_data_job(Job::LoadSchedule, None);
+    harness
+        .worker
+        .merge_data_job(Job::LoadSchedule { force: false }, None);
     harness
         .worker
         .merge_data_job(Job::LoadFlow { page: 1 }, None);
@@ -2187,7 +2200,7 @@ fn schedule_after_semester_end_is_empty_with_notice_and_no_queries() {
     harness.login_both_sites();
 
     harness
-        .dispatch(Job::LoadSchedule)
+        .dispatch(Job::LoadSchedule { force: false })
         .expect("课表加载应当成功");
 
     let schedule = harness
@@ -2237,7 +2250,7 @@ fn schedule_before_semester_start_is_empty_with_notice() {
     harness.login_both_sites();
 
     harness
-        .dispatch(Job::LoadSchedule)
+        .dispatch(Job::LoadSchedule { force: false })
         .expect("课表加载应当成功");
 
     let schedule = harness
@@ -2327,7 +2340,7 @@ fn schedule_in_session_matches_attendance_without_notice() {
     harness.login_both_sites();
 
     harness
-        .dispatch(Job::LoadSchedule)
+        .dispatch(Job::LoadSchedule { force: false })
         .expect("课表加载应当成功");
 
     let schedule = harness
@@ -2398,7 +2411,7 @@ fn schedule_does_not_fall_back_to_week_22_after_teaching_weeks() {
     harness.login_both_sites();
 
     harness
-        .dispatch(Job::LoadSchedule)
+        .dispatch(Job::LoadSchedule { force: false })
         .expect("课表加载应当成功");
 
     let schedule = harness
@@ -2506,7 +2519,7 @@ fn schedule_sorts_lessons_by_numeric_sections() {
     harness.login_both_sites();
 
     harness
-        .dispatch(Job::LoadSchedule)
+        .dispatch(Job::LoadSchedule { force: false })
         .expect("课表加载应当成功");
 
     let schedule = harness
@@ -2535,6 +2548,313 @@ fn schedule_sorts_lessons_by_numeric_sections() {
             "显示字符串应与数值节次一致"
         );
     }
+}
+
+/// 取出最近一次課表事件（其餘事件忽略）。
+fn schedule_event(harness: &mut Harness) -> crate::model::ScheduleData {
+    let events = harness.drain_events();
+    // 失敗時帶上實際收到的事件，方便診斷（例如載入失敗的錯誤訊息）。
+    let kinds: Vec<String> = events
+        .iter()
+        .map(|event| match event {
+            Event::Schedule(_) => "schedule".to_owned(),
+            Event::Failed { message, .. } => format!("failed: {message}"),
+            Event::SessionExpired { .. } => "session-expired".to_owned(),
+            Event::LoginProgress(_) => "login-progress".to_owned(),
+            Event::LoadingCancelled { .. } => "loading-cancelled".to_owned(),
+            Event::Notice(message) => format!("notice: {message}"),
+            _ => "other".to_owned(),
+        })
+        .collect();
+    events
+        .into_iter()
+        .find_map(|event| match event {
+            Event::Schedule(data) => Some(*data),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("应发出课表事件（实际事件：{kinds:?}）"))
+}
+
+/// 執行排隊中的資料任務（模擬 [`Worker::run`] 取出佇列中的任務）。
+///
+/// `SetScheduleWeek` 是控制任務：它只記住週次並排入一次載入，真正的載入
+/// 由工作執行緒的佇列取出後執行；同步的測試必須自行模擬這一步。
+fn run_queued(harness: &mut Harness) {
+    let queued: Vec<Job> = harness.worker.pending_data.drain(..).collect();
+    assert!(!queued.is_empty(), "应有排队的载入任务");
+    for job in queued {
+        harness.dispatch(job).expect("排队的载入应当成功");
+    }
+}
+
+/// 課表測試用的假考勤站點：一個學期、一門課（週次 1-30）與空的考勤記錄。
+///
+/// 記錄每個請求；考勤記錄請求額外帶上查詢的日期範圍（`startDate~endDate`），
+/// 用來驗證切週時查的是以學期開始日錨定的那一週。
+fn schedule_site(
+    seen: Arc<Mutex<Vec<String>>>,
+    start: String,
+    end: String,
+    day_of_week: u32,
+) -> impl Fn(&HttpRequest) -> AppResult<HttpResponse> + Send + Sync + 'static {
+    move |request: &HttpRequest| {
+        let url = request.url.clone();
+        let mut label = url.clone();
+        if url.contains("attendance-records")
+            && let Some(Body::Json(body)) = request.body.as_ref()
+        {
+            label = format!(
+                "{url} {}~{}",
+                body["data"]["startDate"].as_str().unwrap_or_default(),
+                body["data"]["endDate"].as_str().unwrap_or_default()
+            );
+        }
+        seen.lock().expect("lock").push(label);
+
+        if url.ends_with("/timetable/semesters") {
+            return Ok(json(serde_json::json!({ "code": 0, "data": [{
+                "semesterId": "s-1",
+                "academicYear": "2026-2027",
+                "semesterName": "第一学期",
+                "startDate": start.clone(),
+                "endDate": end.clone(),
+            }]})));
+        }
+        if url.contains("/timetable/weekly") {
+            return Ok(json(serde_json::json!({ "code": 0, "data": { "courses": [{
+                "courseName": "线性代数",
+                "teacherName": "张老师",
+                "classroomName": "主楼A101",
+                "dayOfWeek": day_of_week,
+                "startSection": 1,
+                "endSection": 2,
+                "weekRanges": "1-30",
+            }]}})));
+        }
+        if url.contains("attendance-records") {
+            return Ok(json(
+                serde_json::json!({ "code": 0, "data": { "rows": [], "total": 0 } }),
+            ));
+        }
+        panic!("未预期的请求：{url}");
+    }
+}
+
+/// 切換週次重用整學期課表快取：只重查該週的考勤記錄，日期以學期開始日錨定。
+#[test]
+fn schedule_week_switch_reuses_the_semester_cache() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let today = chrono::Local::now().date_naive();
+    // 學期開始日為本週週一往回兩週：今天是第 3 週。
+    let (start, day_of_week) = semester_fixture_meeting_today(today, 3);
+    let start_date = chrono::NaiveDate::parse_from_str(&start, "%Y-%m-%d").expect("学期开始日");
+    let end = (today + chrono::Duration::days(90)).to_string();
+    let mut harness = harness(schedule_site(Arc::clone(&seen), start, end, day_of_week));
+    harness.login_both_sites();
+
+    harness
+        .dispatch(Job::LoadSchedule { force: false })
+        .expect("首次载入应当成功");
+    let first = schedule_event(&mut harness);
+    assert_eq!(first.week, 3, "默认显示当前周");
+    assert_eq!(first.total_weeks, 30, "总周数取课程声明的最大周次");
+    seen.lock().expect("lock").clear();
+
+    harness
+        .dispatch(Job::SetScheduleWeek { week: 5 })
+        .expect("切换周次应当成功");
+    run_queued(&mut harness);
+    let switched = schedule_event(&mut harness);
+    assert_eq!(switched.week, 5);
+    assert_eq!(switched.total_weeks, 30);
+    assert_eq!(switched.lessons.len(), 1, "第 5 周仍有课程");
+    let monday = start_date + chrono::Duration::days(28);
+    assert_eq!(
+        switched.lessons[0].date,
+        monday + chrono::Duration::days(i64::from(day_of_week - 1)),
+        "第 5 周的课程日期应以学期开始日锚定"
+    );
+
+    let seen = seen.lock().expect("lock");
+    assert_eq!(seen.len(), 1, "切周只需重查该周考勤：{seen:?}");
+    let sunday = monday + chrono::Duration::days(6);
+    assert!(
+        seen[0].contains(&format!("{monday}~{sunday}")),
+        "第 5 周的考勤范围应以学期开始日锚定：{seen:?}"
+    );
+}
+
+/// 尚未載入過課表就切週：補查學期、整學期課表與該週考勤。
+#[test]
+fn schedule_week_switch_before_first_load_fetches_everything() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let today = chrono::Local::now().date_naive();
+    let (start, day_of_week) = semester_fixture_meeting_today(today, 3);
+    let end = (today + chrono::Duration::days(90)).to_string();
+    let mut harness = harness(schedule_site(Arc::clone(&seen), start, end, day_of_week));
+    harness.login_both_sites();
+
+    harness
+        .dispatch(Job::SetScheduleWeek { week: 2 })
+        .expect("切换周次应当成功");
+    run_queued(&mut harness);
+
+    let schedule = schedule_event(&mut harness);
+    assert_eq!(schedule.week, 2, "未载入过也能直接切到指定周");
+    assert_eq!(schedule.total_weeks, 30);
+    let seen = seen.lock().expect("lock");
+    assert!(
+        seen.iter().any(|url| url.ends_with("/timetable/semesters")),
+        "应补查学期：{seen:?}"
+    );
+    assert!(
+        seen.iter().any(|url| url.contains("/timetable/weekly")),
+        "应补查整学期课表：{seen:?}"
+    );
+    assert!(
+        seen.iter().any(|url| url.contains("attendance-records")),
+        "应补查该周考勤：{seen:?}"
+    );
+}
+
+/// 連續切週：佇列中至多一筆載入，只查最後選定的那一週。
+#[test]
+fn consecutive_week_switches_only_load_the_last_week() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let today = chrono::Local::now().date_naive();
+    let (start, day_of_week) = semester_fixture_meeting_today(today, 3);
+    let start_date = chrono::NaiveDate::parse_from_str(&start, "%Y-%m-%d").expect("学期开始日");
+    let end = (today + chrono::Duration::days(90)).to_string();
+    let mut harness = harness(schedule_site(Arc::clone(&seen), start, end, day_of_week));
+    harness.login_both_sites();
+    harness
+        .dispatch(Job::LoadSchedule { force: false })
+        .expect("首次载入应当成功");
+    let _ = schedule_event(&mut harness);
+    seen.lock().expect("lock").clear();
+
+    harness
+        .dispatch(Job::SetScheduleWeek { week: 4 })
+        .expect("切换周次应当成功");
+    harness
+        .dispatch(Job::SetScheduleWeek { week: 6 })
+        .expect("再次切换应当成功");
+    assert_eq!(harness.worker.pending_data.len(), 1, "同键触发至多保留一笔");
+
+    harness
+        .dispatch(Job::LoadSchedule { force: false })
+        .expect("补跑排队的载入应当成功");
+    let schedule = schedule_event(&mut harness);
+    assert_eq!(schedule.week, 6, "只执行最后选定的周次");
+    let seen = seen.lock().expect("lock");
+    assert_eq!(seen.len(), 1, "中间周次不应发起查询：{seen:?}");
+    let monday = start_date + chrono::Duration::days(35);
+    let sunday = monday + chrono::Duration::days(6);
+    assert!(
+        seen[0].contains(&format!("{monday}~{sunday}")),
+        "只应查询最后选定那一周的考勤：{seen:?}"
+    );
+}
+
+/// `r` 強制刷新保持目前瀏覽的週次，並重新查詢學期與課表（繞過快取）。
+#[test]
+fn forced_refresh_keeps_the_selected_week() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let today = chrono::Local::now().date_naive();
+    let (start, day_of_week) = semester_fixture_meeting_today(today, 3);
+    let end = (today + chrono::Duration::days(90)).to_string();
+    let mut harness = harness(schedule_site(Arc::clone(&seen), start, end, day_of_week));
+    harness.login_both_sites();
+    harness
+        .dispatch(Job::SetScheduleWeek { week: 5 })
+        .expect("切换周次应当成功");
+    run_queued(&mut harness);
+    let _ = schedule_event(&mut harness);
+    seen.lock().expect("lock").clear();
+
+    harness
+        .dispatch(Job::LoadSchedule { force: true })
+        .expect("强制刷新应当成功");
+    let schedule = schedule_event(&mut harness);
+    assert_eq!(schedule.week, 5, "刷新不应跳回当前周");
+    let seen = seen.lock().expect("lock");
+    assert!(
+        seen.iter().any(|url| url.ends_with("/timetable/semesters")),
+        "强制刷新应重查学期：{seen:?}"
+    );
+    assert!(
+        seen.iter().any(|url| url.contains("/timetable/weekly")),
+        "强制刷新应重查整学期课表：{seen:?}"
+    );
+    assert!(
+        seen.iter().any(|url| url.contains("attendance-records")),
+        "强制刷新应重查该周考勤：{seen:?}"
+    );
+}
+
+/// 學期已結束時明確切週：補查該週課表與考勤（預設載入仍不查詢）。
+#[test]
+fn explicit_week_after_semester_end_loads_that_week() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let today = chrono::Local::now().date_naive();
+    let start = (today - chrono::Duration::days(90)).to_string();
+    let end = (today - chrono::Duration::days(3)).to_string();
+    let mut harness = harness(schedule_site(Arc::clone(&seen), start, end, 1));
+    harness.login_both_sites();
+
+    harness
+        .dispatch(Job::LoadSchedule { force: false })
+        .expect("默认载入应当成功");
+    let ended = schedule_event(&mut harness);
+    assert!(ended.lessons.is_empty(), "学期结束后默认不显示旧课程");
+    assert!(
+        ended
+            .notice
+            .as_deref()
+            .unwrap_or_default()
+            .contains("已结束"),
+        "默认载入应提示学期已结束：{:?}",
+        ended.notice
+    );
+
+    harness
+        .dispatch(Job::SetScheduleWeek { week: 3 })
+        .expect("切换周次应当成功");
+    run_queued(&mut harness);
+    let schedule = schedule_event(&mut harness);
+    assert_eq!(schedule.week, 3, "明确切周应加载该周");
+    assert!(schedule.notice.is_none(), "明确切周不再提示学期已结束");
+    assert_eq!(schedule.lessons.len(), 1, "补查的课表应有第 3 周的课程");
+    assert_eq!(schedule.total_weeks, 30);
+}
+
+/// 同一週次重複切換不重複查詢。
+#[test]
+fn set_schedule_week_same_value_is_a_no_op() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let today = chrono::Local::now().date_naive();
+    let (start, day_of_week) = semester_fixture_meeting_today(today, 3);
+    let end = (today + chrono::Duration::days(90)).to_string();
+    let mut harness = harness(schedule_site(Arc::clone(&seen), start, end, day_of_week));
+    harness.login_both_sites();
+    harness
+        .dispatch(Job::SetScheduleWeek { week: 5 })
+        .expect("切换周次应当成功");
+    run_queued(&mut harness);
+    let _ = schedule_event(&mut harness);
+    seen.lock().expect("lock").clear();
+
+    harness
+        .dispatch(Job::SetScheduleWeek { week: 5 })
+        .expect("同值切换应当成功");
+    assert!(
+        harness.worker.pending_data.is_empty(),
+        "同值切换不应排队任何载入"
+    );
+    assert!(
+        seen.lock().expect("lock").is_empty(),
+        "同值切换不应发出请求"
+    );
 }
 
 #[test]
@@ -3099,7 +3419,7 @@ fn only_open_activity_is_interactive() {
     );
 
     for job in [
-        Job::LoadSchedule,
+        Job::LoadSchedule { force: false },
         Job::LoadHomework { force: false },
         Job::LoadFlow { page: 1 },
         Job::LoadCourses { force: false },
@@ -3126,7 +3446,10 @@ fn flush_interactive_runs_the_queued_open_and_keeps_other_jobs() {
         panic!("开启作业网页不需任何请求：{}", request.url);
     });
     harness.login_lms_only();
-    harness.worker.pending_data.push_back(Job::LoadSchedule);
+    harness
+        .worker
+        .pending_data
+        .push_back(Job::LoadSchedule { force: false });
     harness.worker.pending_data.push_back(Job::OpenActivity {
         activity_id: "5".to_owned(),
         course_id: Some("9".to_owned()),
@@ -3149,7 +3472,10 @@ fn flush_interactive_runs_the_queued_open_and_keeps_other_jobs() {
         1,
         "非互动式任务不符条件，不得被执行"
     );
-    assert!(matches!(harness.worker.pending_data[0], Job::LoadSchedule));
+    assert!(matches!(
+        harness.worker.pending_data[0],
+        Job::LoadSchedule { .. }
+    ));
 }
 
 // ── 互動式任務執行期間的控制任務插隊窗口 ──────────────
@@ -4887,7 +5213,7 @@ fn cancel_login_settles_a_page_when_the_flow_already_ended() {
     let mut harness = harness(|_request: &HttpRequest| panic!("取消登录不应触发网络请求"));
     assert!(harness.worker.flow.is_none());
     assert!(harness.worker.pending_vault.is_none());
-    harness.worker.retry = Some(Job::LoadSchedule);
+    harness.worker.retry = Some(Job::LoadSchedule { force: false });
 
     harness
         .dispatch(Job::CancelLogin)

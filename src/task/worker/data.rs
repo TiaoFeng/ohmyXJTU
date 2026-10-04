@@ -13,80 +13,119 @@ use crate::model::{ActivityDetailView, FlowData, LessonEntry, ScheduleData};
 use crate::session::SiteKind;
 use crate::sites::attendance::{AttendanceApi, RecordBatch};
 use crate::sites::lms::{self, ActivityKind, LmsActivity, LmsApi};
-use crate::task::protocol::{CoursesData, Event};
+use crate::task::protocol::{CoursesData, Event, Job};
 
+use super::cache::ScheduleCache;
 use super::{Worker, is_recoverable};
 
 /// 考勤流水分頁大小。
 const FLOW_PAGE_SIZE: u32 = 20;
 
 impl Worker {
-    /// 課表（本週）與本週考勤。
-    pub(super) fn load_schedule(&mut self) -> AppResult<ScheduleData> {
-        let semester = {
-            let session = self.session_mut()?;
-            AttendanceApi::new(session).current_semester()?
-        };
+    /// 課表（指定週次；未指定時為當前週）與該週考勤。
+    ///
+    /// 課表端點一次回傳整學期課程（`weekRanges`），本週只是客戶端過濾的結果；
+    /// 因此整學期課程保存在 [`ScheduleCache`]，切換週次只需重查該週的考勤記錄。
+    /// `force`（使用者按 `r`）或快取不存在時重新查詢學期與課表。
+    ///
+    /// 學期已結束／尚未開始時，**自動載入**（未指定週次）不查課表與考勤記錄，
+    /// 只顯示空狀態與提示；使用者明確切到某一週時才補查該週
+    ///（見 [`Worker::set_schedule_week`]）。
+    pub(super) fn load_schedule(&mut self, force: bool) -> AppResult<ScheduleData> {
         let today = Local::now().date_naive();
-        let semester_start = parse_date(&semester.start_date)?;
-        // `end_date` 為選填：缺失或無法解析時不啟用「已結束」判斷（不讓整個
-        // 頁面因此失敗），但可解析時一定以它為準。
-        let semester_end = semester
-            .end_date
-            .as_deref()
-            .and_then(|raw| NaiveDate::parse_from_str(raw.trim(), "%Y-%m-%d").ok());
-        let term = semester.term_name();
-        let label = semester.display_label();
-        // 記錄本會話得知的學期，供思源學堂課程分區使用（不重複查詢考勤）。
-        self.known_term = term.as_deref().and_then(TermCode::parse);
+        // 「自動」＝跟隨當前週（使用者尚未切週）：學期外的早退只適用於它。
+        let auto = self.schedule_week.is_none();
 
-        // 學期外（已結束／尚未開始）不查課表與考勤記錄，只顯示空狀態與提示：
-        // 夾取週次會讓學期結束後仍顯示最後一週的舊課程，而考勤只涵蓋當前
-        // 日曆週，結果必然全部「待核实」——不得如此呈現。
-        if let Some(end) = semester_end.filter(|end| today > *end) {
-            return Ok(off_session_schedule(
-                &label,
-                schedule::clamp_week(
-                    schedule::week_number(semester_start, today),
-                    term.as_deref().unwrap_or(""),
-                ),
-                format!("本学期已结束（{end}）"),
-            ));
-        }
-        if today < semester_start {
-            return Ok(off_session_schedule(
-                &label,
-                1,
-                format!("本学期尚未开始（{semester_start}）"),
-            ));
+        if force || self.schedule_cache.is_none() {
+            let semester = {
+                let session = self.session_mut()?;
+                AttendanceApi::new(session).current_semester()?
+            };
+            let start = parse_date(&semester.start_date)?;
+            // `end_date` 為選填：缺失或無法解析時不啟用「已結束」判斷（不讓整個
+            // 頁面因此失敗），但可解析時一定以它為準。
+            let end = semester
+                .end_date
+                .as_deref()
+                .and_then(|raw| NaiveDate::parse_from_str(raw.trim(), "%Y-%m-%d").ok());
+            let term = semester.term_name();
+            let label = semester.display_label();
+            // 記錄本會話得知的學期，供思源學堂課程分區使用（不重複查詢考勤）。
+            self.known_term = term.as_deref().and_then(TermCode::parse);
+
+            // 學期外（已結束／尚未開始）不查課表與考勤記錄，只顯示空狀態與
+            // 提示：夾取週次會讓學期結束後仍顯示最後一週的舊課程，而考勤只
+            // 涵蓋當前日曆週，結果必然全部「待核实」——不得如此呈現。
+            //（使用者明確切週時不在此列：他就是要看那一週。）
+            if auto {
+                let term_name = term.as_deref().unwrap_or("");
+                if let Some(end_date) = end.filter(|end| today > *end) {
+                    return Ok(off_session_schedule(
+                        &label,
+                        schedule::clamp_week(schedule::week_number(start, today), term_name),
+                        schedule::total_weeks(start, Some(end_date), None, term_name),
+                        format!("本学期已结束（{end_date}）"),
+                    ));
+                }
+                if today < start {
+                    return Ok(off_session_schedule(
+                        &label,
+                        1,
+                        schedule::total_weeks(start, end, None, term_name),
+                        format!("本学期尚未开始（{start}）"),
+                    ));
+                }
+            }
+
+            let courses = {
+                let session = self.session_mut()?;
+                AttendanceApi::new(session).weekly_courses(&semester.semester_id)?
+            };
+            let slots = schedule::merge_courses(&courses);
+            let skipped = courses
+                .iter()
+                .filter(|course| schedule::parse_weeks(&course.week_ranges).is_empty())
+                .count();
+            let max_week = slots
+                .iter()
+                .flat_map(|slot| slot.weeks.iter().copied())
+                .max();
+            self.schedule_cache = Some(ScheduleCache {
+                label,
+                start,
+                end,
+                term,
+                slots,
+                skipped,
+                max_week,
+            });
         }
 
-        let courses = {
-            let session = self.session_mut()?;
-            AttendanceApi::new(session).weekly_courses(&semester.semester_id)?
+        let cache = self
+            .schedule_cache
+            .clone()
+            .ok_or_else(|| AppError::config("课表缓存尚未建立"))?;
+        let term_name = cache.term.clone().unwrap_or_default();
+        let total = schedule::total_weeks(cache.start, cache.end, cache.max_week, &term_name);
+        let week = self
+            .schedule_week
+            .unwrap_or_else(|| schedule::week_number(cache.start, today))
+            .clamp(1, total);
+        let Some((monday, sunday)) = schedule::week_bounds(cache.start, week) else {
+            return Err(AppError::protocol("周次超出可表示的日期范围"));
         };
-        let week = schedule::week_number(semester_start, today);
 
-        let (monday, sunday) = schedule::week_window(today);
         let RecordBatch { records, truncated } = {
             let session = self.session_mut()?;
             AttendanceApi::new(session).records_between(monday, sunday)?
         };
 
-        let skipped = courses
-            .iter()
-            .filter(|course| schedule::parse_weeks(&course.week_ranges).is_empty())
-            .count();
-
         let mut lessons: Vec<LessonEntry> = Vec::new();
-        for slot in schedule::merge_courses(&courses)
-            .into_iter()
-            .filter(|slot| slot.is_in_week(week))
-        {
-            let Some(date) = slot.date_in_week(semester_start, week) else {
+        for slot in cache.slots.iter().filter(|slot| slot.is_in_week(week)) {
+            let Some(date) = slot.date_in_week(cache.start, week) else {
                 continue;
             };
-            let status = attendance_match::status_for(&slot, date, &records);
+            let status = attendance_match::status_for(slot, date, &records);
             let weeks = slot.weeks_label();
             lessons.push(LessonEntry {
                 date,
@@ -113,12 +152,27 @@ impl Worker {
         });
 
         Ok(ScheduleData {
-            semester: label,
+            semester: cache.label,
             week,
+            total_weeks: total,
             lessons,
-            skipped,
+            skipped: cache.skipped,
             notice,
         })
+    }
+
+    /// 記住使用者選擇的週次並重新載入課表（`[`／`]`）。
+    ///
+    /// 週次保存在工作者狀態（如同作業的學期選擇）：任務本身只是觸發，因此
+    /// 佇列中至多保留一筆載入，連續切週只會執行最後一週；進行中的舊週結果
+    /// 由 [`Worker::load_once`] 丟棄。
+    pub(super) fn set_schedule_week(&mut self, week: u32) -> AppResult<()> {
+        if self.schedule_week == Some(week) {
+            return Ok(());
+        }
+        self.schedule_week = Some(week);
+        self.merge_data_job(Job::LoadSchedule { force: false }, None);
+        Ok(())
     }
 
     /// 嘗試由考勤系統取得當前學期；未登入時回傳 `Ok(None)`（不觸發登入）。
@@ -265,10 +319,16 @@ impl Worker {
 }
 
 /// 學期外的空課表（沒有本週課程，只有提示原因）。
-fn off_session_schedule(semester: &str, week: u32, notice: String) -> ScheduleData {
+fn off_session_schedule(
+    semester: &str,
+    week: u32,
+    total_weeks: u32,
+    notice: String,
+) -> ScheduleData {
     ScheduleData {
         semester: semester.to_owned(),
         week,
+        total_weeks,
         lessons: Vec::new(),
         skipped: 0,
         notice: Some(notice),

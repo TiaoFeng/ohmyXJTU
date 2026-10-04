@@ -56,8 +56,18 @@ pub enum Job {
         /// 加密口令（用於登入成功後更新保險庫）。
         passphrase: Secret,
     },
-    /// 載入課表（含本週考勤）。
-    LoadSchedule,
+    /// 載入課表（含指定週次的考勤）。
+    ///
+    /// 週次由 [`Job::SetScheduleWeek`] 保存在工作者狀態；未指定時跟隨當前週。
+    LoadSchedule {
+        /// 是否略過課表快取強制重新查詢（使用者按 `r`）。
+        force: bool,
+    },
+    /// 記住使用者選擇的週次，並重新載入課表（`[`／`]`）。
+    SetScheduleWeek {
+        /// 目標週次（1 起算）。
+        week: u32,
+    },
     /// 載入作業彙總。
     LoadHomework {
         /// 是否略過快取強制重新查詢。
@@ -136,7 +146,8 @@ impl Job {
             Self::SendMfaCode | Self::VerifyMfaCode(_) => "短信验证".to_owned(),
             Self::RetryLogin { .. } => "登录".to_owned(),
             Self::RetryWithAccount { .. } => "重新输入账户".to_owned(),
-            Self::LoadSchedule => "课表".to_owned(),
+            Self::LoadSchedule { .. } => "课表".to_owned(),
+            Self::SetScheduleWeek { .. } => "课表周次".to_owned(),
             Self::LoadHomework { .. } => "作业".to_owned(),
             Self::LoadFlow { .. } => "考勤流水".to_owned(),
             Self::LoadCourses { .. }
@@ -157,7 +168,7 @@ impl Job {
     pub fn is_control(&self) -> bool {
         !matches!(
             self,
-            Self::LoadSchedule
+            Self::LoadSchedule { .. }
                 | Self::LoadHomework { .. }
                 | Self::LoadFlow { .. }
                 | Self::LoadCourses { .. }
@@ -179,7 +190,7 @@ impl Job {
     /// 資料任務的合併鍵；同鍵的排隊請求視為重複而合併。
     pub(super) fn data_key(&self) -> Option<DataKey> {
         match self {
-            Self::LoadSchedule => Some(DataKey::Schedule),
+            Self::LoadSchedule { .. } => Some(DataKey::Schedule),
             Self::LoadHomework { .. } => Some(DataKey::Homework),
             Self::LoadFlow { page } => Some(DataKey::Flow(*page)),
             Self::LoadCourses { .. } => Some(DataKey::Courses),
@@ -194,10 +205,11 @@ impl Job {
         }
     }
 
-    /// 是否為略過快取的強制刷新（僅作業、課程與活動載入帶有 `force`）。
+    /// 是否為略過快取的強制刷新（課表、作業、課程與活動載入帶有 `force`）。
     pub(super) fn is_forced(&self) -> bool {
         match self {
-            Self::LoadHomework { force }
+            Self::LoadSchedule { force }
+            | Self::LoadHomework { force }
             | Self::LoadCourses { force }
             | Self::LoadActivities { force, .. } => *force,
             _ => false,
@@ -437,7 +449,7 @@ pub(super) fn is_account_switch_step(job: &Job) -> bool {
 /// 任務所屬站點。
 pub(super) fn site_of(job: &Job) -> Option<SiteKind> {
     match job {
-        Job::LoadSchedule | Job::LoadFlow { .. } => Some(SiteKind::Attendance),
+        Job::LoadSchedule { .. } | Job::LoadFlow { .. } => Some(SiteKind::Attendance),
         Job::LoadHomework { .. }
         | Job::LoadCourses { .. }
         | Job::LoadActivities { .. }
@@ -450,7 +462,7 @@ pub(super) fn site_of(job: &Job) -> Option<SiteKind> {
 /// 任務失敗時應由介面標記的位置。
 pub(super) fn failed_target_of(job: &Job) -> FailedTarget {
     match job {
-        Job::LoadSchedule => FailedTarget::Schedule,
+        Job::LoadSchedule { .. } | Job::SetScheduleWeek { .. } => FailedTarget::Schedule,
         Job::LoadHomework { .. } => FailedTarget::Homework,
         Job::LoadFlow { .. } => FailedTarget::Flow,
         Job::LoadCourses { .. } => FailedTarget::Courses,

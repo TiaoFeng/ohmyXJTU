@@ -135,19 +135,14 @@ fn anchors_week_bounds_to_semester_start() {
 }
 
 #[test]
-fn computes_total_weeks_from_end_and_courses() {
-    let start = NaiveDate::from_ymd_opt(2026, 9, 7).unwrap();
-    // 2026-12-28 落在第 17 週。
-    let end = NaiveDate::from_ymd_opt(2026, 12, 28).unwrap();
-    assert_eq!(week_number(start, end), 17);
-    assert_eq!(total_weeks(start, Some(end), None, "2026-2027-1"), 17);
-    // 課程聲明更長的週次時以課程為準（調課等）。
-    assert_eq!(total_weeks(start, Some(end), Some(23), "2026-2027-1"), 23);
-    // 結束日缺失時看課程週次。
-    assert_eq!(total_weeks(start, None, Some(19), "2026-2027-1"), 19);
-    // 兩者皆缺時回退教學週數（一般 22、小學期 8）。
-    assert_eq!(total_weeks(start, None, None, "2026-2027-1"), 22);
-    assert_eq!(total_weeks(start, None, None, "2026-2027-3"), 8);
+fn bounds_weeks_by_the_last_course_week() {
+    // 課表最晚有課的週次就是上限（與參考實作的考勤來源一致）。
+    assert_eq!(total_weeks(Some(19), 12), 19);
+    // 目前顯示的週次超出課表週次時（考試週）至少涵蓋它，避免 N > M。
+    assert_eq!(total_weeks(Some(16), 20), 20);
+    // 沒有課表資料時以顯示週次為上限，不謊報教學週數。
+    assert_eq!(total_weeks(None, 7), 7);
+    assert_eq!(total_weeks(None, 0), 1);
 }
 
 #[test]

@@ -2587,15 +2587,26 @@ fn run_queued(harness: &mut Harness) {
     }
 }
 
-/// 課表測試用的假考勤站點：一個學期、一門課（週次 1-30）與空的考勤記錄。
-///
-/// 記錄每個請求；考勤記錄請求額外帶上查詢的日期範圍（`startDate~endDate`），
-/// 用來驗證切週時查的是以學期開始日錨定的那一週。
+/// 課表測試用的假考勤站點：一個學期、一門課（週次 `1-30`）與空的考勤記錄。
 fn schedule_site(
     seen: Arc<Mutex<Vec<String>>>,
     start: String,
     end: String,
     day_of_week: u32,
+) -> impl Fn(&HttpRequest) -> AppResult<HttpResponse> + Send + Sync + 'static {
+    schedule_site_with_weeks(seen, start, end, day_of_week, "1-30")
+}
+
+/// 同上，但可指定課程的 `weekRanges`（用來驗證週次上限的來源）。
+///
+/// 記錄每個請求；考勤記錄請求額外帶上查詢的日期範圍（`startDate~endDate`），
+/// 用來驗證切週時查的是以學期開始日錨定的那一週。
+fn schedule_site_with_weeks(
+    seen: Arc<Mutex<Vec<String>>>,
+    start: String,
+    end: String,
+    day_of_week: u32,
+    week_ranges: &'static str,
 ) -> impl Fn(&HttpRequest) -> AppResult<HttpResponse> + Send + Sync + 'static {
     move |request: &HttpRequest| {
         let url = request.url.clone();
@@ -2628,7 +2639,7 @@ fn schedule_site(
                 "dayOfWeek": day_of_week,
                 "startSection": 1,
                 "endSection": 2,
-                "weekRanges": "1-30",
+                "weekRanges": week_ranges,
             }]}})));
         }
         if url.contains("attendance-records") {
@@ -2855,6 +2866,38 @@ fn set_schedule_week_same_value_is_a_no_op() {
         seen.lock().expect("lock").is_empty(),
         "同值切换不应发出请求"
     );
+}
+
+/// 學期結束日涵蓋考試週與假期（考勤入口實測可到第 23 週）時，週次上限仍以
+/// 「課表最晚有課的週次」為準——參考實作的考勤來源就是這樣算的（教務系統的
+/// 「總周次」欄位考勤 API 並未提供）。
+#[test]
+fn week_bound_follows_the_last_course_week_not_the_semester_end() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let today = chrono::Local::now().date_naive();
+    let (start, day_of_week) = semester_fixture_meeting_today(today, 3);
+    // 結束日遠在課表之後：從第 3 週再往後 130 天約為第 21 週。
+    let end = (today + chrono::Duration::days(130)).to_string();
+    let mut harness = harness(schedule_site_with_weeks(
+        Arc::clone(&seen),
+        start,
+        end,
+        day_of_week,
+        "1-19",
+    ));
+    harness.login_both_sites();
+
+    harness
+        .dispatch(Job::LoadSchedule { force: false })
+        .expect("课表加载应当成功");
+
+    let schedule = schedule_event(&mut harness);
+    assert_eq!(schedule.week, 3);
+    assert_eq!(
+        schedule.total_weeks, 19,
+        "上限应取课表最晚有课的周次，而不是学期结束日推算出的周次"
+    );
+    assert_eq!(schedule.lessons.len(), 1, "第 3 周仍有课程");
 }
 
 #[test]

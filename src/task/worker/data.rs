@@ -63,7 +63,7 @@ impl Worker {
                     return Ok(off_session_schedule(
                         &label,
                         schedule::clamp_week(schedule::week_number(start, today), term_name),
-                        schedule::total_weeks(start, Some(end_date), None, term_name),
+                        schedule::semester_length(term_name),
                         format!("本学期已结束（{end_date}）"),
                     ));
                 }
@@ -71,7 +71,7 @@ impl Worker {
                     return Ok(off_session_schedule(
                         &label,
                         1,
-                        schedule::total_weeks(start, end, None, term_name),
+                        schedule::semester_length(term_name),
                         format!("本学期尚未开始（{start}）"),
                     ));
                 }
@@ -93,8 +93,6 @@ impl Worker {
             self.schedule_cache = Some(ScheduleCache {
                 label,
                 start,
-                end,
-                term,
                 slots,
                 skipped,
                 max_week,
@@ -105,12 +103,11 @@ impl Worker {
             .schedule_cache
             .clone()
             .ok_or_else(|| AppError::config("课表缓存尚未建立"))?;
-        let term_name = cache.term.clone().unwrap_or_default();
-        let total = schedule::total_weeks(cache.start, cache.end, cache.max_week, &term_name);
         let week = self
             .schedule_week
-            .unwrap_or_else(|| schedule::week_number(cache.start, today))
-            .clamp(1, total);
+            .unwrap_or_else(|| schedule::week_number(cache.start, today));
+        // 週次上限＝課表最晚有課的週次（至少涵蓋目前顯示的週次）。
+        let total = schedule::total_weeks(cache.max_week, week);
         let Some((monday, sunday)) = schedule::week_bounds(cache.start, week) else {
             return Err(AppError::protocol("周次超出可表示的日期范围"));
         };

@@ -42,10 +42,6 @@ pub(super) struct ScheduleCache {
     pub(super) label: String,
     /// 學期開始日（週次計算的錨點）。
     pub(super) start: NaiveDate,
-    /// 學期結束日（可解析時）。
-    pub(super) end: Option<NaiveDate>,
-    /// 學期代碼（`YYYY-YYYY+1-T`；無法識別時為 `None`）。
-    pub(super) term: Option<String>,
     /// 合併後的課程時段。
     pub(super) slots: Vec<CourseSlot>,
     /// 因週次格式問題被跳過的課程筆數。

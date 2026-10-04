@@ -40,7 +40,7 @@ pub struct ScheduleData {
     pub semester: String,
     /// 本週週次。
     pub week: u32,
-    /// 學期總週數（切換週次的邊界）。
+    /// 週次上限（切換週次的邊界）：課表最晚有課的週次，至少涵蓋目前顯示的週次。
     pub total_weeks: u32,
     /// 本週課程。
     pub lessons: Vec<LessonEntry>,

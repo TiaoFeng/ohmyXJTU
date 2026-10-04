@@ -169,24 +169,13 @@ pub fn clamp_week(week: u32, term_name: &str) -> u32 {
     week.clamp(1, semester_length(term_name))
 }
 
-/// 學期總週數：取「學期結束日所在週」與「課程最大週次」的較大者；
-/// 兩者皆缺時回退教學週數（一般學期 22、小學期 8）。
+/// 學期週數上限：以「課表裡最晚有課的週次」為準（與參考實作的考勤來源一致）；
+/// 課表尚無資料時至少涵蓋目前顯示的週次，避免出現「第 N/M 周」而 N > M。
 ///
-/// 用於課表切週的邊界：結束日涵蓋考試週時以結束日為準，課程若聲明更長的
-/// 週次（調課等）也能瀏覽到；學校資料都不完整時至少給出教學週數。
-pub fn total_weeks(
-    semester_start: NaiveDate,
-    semester_end: Option<NaiveDate>,
-    max_course_week: Option<u32>,
-    term_name: &str,
-) -> u32 {
-    let from_end = semester_end.map(|end| week_number(semester_start, end));
-    [from_end, max_course_week]
-        .into_iter()
-        .flatten()
-        .max()
-        .unwrap_or_else(|| semester_length(term_name))
-        .max(1)
+/// 刻意**不由學期結束日推算**：考勤入口的結束日涵蓋考試週與假期（實測可到
+/// 第 23 週），而教務系統的「總周次」（`ZZC`）考勤 API 並未提供。
+pub fn total_weeks(max_course_week: Option<u32>, display_week: u32) -> u32 {
+    max_course_week.unwrap_or(0).max(display_week).max(1)
 }
 
 fn non_empty(value: String) -> Option<String> {

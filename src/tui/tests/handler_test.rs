@@ -722,6 +722,7 @@ fn bracket_keys_switch_homework_group_only_on_homework_page() {
 }
 
 /// 課表頁的 `[`／`]` 切換週次：標題立即顯示目標週、內容進入載入中，
+/// 記下待回的目標週次（供 `event::apply_schedule` 丟棄遲到的舊週結果），
 /// 並送出 `SetScheduleWeek`；到邊界不動作。
 #[test]
 fn bracket_keys_switch_schedule_week_on_schedule_page() {
@@ -738,6 +739,7 @@ fn bracket_keys_switch_schedule_week_on_schedule_page() {
     app.schedule_total = Some(5);
     press(&mut app, &jobs, KeyCode::Char(']'));
     assert_eq!(app.schedule_week, Some(4), "标题应立即显示目标周");
+    assert_eq!(app.schedule_pending_week, Some(4), "应记下待回的目标周次");
     assert!(app.schedule.is_loading(), "内容应进入加载中");
     assert!(matches!(
         rx.try_recv(),
@@ -746,6 +748,7 @@ fn bracket_keys_switch_schedule_week_on_schedule_page() {
 
     press(&mut app, &jobs, KeyCode::Char('['));
     assert_eq!(app.schedule_week, Some(3));
+    assert_eq!(app.schedule_pending_week, Some(3));
     assert!(matches!(
         rx.try_recv(),
         Ok(Job::SetScheduleWeek { week: 3 })

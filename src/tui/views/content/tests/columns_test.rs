@@ -183,3 +183,33 @@ fn schedule_columns_refuse_widths_below_minimum() {
     assert_eq!(minimum.teacher, 0);
     assert_eq!(schedule_min_row_width(), 40);
 }
+
+// ── 任務列標籤欄 ───────────────────────────────────────
+
+/// 自訂義任務（標籤可選）。
+fn tagged_task(content: &str, tag: Option<&str>) -> Task {
+    Task {
+        id: 0,
+        content: content.to_owned(),
+        description: None,
+        tag: tag.map(str::to_owned),
+        deadline: None,
+        priority: crate::domain::todo::Priority::Low,
+        completed: false,
+    }
+}
+
+#[test]
+fn task_label_needs_grow_with_the_tag() {
+    let plain = tagged_task("写报告", None);
+    let tagged = tagged_task("写报告", Some("实验"));
+
+    let needs = RowNeeds::of_tasks(&[&plain]);
+    assert_eq!(needs.label, 2, "没有标签时标签栏只需放得下优先级");
+    assert_eq!(needs.title, 6);
+
+    let needs = RowNeeds::of_tasks(&[&plain, &tagged]);
+    assert_eq!(needs.label, 8, "优先级 2 + 全角中点 2 + 标签 4");
+    assert_eq!(TASK_PRIORITY_WIDTH, 2, "标签由优先级之后开始");
+    assert_eq!(display_width(TAG_SEPARATOR), 2);
+}

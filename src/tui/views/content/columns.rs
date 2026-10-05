@@ -131,8 +131,10 @@ const TITLE_MIN_WIDTH: usize = 6;
 const HOMEWORK_COURSE_MIN_WIDTH: usize = 6;
 /// 活動類型欄寬（最寬標籤「课程内容」為四個全角字）。
 const ACTIVITY_KIND_WIDTH: usize = 8;
-/// 任務列標籤欄（優先級）的寬度（「高」為兩個全角字）。
-const TASK_PRIORITY_WIDTH: usize = 2;
+/// 任務列標籤欄（優先級）的寬度（「高」為兩個全角字）；標籤接在它之後。
+pub(super) const TASK_PRIORITY_WIDTH: usize = 2;
+/// 任務列標籤欄中分隔優先級與標籤的字元（全形中點，佔 2 欄）。
+pub(super) const TAG_SEPARATOR: &str = "・";
 
 /// 作業與活動清單的欄寬（單位為終端顯示欄）。
 ///
@@ -194,10 +196,19 @@ impl RowNeeds {
         }
     }
 
-    /// 由自訂義任務列組出需求（標籤欄放優先級，寬度固定）。
+    /// 由自訂義任務列組出需求（標籤欄放優先級與選填標籤）。
     pub(super) fn of_tasks(tasks: &[&Task]) -> Self {
         Self {
-            label: TASK_PRIORITY_WIDTH,
+            label: tasks
+                .iter()
+                .map(|task| match task.display_tag() {
+                    Some(tag) => {
+                        TASK_PRIORITY_WIDTH + display_width(TAG_SEPARATOR) + display_width(tag)
+                    }
+                    None => TASK_PRIORITY_WIDTH,
+                })
+                .max()
+                .unwrap_or(TASK_PRIORITY_WIDTH),
             title: tasks
                 .iter()
                 .map(|task| display_width(&task.content))

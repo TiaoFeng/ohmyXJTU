@@ -21,6 +21,7 @@ fn task(
         id,
         content: content.to_owned(),
         description: None,
+        tag: None,
         deadline,
         priority,
         completed: false,
@@ -175,6 +176,7 @@ fn task_round_trips_through_json() {
         id: 7,
         content: "写实验报告".to_owned(),
         description: Some("第三章".to_owned()),
+        tag: Some("实验".to_owned()),
         deadline: Some(at(23, 59, 59)),
         priority: Priority::High,
         completed: true,
@@ -337,4 +339,69 @@ fn sort_keys_use_display_free_deadlines_and_numeric_task_ids() {
     let key = task_sort_key(&task(1, "a", None, Priority::Low));
     assert_eq!(key.missing_deadline, 1);
     assert_eq!(key.deadline, 0);
+}
+
+// ── 標籤 ───────────────────────────────────────────────
+
+/// 帶標籤的測試用任務。
+fn tagged(id: u64, content: &str, tag: Option<&str>) -> Task {
+    Task {
+        tag: tag.map(str::to_owned),
+        ..task(id, content, None, Priority::Low)
+    }
+}
+
+#[test]
+fn normalize_tag_trims_and_rejects_blank() {
+    assert_eq!(normalize_tag("  实验 ").as_deref(), Some("实验"));
+    assert_eq!(normalize_tag(""), None);
+    assert_eq!(normalize_tag("   "), None, "只剩空白视为没有标签");
+    assert_eq!(
+        normalize_tag("实验 报告").as_deref(),
+        Some("实验 报告"),
+        "中间的空白保留"
+    );
+}
+
+#[test]
+fn tag_fits_counts_display_width() {
+    // 六個漢字＝ 12 欄：剛好放得下，第七個放不下。
+    assert_eq!(TAG_MAX_WIDTH, 12);
+    assert_eq!(display_width("六个汉字"), 8);
+    assert!(tag_fits("六个汉字", ""));
+    assert!(tag_fits("六个汉字宽度", ""), "六个汉字刚好到上限");
+    assert!(!tag_fits("六个汉字宽度", "啊"), "第七个汉字超出上限");
+    // 全形字佔 2 欄、ASCII 佔 1 欄，一律以顯示寬度計算。
+    assert!(tag_fits("abcdefghijk", "l"));
+    assert!(!tag_fits("abcdefghijkl", "m"));
+}
+
+#[test]
+fn tag_options_keep_first_occurrence_order() {
+    let tasks = vec![
+        tagged(1, "甲", Some("作业")),
+        tagged(2, "乙", None),
+        tagged(3, "丙", Some("实验")),
+        tagged(4, "丁", Some("作业")),
+        tagged(5, "戊", Some("   ")),
+    ];
+    assert_eq!(
+        tag_options(&tasks),
+        vec!["作业".to_owned(), "实验".to_owned()],
+        "去重并保留首次出现顺序，空白标签忽略"
+    );
+    assert!(tag_options(&[]).is_empty());
+}
+
+#[test]
+fn task_matches_also_checks_the_tag() {
+    let task = tagged(1, "写实验报告", Some("物理"));
+    assert!(task.matches("物理"), "标签应可被搜索命中");
+    assert!(task.matches("实验"), "内容仍可命中");
+    assert!(!task.matches("化学"));
+    assert_eq!(
+        tagged(1, "甲", Some("   ")).display_tag(),
+        None,
+        "只剩空白的标签视为没有标签"
+    );
 }

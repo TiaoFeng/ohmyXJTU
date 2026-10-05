@@ -14,9 +14,9 @@ use std::time::Duration;
 use url::Url;
 
 use super::ReqwestClient;
-use crate::auth::webvpn;
 use crate::error::{AppError, NetworkKind};
 use crate::http::{HttpClient, HttpRequest};
+use crate::webvpn;
 
 /// 啟動最小 HTTP 伺服器。
 ///

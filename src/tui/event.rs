@@ -295,8 +295,10 @@ fn apply_homework(app: &mut App, update: HomeworkUpdate) {
 /// 任務可能因為標記完成而換分組（不在目前分組時就找不到），因此優先用識別碼
 /// 重新定位；找不到才把索引夾在新長度內。
 ///
-/// 表單開啟時代表使用者剛送出新增／修改：快照就是那次操作的結果，面板必須
-/// 關起來（否則會永遠停在「正在保存…」，連 `esc` 都被 busy 擋住）。
+/// 表單**正在送出**（`busy`）時收到的快照就是那次操作的結果：面板必須關起來
+///（否則會永遠停在「正在保存…」，連 `esc` 都被 busy 擋住）。尚未送出的表單
+///（使用者剛按下 `^a`／`^e`）不得關閉——背景任務操作（例如 `space` 標記完成）
+/// 的快照可能恰好在此時抵達，關掉會讓剛輸入的內容消失。
 ///
 /// 這裡刻意不切換根畫面：解鎖時任務服務會先回報一次快照（`InitTasks` 排在
 /// `VaultReady` 之前送出），那時介面還停在解鎖表單，不該被任務快照拉進主畫面
@@ -304,7 +306,9 @@ fn apply_homework(app: &mut App, update: HomeworkUpdate) {
 fn apply_tasks(app: &mut App, tasks: Vec<Task>) {
     let previous = app.task_page_selected_id();
     app.tasks = tasks;
-    if matches!(app.screen, Screen::TaskForm(_)) {
+    if let Screen::TaskForm(form) = &app.screen
+        && form.busy
+    {
         app.set_screen(Screen::Main);
     }
     // 已刪除的任務不再存在：把殘留的勾選一併清掉，避免多選集合持續累積。

@@ -270,6 +270,40 @@ impl HomeworkData {
     }
 }
 
+/// 任務頁各分組的項目數（作業＋任務；不受搜尋過濾影響）。
+///
+/// 標題、分組標籤列與提示列每幀都要用到這三個數字：由 [`App::task_page_group_counts`]
+/// 一次掃描算好，不要逐組重複統計（主迴圈固定 200ms 重繪一次）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TaskPageCounts {
+    /// 未完成分組。
+    pub unfinished: usize,
+    /// 已完成分組。
+    pub completed: usize,
+    /// 待核实分組。
+    pub unknown: usize,
+}
+
+impl TaskPageCounts {
+    /// 指定分組的計數。
+    pub fn get(&self, group: HomeworkGroup) -> usize {
+        match group {
+            HomeworkGroup::Unfinished => self.unfinished,
+            HomeworkGroup::Completed => self.completed,
+            HomeworkGroup::Unknown => self.unknown,
+        }
+    }
+
+    /// 累加一個項目所屬分組的計數。
+    fn add(&mut self, group: HomeworkGroup) {
+        match group {
+            HomeworkGroup::Unfinished => self.unfinished += 1,
+            HomeworkGroup::Completed => self.completed += 1,
+            HomeworkGroup::Unknown => self.unknown += 1,
+        }
+    }
+}
+
 /// 任務頁項目的穩定識別：排序或內容變動後據此把選取錨定回同一個項目。
 ///
 /// 位置（索引）會因為分組、搜尋與排序改變而失效；識別碼不會。
@@ -291,14 +325,6 @@ pub enum TaskEntry<'a> {
 }
 
 impl TaskEntry<'_> {
-    /// 所屬分組。
-    pub fn group(&self) -> HomeworkGroup {
-        match self {
-            Self::Task(task) => task.group(),
-            Self::Homework(item) => item.state.group(),
-        }
-    }
-
     /// 穩定識別（跨排序、跨重新載入）。
     pub fn id(&self) -> TaskEntryId {
         match self {
@@ -1529,18 +1555,21 @@ impl App {
         todo::tag_options(&self.tasks)
     }
 
-    /// 指定分組的項目數（作業＋任務；不受搜尋過濾影響）。
-    pub fn page_group_count(&self, group: HomeworkGroup) -> usize {
-        let homework = self
-            .homework
-            .ready()
-            .map_or(0, |data| data.group_count(group));
-        let tasks = self
-            .tasks
-            .iter()
-            .filter(|task| task.group() == group)
-            .count();
-        homework + tasks
+    /// 任務頁各分組的項目數（作業＋任務；不受搜尋過濾影響）。
+    ///
+    /// 一次掃描算好整組計數：標題、分組標籤列與提示列共用同一份結果，
+    /// 不要逐組重複統計。
+    pub fn task_page_group_counts(&self) -> TaskPageCounts {
+        let mut counts = TaskPageCounts::default();
+        if let Some(data) = self.homework.ready() {
+            for item in &data.items {
+                counts.add(item.state.group());
+            }
+        }
+        for task in &self.tasks {
+            counts.add(task.group());
+        }
+        counts
     }
 
     /// 任務頁目前的列模型。

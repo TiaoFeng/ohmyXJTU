@@ -1639,7 +1639,7 @@ fn tasks_event_replaces_the_list_and_anchors_the_selection() {
     assert_eq!(app.page_selection(), 0, "找不到原本的任务时应夹取索引");
     assert_eq!(app.task_group_items(HomeworkGroup::Unfinished)[0].id, 1);
     assert_eq!(
-        app.page_group_count(HomeworkGroup::Completed),
+        app.task_page_group_counts().get(HomeworkGroup::Completed),
         1,
         "分组计数应包含自訂義任务"
     );
@@ -1783,6 +1783,24 @@ fn tasks_event_closes_the_task_form_after_saving() {
             .is_none_or(|message| !message.contains("正在保存")),
         "不应留下保存中的提示"
     );
+}
+
+#[test]
+fn tasks_event_keeps_an_unsent_task_form_open() {
+    let mut app = app();
+    app.set_screen(Screen::TaskForm(Box::new(TaskFormState::add())));
+    if let Screen::TaskForm(form) = &mut app.screen {
+        form.content.insert('甲');
+    }
+
+    // 背景任務操作（例如 space 標記完成）的快照可能在使用者剛打開表單時抵達：
+    // 尚未送出（busy 為假）的表單不得被關掉，否則剛輸入的內容會消失。
+    apply_event(&mut app, Event::Tasks(vec![todo_task(1, "乙", false)]));
+    let Screen::TaskForm(form) = &app.screen else {
+        panic!("尚未送出的任务表单不应被快照关闭");
+    };
+    assert_eq!(form.content.value(), "甲", "用户输入的内容必须保留");
+    assert_eq!(app.tasks.len(), 1, "快照仍应套用");
 }
 
 #[test]

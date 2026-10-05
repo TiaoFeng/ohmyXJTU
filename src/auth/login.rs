@@ -22,11 +22,12 @@ use crate::credentials::Credentials;
 use crate::error::{AppError, AppResult};
 use crate::http::{HttpClient, HttpRequest, HttpResponse};
 use crate::json::split_envelope;
+use crate::webvpn;
 
+use super::captcha;
 use super::html;
 use super::rsa;
 use super::state::{AccountType, LoginReply, MfaFlow};
-use super::{captcha, webvpn};
 
 /// 統一認證入口主機。
 pub const LOGIN_HOST: &str = "https://login.xjtu.edu.cn";

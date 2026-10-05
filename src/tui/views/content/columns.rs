@@ -168,19 +168,11 @@ pub(super) struct RowNeeds {
 }
 
 impl RowNeeds {
-    /// 由作業列組出需求。
-    pub(super) fn of_homework(items: &[&HomeworkItem]) -> Self {
+    /// 由單一作業列組出需求。
+    pub(super) fn of_homework_item(item: &HomeworkItem) -> Self {
         Self {
-            label: items
-                .iter()
-                .map(|item| display_width(&item.course_name))
-                .max()
-                .unwrap_or(0),
-            title: items
-                .iter()
-                .map(|item| display_width(&item.title))
-                .max()
-                .unwrap_or(0),
+            label: display_width(&item.course_name),
+            title: display_width(&item.title),
         }
     }
 
@@ -196,24 +188,16 @@ impl RowNeeds {
         }
     }
 
-    /// 由自訂義任務列組出需求（標籤欄放優先級與選填標籤）。
-    pub(super) fn of_tasks(tasks: &[&Task]) -> Self {
+    /// 由單一自訂義任務列組出需求（標籤欄放優先級與選填標籤）。
+    pub(super) fn of_task(task: &Task) -> Self {
         Self {
-            label: tasks
-                .iter()
-                .map(|task| match task.display_tag() {
-                    Some(tag) => {
-                        TASK_PRIORITY_WIDTH + display_width(TAG_SEPARATOR) + display_width(tag)
-                    }
-                    None => TASK_PRIORITY_WIDTH,
-                })
-                .max()
-                .unwrap_or(TASK_PRIORITY_WIDTH),
-            title: tasks
-                .iter()
-                .map(|task| display_width(&task.content))
-                .max()
-                .unwrap_or(0),
+            label: match task.display_tag() {
+                Some(tag) => {
+                    TASK_PRIORITY_WIDTH + display_width(TAG_SEPARATOR) + display_width(tag)
+                }
+                None => TASK_PRIORITY_WIDTH,
+            },
+            title: display_width(&task.content),
         }
     }
 

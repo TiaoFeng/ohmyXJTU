@@ -14,11 +14,33 @@ use crate::tui::app::{
 use crate::tui::theme::THEME;
 use crate::tui::ui::{centered_rect, hint_line, menu_item, popup_surface};
 
+/// 任務設置彈窗（`^T`）尺寸（含邊框）。
+const MENU_WIDTH: u16 = 44;
+const MENU_HEIGHT: u16 = 8;
+/// 批量操作彈窗尺寸（含邊框）。
+const BATCH_WIDTH: u16 = 44;
+const BATCH_HEIGHT: u16 = 9;
+/// 刪除已完成任務的確認彈窗尺寸（含邊框）。
+const CONFIRM_WIDTH: u16 = 52;
+const CONFIRM_HEIGHT: u16 = 7;
+/// 選單選項區的最小高度（其餘列留給提示列）。
+const MENU_BODY_MIN_HEIGHT: u16 = 3;
+/// 確認彈窗提問區的最小高度。
+const CONFIRM_BODY_MIN_HEIGHT: u16 = 1;
+/// 彈窗提示列的高度。
+const HINT_HEIGHT: u16 = 1;
+/// 確認彈窗提示區的高度（多留一列與提問隔開）。
+const CONFIRM_HINT_HEIGHT: u16 = 2;
+
 /// 繪製任務設置彈窗（`^T`）。
 pub fn draw_menu(frame: &mut Frame, state: TaskMenuState) {
-    let area = centered_rect(frame.area(), 44, 8);
+    let area = centered_rect(frame.area(), MENU_WIDTH, MENU_HEIGHT);
     let inner = popup_surface(frame, area, "任务设置");
-    let chunks = Layout::vertical([Constraint::Min(3), Constraint::Length(1)]).split(inner);
+    let chunks = Layout::vertical([
+        Constraint::Min(MENU_BODY_MIN_HEIGHT),
+        Constraint::Length(HINT_HEIGHT),
+    ])
+    .split(inner);
 
     let lines: Vec<Line> = TaskMenuKind::ALL
         .iter()
@@ -37,9 +59,13 @@ pub fn draw_menu(frame: &mut Frame, state: TaskMenuState) {
 
 /// 繪製多選後的批量操作選單。
 pub fn draw_batch_menu(frame: &mut Frame, state: TaskBatchMenuState) {
-    let area = centered_rect(frame.area(), 44, 9);
+    let area = centered_rect(frame.area(), BATCH_WIDTH, BATCH_HEIGHT);
     let inner = popup_surface(frame, area, "批量操作");
-    let chunks = Layout::vertical([Constraint::Min(3), Constraint::Length(1)]).split(inner);
+    let chunks = Layout::vertical([
+        Constraint::Min(MENU_BODY_MIN_HEIGHT),
+        Constraint::Length(HINT_HEIGHT),
+    ])
+    .split(inner);
 
     let lines: Vec<Line> = TaskBatchOp::ALL
         .iter()
@@ -58,9 +84,13 @@ pub fn draw_batch_menu(frame: &mut Frame, state: TaskBatchMenuState) {
 
 /// 繪製刪除已完成任務的二次確認（`y` 確認、`n`／`esc` 取消）。
 pub fn draw_confirm(frame: &mut Frame, state: TaskConfirmState) {
-    let area = centered_rect(frame.area(), 52, 7);
+    let area = centered_rect(frame.area(), CONFIRM_WIDTH, CONFIRM_HEIGHT);
     let inner = popup_surface(frame, area, "确认删除");
-    let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(2)]).split(inner);
+    let chunks = Layout::vertical([
+        Constraint::Min(CONFIRM_BODY_MIN_HEIGHT),
+        Constraint::Length(CONFIRM_HINT_HEIGHT),
+    ])
+    .split(inner);
 
     let question = Line::from(vec![
         Span::styled(" 删除全部 ", THEME.surface_style()),

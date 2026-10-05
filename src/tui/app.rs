@@ -1126,6 +1126,43 @@ impl ScrollState {
     }
 }
 
+/// 任務頁的狀態：自訂義任務的清單與互動模式（搜尋、多選、排序）。
+///
+/// 任務是本機資料，與帳號無關（換帳號時不清空內容，只清掉這些暫時狀態）。
+/// 收在同一個結構裡是因為它們的生命週期一致：每次改動任務的快照、搜尋開關或
+/// 排序方式都會同時影響它們（例如 `tag_cursor` 只在 `search` 開啟時有意義、
+/// `multi` 只在多選模式中存在）。
+#[derive(Debug, Default)]
+pub struct TaskPageState {
+    /// 自訂義任務（依截止時間與優先級排序；由任務服務回報快照）。
+    pub tasks: Vec<Task>,
+    /// 搜尋關鍵字（`None` 表示未篩選；作業與任務都會被過濾）。
+    pub filter: Option<String>,
+    /// 搜尋輸入框（開啟時獨占任務頁的按鍵）。
+    pub search: Option<InputLine>,
+    /// 多選模式：已勾選的任務識別碼（`None` 表示不在多選模式）。
+    pub multi: Option<HashSet<u64>>,
+    /// 排序方式（`^L`；只影響顯示，不改動資料）。
+    pub sort: SortMode,
+    /// `^D` 第一次按下後等待第二次確認的任務（識別碼、內容）。
+    pub pending_delete: Option<(u64, String)>,
+    /// 搜尋框內以 `↑`／`↓` 選取標籤建議的游標（`None` 表示尚未開始選取）。
+    pub tag_cursor: Option<usize>,
+}
+
+impl TaskPageState {
+    /// 清掉與「這次操作」有關的暫時狀態（搜尋、多選、待確認刪除），任務內容保留。
+    ///
+    /// 換帳號時呼叫：任務屬於本機資料、內容不變，但畫面狀態不該延續下來。
+    pub fn clear_transient(&mut self) {
+        self.filter = None;
+        self.search = None;
+        self.multi = None;
+        self.pending_delete = None;
+        self.tag_cursor = None;
+    }
+}
+
 /// 應用程式狀態。
 #[derive(Debug)]
 pub struct App {
@@ -1162,20 +1199,8 @@ pub struct App {
     pub homework: Page<HomeworkData>,
     /// 作業頁目前分組。
     pub homework_group: HomeworkGroup,
-    /// 自訂義任務（本機資料；與帳號無關，換帳號時不清空）。
-    pub tasks: Vec<Task>,
-    /// 任務頁的搜尋關鍵字（`None` 表示未篩選；作業與任務都會被過濾）。
-    pub task_filter: Option<String>,
-    /// 任務頁的搜尋輸入框（開啟時獨占任務頁的按鍵）。
-    pub task_search: Option<InputLine>,
-    /// 任務頁的多選模式：已勾選的任務識別碼（`None` 表示不在多選模式）。
-    pub task_multi: Option<HashSet<u64>>,
-    /// 任務頁的排序方式（`^L`；只影響顯示，不改動資料）。
-    pub task_sort: SortMode,
-    /// `^D` 第一次按下後等待第二次確認的任務（識別碼、內容）。
-    pub task_pending_delete: Option<(u64, String)>,
-    /// 搜尋框內以 `↑`／`↓` 選取標籤建議的游標（`None` 表示尚未開始選取）。
-    pub task_tag_cursor: Option<usize>,
+    /// 任務頁的狀態（自訂義任務、搜尋、多選與排序）。
+    pub task_page: TaskPageState,
     /// 最近一次得知的可選學期（供學期選擇器）。
     pub term_options: Vec<TermCode>,
     /// 考勤流水頁。
@@ -1235,13 +1260,7 @@ impl App {
             schedule_pending_week: None,
             homework: Page::Idle,
             homework_group: HomeworkGroup::Unfinished,
-            tasks: Vec::new(),
-            task_filter: None,
-            task_search: None,
-            task_multi: None,
-            task_sort: SortMode::default(),
-            task_pending_delete: None,
-            task_tag_cursor: None,
+            task_page: TaskPageState::default(),
             term_options: Vec::new(),
             attendance: Page::Idle,
             lms: LmsState::default(),
@@ -1413,11 +1432,7 @@ impl App {
             self.attendance = Page::Idle;
             // 自訂義任務屬於本機資料，與帳號無關：內容保留，只清掉任務頁的
             // 暫時狀態（搜尋、多選、待確認刪除）。
-            self.task_filter = None;
-            self.task_search = None;
-            self.task_multi = None;
-            self.task_pending_delete = None;
-            self.task_tag_cursor = None;
+            self.task_page.clear_transient();
             // 舊帳號的課程、活動與詳情一律清空。
             self.lms = LmsState::default();
             self.updated_at = UpdatedAt::default();
@@ -1510,7 +1525,7 @@ impl App {
         let group = self.homework_group;
         let tasks = self.task_group_items(group);
         let homework = self.homework_group_items(group);
-        if !self.task_sort.is_sorted() {
+        if !self.task_page.sort.is_sorted() {
             let mut entries: Vec<TaskEntry<'_>> = tasks.into_iter().map(TaskEntry::Task).collect();
             entries.extend(homework.into_iter().map(TaskEntry::Homework));
             return entries;
@@ -1524,7 +1539,7 @@ impl App {
                     .map(|item| (todo::homework_sort_key(item), TaskEntry::Homework(item))),
             )
             .collect();
-        keyed.sort_by(|left, right| todo::compare(self.task_sort, &left.0, &right.0));
+        keyed.sort_by(|left, right| todo::compare(self.task_page.sort, &left.0, &right.0));
         keyed.into_iter().map(|(_, entry)| entry).collect()
     }
 
@@ -1533,7 +1548,7 @@ impl App {
         let Some(data) = self.homework.ready() else {
             return Vec::new();
         };
-        let keyword = self.task_filter.as_deref();
+        let keyword = self.task_page.filter.as_deref();
         data.group_items(group)
             .into_iter()
             .filter(|item| keyword.is_none_or(|keyword| item.matches(keyword)))
@@ -1542,8 +1557,9 @@ impl App {
 
     /// 指定分組的自訂義任務（依搜尋關鍵字過濾；已排序）。
     pub fn task_group_items(&self, group: HomeworkGroup) -> Vec<&Task> {
-        let keyword = self.task_filter.as_deref();
-        self.tasks
+        let keyword = self.task_page.filter.as_deref();
+        self.task_page
+            .tasks
             .iter()
             .filter(|task| task.group() == group)
             .filter(|task| keyword.is_none_or(|keyword| task.matches(keyword)))
@@ -1552,7 +1568,7 @@ impl App {
 
     /// 所有任務用過的標籤（去重、保留首次出現順序；供 `^F` 的上下鍵預填）。
     pub fn task_tag_options(&self) -> Vec<String> {
-        todo::tag_options(&self.tasks)
+        todo::tag_options(&self.task_page.tasks)
     }
 
     /// 任務頁各分組的項目數（作業＋任務；不受搜尋過濾影響）。
@@ -1566,7 +1582,7 @@ impl App {
                 counts.add(item.state.group());
             }
         }
-        for task in &self.tasks {
+        for task in &self.task_page.tasks {
             counts.add(task.group());
         }
         counts
@@ -1577,7 +1593,7 @@ impl App {
     /// 預設排序分段顯示（任务段在前、作业段在后，只含非空分段）；混合排序則把
     /// 排好的項目直接列成一串，不再插入分段標題與空白列。
     pub fn task_page_rows(&self) -> Vec<PageRow<'_>> {
-        if !self.task_sort.is_sorted() {
+        if !self.task_page.sort.is_sorted() {
             let group = self.homework_group;
             return todo::page_rows(
                 &self.task_group_items(group),

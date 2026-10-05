@@ -67,7 +67,7 @@ pub(super) fn activate(app: &mut App, jobs: &Sender<Job>) {
         NavItem::Schedule => app.schedule_detail = !app.schedule_detail,
         NavItem::Homework => {
             // 多選模式：enter 開啟批量操作選單，而不是切換詳情。
-            if app.task_multi.is_some() {
+            if app.task_page.multi.is_some() {
                 if selected_task_ids(app).is_empty() {
                     app.set_message("尚未选择任务（space 勾选）");
                 } else {
@@ -143,8 +143,8 @@ pub(super) fn activate(app: &mut App, jobs: &Sender<Job>) {
 pub(super) fn escape(app: &mut App) {
     // 多選模式最優先（與提示列的「esc 退出多选」一致）：除了 `m` 之外，`esc`
     // 也能離開，否則提示說了卻沒反應，使用者會以為卡住。
-    if app.task_multi.is_some() && app.nav == NavItem::Homework {
-        app.task_multi = None;
+    if app.task_page.multi.is_some() && app.nav == NavItem::Homework {
+        app.task_page.multi = None;
         app.set_message("已退出多选");
         return;
     }
@@ -157,8 +157,8 @@ pub(super) fn escape(app: &mut App) {
         NavItem::Schedule => app.schedule_detail = false,
         NavItem::Homework => {
             // 篩選中時 esc 先清除篩選，再收起詳情（與 ui-ref 一致）。
-            if app.task_filter.is_some() {
-                app.task_filter = None;
+            if app.task_page.filter.is_some() {
+                app.task_page.filter = None;
                 app.homework_state.select(Some(0));
                 app.set_message("已清除筛选");
             } else {
@@ -198,7 +198,7 @@ pub(super) fn change_group(app: &mut App, delta: i32) {
 /// 切換後在清單中找回它（找不到時回到第一項）。
 pub(super) fn set_task_sort(app: &mut App, mode: SortMode) {
     let previous = app.task_page_selected_id();
-    app.task_sort = mode;
+    app.task_page.sort = mode;
     app.set_screen(Screen::Main);
     app.anchor_task_selection(previous);
     app.set_message(match mode {
@@ -448,15 +448,16 @@ pub(super) fn delete_selected_task(app: &mut App, jobs: &Sender<Job>) {
     match selected(app) {
         Some(Selected::Task { id, content, .. }) => {
             let confirmed = app
-                .task_pending_delete
+                .task_page
+                .pending_delete
                 .as_ref()
                 .is_some_and(|(pending, _)| *pending == id);
             if confirmed {
-                app.task_pending_delete = None;
+                app.task_page.pending_delete = None;
                 let _ = jobs.send(Job::DeleteTask { id });
             } else {
                 app.set_message(format!("再按一次 ^D 删除「{content}」"));
-                app.task_pending_delete = Some((id, content));
+                app.task_page.pending_delete = Some((id, content));
             }
         }
         Some(Selected::Homework) => app.set_message("只能删除自定义任务"),
@@ -469,11 +470,11 @@ pub(super) fn toggle_task_multi(app: &mut App) {
     if app.nav != NavItem::Homework {
         return;
     }
-    if app.task_multi.is_some() {
-        app.task_multi = None;
+    if app.task_page.multi.is_some() {
+        app.task_page.multi = None;
         app.set_message("已退出多选");
     } else {
-        app.task_multi = Some(HashSet::new());
+        app.task_page.multi = Some(HashSet::new());
         app.set_screen(Screen::Main);
         app.set_message("多选模式：space 勾选 · enter 批量操作 · esc 退出");
     }
@@ -483,7 +484,7 @@ pub(super) fn toggle_task_multi(app: &mut App) {
 pub(super) fn toggle_task_selection(app: &mut App) {
     match selected(app) {
         Some(Selected::Task { id, .. }) => {
-            if let Some(selection) = app.task_multi.as_mut()
+            if let Some(selection) = app.task_page.multi.as_mut()
                 && !selection.remove(&id)
             {
                 selection.insert(id);
@@ -500,7 +501,7 @@ pub(super) fn toggle_task_selection(app: &mut App) {
 /// 搜尋而保留（切回原分組時勾選仍在），但批量操作只應作用於使用者此刻看
 /// 得到的任務，否則會刪改畫面上不存在的項目。
 pub(super) fn selected_task_ids(app: &App) -> Vec<u64> {
-    let Some(selection) = app.task_multi.as_ref() else {
+    let Some(selection) = app.task_page.multi.as_ref() else {
         return Vec::new();
     };
     app.task_group_items(app.homework_group)
@@ -523,9 +524,9 @@ pub(super) fn open_task_search(app: &mut App) {
     if app.nav != NavItem::Homework {
         return;
     }
-    let input = InputLine::with_value(app.task_filter.clone().unwrap_or_default());
-    app.task_search = Some(input);
-    app.task_tag_cursor = None;
+    let input = InputLine::with_value(app.task_page.filter.clone().unwrap_or_default());
+    app.task_page.search = Some(input);
+    app.task_page.tag_cursor = None;
 }
 
 /// 搜尋框的標籤建議：以 `delta` 在既有標籤間循環並整段預填（`^F`）。
@@ -538,16 +539,16 @@ pub(super) fn cycle_tag_suggestion(app: &mut App, delta: i32) {
     let options = app.task_tag_options();
     let len = options.len();
     if len == 0 {
-        app.task_tag_cursor = None;
+        app.task_page.tag_cursor = None;
         return;
     }
-    let index = match app.task_tag_cursor {
+    let index = match app.task_page.tag_cursor {
         Some(index) => (index + len + if delta >= 0 { 1 } else { len - 1 }) % len,
         None if delta >= 0 => 0,
         None => len - 1,
     };
-    app.task_tag_cursor = Some(index);
-    if let Some(input) = app.task_search.as_mut() {
+    app.task_page.tag_cursor = Some(index);
+    if let Some(input) = app.task_page.search.as_mut() {
         input.set(options[index].clone());
     }
 }

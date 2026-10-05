@@ -2745,7 +2745,7 @@ fn task_page_app(tasks: Vec<Task>, items: Vec<HomeworkItem>) -> App {
     let mut app = App::new(AccessPolicy::Auto);
     app.set_screen(Screen::Main);
     app.nav = NavItem::Homework;
-    app.tasks = tasks;
+    app.task_page.tasks = tasks;
     app.homework = Page::Ready(homework_data(items, None));
     app
 }
@@ -2833,8 +2833,10 @@ fn task_rows_show_priority_state_and_deadline_without_greying_out() {
 
     // 已完成的任務移到「已完成」分組，顏色不變。
     app.homework_group = HomeworkGroup::Completed;
-    app.tasks[1].completed = true;
-    app.tasks.push(todo(3, "自习", Priority::Low, true));
+    app.task_page.tasks[1].completed = true;
+    app.task_page
+        .tasks
+        .push(todo(3, "自习", Priority::Low, true));
     app.homework_state.select(Some(1));
     let terminal = draw(WIDTH, HEIGHT, |frame| {
         crate::tui::views::draw(frame, &mut app)
@@ -2858,7 +2860,7 @@ fn task_page_marks_multi_select_checkboxes() {
         ],
         Vec::new(),
     );
-    app.task_multi = Some(HashSet::from([1]));
+    app.task_page.multi = Some(HashSet::from([1]));
 
     let terminal = draw(WIDTH, HEIGHT, |frame| {
         crate::tui::views::draw(frame, &mut app)
@@ -2897,13 +2899,134 @@ fn task_detail_panel_shows_the_description_and_scrolls() {
     assert!(app.homework_scroll.scrollable(), "面板应可滚动");
 }
 
+/// 逾期任務的狀態列（標籤與語意色）與詳情的截止時間列。
+///
+/// 截止時間固定在 2020 年（永遠早於執行當下），因此不依賴測試執行的日期。
+/// 顏色斷言取的是**詳情面板**：清單列被選取時會套用高亮樣式（覆寫字色），
+/// 詳情面板沒有高亮，才看得到語意色。
+#[test]
+fn task_page_shows_overdue_state_and_deadline() {
+    let mut overdue = todo(1, "过期的任务", Priority::High, false);
+    overdue.deadline =
+        Some(chrono::DateTime::parse_from_rfc3339("2020-01-02T08:00:00+08:00").expect("固定时间"));
+    let mut app = task_page_app(vec![overdue], Vec::new());
+    app.homework_detail = true;
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let backend = terminal.backend();
+    let text = screen_text(backend);
+
+    let (_, row) = find_row(backend, "过期的任务");
+    assert!(row.contains("逾期"), "应显示逾期状态：\n{row}");
+
+    let (status_y, status_row) = find_row(backend, "状态：");
+    assert!(
+        status_row.contains("逾期"),
+        "详情应显示逾期状态：\n{status_row}"
+    );
+    assert_eq!(
+        backend.buffer()[(column_of(&status_row, "逾期"), status_y)].fg,
+        THEME.red,
+        "逾期应以错误色（危险）呈现"
+    );
+    assert!(
+        text.contains("截止：2020-01-02 08:00"),
+        "详情应显示任务的截止时间（不是「无」）：\n{text}"
+    );
+}
+
+/// 作業詳情的「说明」列與小組提交單位（`submit_by_group == Some(true)`）。
+#[test]
+fn homework_detail_shows_note_and_group_submission() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00+08:00").expect("固定时间");
+    let items = aggregate(
+        &[HomeworkInput {
+            course_id: "1".to_owned(),
+            course_name: "编译原理".to_owned(),
+            activity_id: "a-1".to_owned(),
+            title: "小组作业".to_owned(),
+            end_time: None,
+            description: None,
+            submit_by_group: Some(true),
+            submission_count: Some(0),
+            note: Some("需提交 PDF".to_owned()),
+        }],
+        now,
+    );
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Homework;
+    app.homework = Page::Ready(homework_data(items, None));
+    app.homework_detail = true;
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(
+        text.contains("提交单位：小组"),
+        "应显示小组提交单位：\n{text}"
+    );
+    assert!(text.contains("说明：需提交 PDF"), "应显示说明列：\n{text}");
+}
+
+/// 多選模式的勾選框欄在作業列也要佔位（作業不可勾選），兩種列的欄位才對齊。
+#[test]
+fn multi_select_keeps_task_and_homework_columns_aligned() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00+08:00").expect("固定时间");
+    let items = aggregate(&[homework_input("待办作业", "2026-10-01 23:59:59", 0)], now);
+    let mut app = task_page_app(vec![todo(1, "写实验报告", Priority::High, false)], items);
+    app.task_page.multi = Some(HashSet::new());
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let backend = terminal.backend();
+    let (_, task_row) = find_row(backend, "写实验报告");
+    let (_, homework_row) = find_row(backend, "待办作业");
+    assert_eq!(
+        column_of(&task_row, "写实验报告"),
+        column_of(&homework_row, "待办作业"),
+        "作业列应以空白补上勾选框栏，维持与任务列对齐"
+    );
+}
+
+/// 最小終端尺寸下任務頁仍完整顯示清單（不提示放大視窗）。
+///
+/// 任務頁的欄寬需求（32 欄）小於最小終端尺寸能給的內容寬度，所以「终端过窄」
+/// 在實務上不會觸發；這個測試鎖住那個前提——改動 `MIN_WIDTH`、側欄寬度或欄寬
+/// 下限時會在這裡失敗。
+#[test]
+fn task_page_fits_at_the_minimum_terminal_size() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00+08:00").expect("固定时间");
+    let items = aggregate(&[homework_input("待办作业", "2099-12-31 23:59:59", 0)], now);
+    let mut app = task_page_app(vec![todo(1, "写实验报告", Priority::High, false)], items);
+
+    let terminal = draw(
+        crate::tui::ui::MIN_WIDTH,
+        crate::tui::ui::MIN_HEIGHT,
+        |frame| crate::tui::views::draw(frame, &mut app),
+    );
+    let text = screen_text(terminal.backend());
+    assert!(
+        text.contains("写实验报告"),
+        "最小尺寸仍应显示任务列：\n{text}"
+    );
+    assert!(
+        !text.contains("终端过窄"),
+        "任务页在最小尺寸下仍放得下，不应提示放大窗口：\n{text}"
+    );
+}
+
 #[test]
 fn task_page_search_hint_and_empty_state() {
     let mut app = task_page_app(
         vec![todo(1, "写实验报告", Priority::High, false)],
         Vec::new(),
     );
-    app.task_filter = Some("不存在的任务".to_owned());
+    app.task_page.filter = Some("不存在的任务".to_owned());
 
     let terminal = draw(WIDTH, HEIGHT, |frame| {
         crate::tui::views::draw(frame, &mut app)
@@ -3001,7 +3124,7 @@ fn task_page_search_box_shows_the_query_and_cursor() {
         vec![todo(1, "写实验报告", Priority::High, false)],
         Vec::new(),
     );
-    app.task_search = Some(InputLine::with_value("报告"));
+    app.task_page.search = Some(InputLine::with_value("报告"));
 
     let terminal = draw(WIDTH, HEIGHT, |frame| {
         crate::tui::views::draw(frame, &mut app)
@@ -3098,7 +3221,7 @@ fn sorted_task_page_mixes_rows_without_section_headers() {
     let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00+08:00").expect("固定时间");
     let items = aggregate(&[homework_input("待办作业", "2026-10-01 23:59:59", 0)], now);
     let mut app = task_page_app(vec![todo(1, "写实验报告", Priority::Low, false)], items);
-    app.task_sort = SortMode::Priority;
+    app.task_page.sort = SortMode::Priority;
 
     let terminal = draw(WIDTH, HEIGHT, |frame| {
         crate::tui::views::draw(frame, &mut app)
@@ -3281,7 +3404,7 @@ fn footer_shows_tag_suggestion_hint_only_when_tags_exist() {
         vec![todo(1, "写实验报告", Priority::High, false)],
         Vec::new(),
     );
-    app.task_search = Some(InputLine::with_value(""));
+    app.task_page.search = Some(InputLine::with_value(""));
 
     let terminal = draw(120, HEIGHT, |frame| {
         crate::tui::views::draw(frame, &mut app)
@@ -3292,7 +3415,7 @@ fn footer_shows_tag_suggestion_hint_only_when_tags_exist() {
         "一个标签也没有时不应提示：{footer:?}"
     );
 
-    app.tasks[0].tag = Some("实验".to_owned());
+    app.task_page.tasks[0].tag = Some("实验".to_owned());
     let terminal = draw(120, HEIGHT, |frame| {
         crate::tui::views::draw(frame, &mut app)
     });

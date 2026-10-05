@@ -1411,7 +1411,7 @@ fn task_page_app() -> App {
     let mut app = App::new(AccessPolicy::Auto);
     app.set_screen(Screen::Main);
     app.nav = NavItem::Homework;
-    app.tasks = vec![
+    app.task_page.tasks = vec![
         Task {
             id: 1,
             content: "写实验报告".to_owned(),
@@ -1588,7 +1588,7 @@ fn m_toggles_multi_select_and_space_checks_tasks() {
     let mut app = task_page_app();
 
     press(&mut app, &jobs, KeyCode::Char('m'));
-    let Some(selection) = app.task_multi.as_ref() else {
+    let Some(selection) = app.task_page.multi.as_ref() else {
         panic!("m 应进入多选模式");
     };
     assert!(selection.is_empty(), "进入多选时不应预先勾选");
@@ -1596,7 +1596,10 @@ fn m_toggles_multi_select_and_space_checks_tasks() {
 
     press(&mut app, &jobs, KeyCode::Char(' '));
     assert!(
-        app.task_multi.as_ref().is_some_and(|set| set.contains(&1)),
+        app.task_page
+            .multi
+            .as_ref()
+            .is_some_and(|set| set.contains(&1)),
         "空格应勾选当前任务"
     );
     assert!(rx.try_recv().is_err(), "多选模式下空格只勾选，不标记完成");
@@ -1604,19 +1607,19 @@ fn m_toggles_multi_select_and_space_checks_tasks() {
     // 再按一次取消勾選。
     press(&mut app, &jobs, KeyCode::Char(' '));
     assert!(
-        app.task_multi.as_ref().is_some_and(HashSet::is_empty),
+        app.task_page.multi.as_ref().is_some_and(HashSet::is_empty),
         "再次按空格应取消勾选"
     );
 
     press(&mut app, &jobs, KeyCode::Char('m'));
-    assert!(app.task_multi.is_none(), "再次按 m 应退出多选");
+    assert!(app.task_page.multi.is_none(), "再次按 m 应退出多选");
     assert_eq!(app.message_text(), Some("已退出多选"));
 
     // `esc` 同樣能離開（提示列寫的就是「esc 退出多选」）。
     press(&mut app, &jobs, KeyCode::Char('m'));
-    assert!(app.task_multi.is_some());
+    assert!(app.task_page.multi.is_some());
     press(&mut app, &jobs, KeyCode::Esc);
-    assert!(app.task_multi.is_none(), "esc 应退出多选");
+    assert!(app.task_page.multi.is_none(), "esc 应退出多选");
     assert_eq!(app.message_text(), Some("已退出多选"));
 }
 
@@ -1646,7 +1649,7 @@ fn enter_in_multi_select_opens_the_batch_menu() {
         ),
         "默认选项应批量标记完成"
     );
-    assert!(app.task_multi.is_none(), "送出后应退出多选");
+    assert!(app.task_page.multi.is_none(), "送出后应退出多选");
     assert!(matches!(app.screen, Screen::Main), "送出后应回到主画面");
 }
 
@@ -1663,7 +1666,10 @@ fn multi_select_only_acts_on_visible_tasks_after_switching_group() {
     press(&mut app, &jobs, KeyCode::Char('m'));
     press(&mut app, &jobs, KeyCode::Char(' '));
     assert!(
-        app.task_multi.as_ref().is_some_and(|set| set.contains(&1)),
+        app.task_page
+            .multi
+            .as_ref()
+            .is_some_and(|set| set.contains(&1)),
         "空格应勾选任务 1"
     );
 
@@ -1671,7 +1677,10 @@ fn multi_select_only_acts_on_visible_tasks_after_switching_group() {
     press(&mut app, &jobs, KeyCode::Char(']'));
     assert_eq!(app.homework_group, HomeworkGroup::Completed);
     assert!(
-        app.task_multi.as_ref().is_some_and(|set| set.contains(&1)),
+        app.task_page
+            .multi
+            .as_ref()
+            .is_some_and(|set| set.contains(&1)),
         "勾选跨分组保留"
     );
     assert!(
@@ -1714,7 +1723,7 @@ fn control_t_menu_confirms_deleting_completed_tasks() {
     assert!(matches!(app.screen, Screen::Main), "确认后应回到主画面");
 
     // 沒有已完成任務時不進二次確認。
-    app.tasks.retain(|task| !task.completed);
+    app.task_page.tasks.retain(|task| !task.completed);
     press_ctrl(&mut app, &jobs, 't');
     press(&mut app, &jobs, KeyCode::Down);
     press(&mut app, &jobs, KeyCode::Enter);
@@ -1733,11 +1742,11 @@ fn control_f_filters_by_keyword_and_escape_clears_it() {
     let mut app = task_page_app();
 
     press_ctrl(&mut app, &jobs, 'f');
-    assert!(app.task_search.is_some(), "^f 应打开搜索输入框");
+    assert!(app.task_page.search.is_some(), "^f 应打开搜索输入框");
     type_text(&mut app, &jobs, "报告");
     press(&mut app, &jobs, KeyCode::Enter);
-    assert_eq!(app.task_filter.as_deref(), Some("报告"));
-    assert!(app.task_search.is_none(), "套用后应关闭输入框");
+    assert_eq!(app.task_page.filter.as_deref(), Some("报告"));
+    assert!(app.task_page.search.is_none(), "套用后应关闭输入框");
     assert!(
         app.message_text()
             .is_some_and(|message| message.contains("报告")),
@@ -1745,26 +1754,33 @@ fn control_f_filters_by_keyword_and_escape_clears_it() {
         app.message_text()
     );
     assert_eq!(app.task_filter_matches(), 1, "只剩内容含“报告”的任务");
-    assert!(!app.tasks.is_empty(), "筛选只影响显示，不删除数据");
+    assert!(
+        !app.task_page.tasks.is_empty(),
+        "筛选只影响显示，不删除数据"
+    );
     assert!(rx.try_recv().is_err(), "筛选不触发任何任务");
 
     // 主畫面的 esc 清除篩選。
     press(&mut app, &jobs, KeyCode::Esc);
-    assert_eq!(app.task_filter, None);
+    assert_eq!(app.task_page.filter, None);
     assert_eq!(app.message_text(), Some("已清除筛选"));
 
     // 再開搜尋但直接 enter：視為清除篩選。
     press_ctrl(&mut app, &jobs, 'f');
     press(&mut app, &jobs, KeyCode::Enter);
-    assert_eq!(app.task_filter, None);
+    assert_eq!(app.task_page.filter, None);
     assert_eq!(app.message_text(), Some("已清除筛选"));
 
     // 搜尋中按 esc：取消並保留原篩選。
-    app.task_filter = Some("报告".to_owned());
+    app.task_page.filter = Some("报告".to_owned());
     press_ctrl(&mut app, &jobs, 'f');
     press(&mut app, &jobs, KeyCode::Esc);
-    assert!(app.task_search.is_none());
-    assert_eq!(app.task_filter.as_deref(), Some("报告"), "取消不应清除筛选");
+    assert!(app.task_page.search.is_none());
+    assert_eq!(
+        app.task_page.filter.as_deref(),
+        Some("报告"),
+        "取消不应清除筛选"
+    );
     assert_eq!(app.message_text(), Some("已取消编辑（保留现有筛选）"));
 }
 
@@ -1775,8 +1791,8 @@ fn escape_in_the_search_box_says_nothing_was_filtered_when_none_was() {
 
     press_ctrl(&mut app, &jobs, 'f');
     press(&mut app, &jobs, KeyCode::Esc);
-    assert!(app.task_search.is_none());
-    assert_eq!(app.task_filter, None);
+    assert!(app.task_page.search.is_none());
+    assert_eq!(app.task_page.filter, None);
     assert_eq!(app.message_text(), Some("已取消编辑"));
 }
 
@@ -1808,13 +1824,19 @@ fn control_e_and_control_d_apply_to_tasks_only() {
     press(&mut app, &jobs, KeyCode::Up);
     press_ctrl(&mut app, &jobs, 'd');
     assert!(rx.try_recv().is_err(), "第一次 ^d 只提示，不删除");
-    assert_eq!(app.task_pending_delete.as_ref().map(|(id, _)| *id), Some(1));
+    assert_eq!(
+        app.task_page.pending_delete.as_ref().map(|(id, _)| *id),
+        Some(1)
+    );
     assert!(
         app.message_text()
             .is_some_and(|message| message.contains("再按一次"))
     );
     press(&mut app, &jobs, KeyCode::Char('x'));
-    assert!(app.task_pending_delete.is_none(), "其他按键应取消待确认");
+    assert!(
+        app.task_page.pending_delete.is_none(),
+        "其他按键应取消待确认"
+    );
 
     press_ctrl(&mut app, &jobs, 'd');
     press_ctrl(&mut app, &jobs, 'd');
@@ -1822,7 +1844,7 @@ fn control_e_and_control_d_apply_to_tasks_only() {
         matches!(rx.try_recv(), Ok(Job::DeleteTask { id: 1 })),
         "第二次 ^d 才删除"
     );
-    assert!(app.task_pending_delete.is_none());
+    assert!(app.task_page.pending_delete.is_none());
 }
 
 #[test]
@@ -1838,8 +1860,8 @@ fn task_keys_do_nothing_on_other_pages() {
     press(&mut app, &jobs, KeyCode::Char('m'));
 
     assert!(matches!(app.screen, Screen::Main), "其他页面不得开弹窗");
-    assert!(app.task_multi.is_none(), "其他页面不得进入多选");
-    assert!(app.task_search.is_none(), "其他页面不得开搜索");
+    assert!(app.task_page.multi.is_none(), "其他页面不得进入多选");
+    assert!(app.task_page.search.is_none(), "其他页面不得开搜索");
     assert!(rx.try_recv().is_err(), "其他页面不得送出任务任务");
 }
 
@@ -1868,7 +1890,7 @@ fn sort_keys_switch_the_mode_and_return_to_the_main_screen() {
         assert!(matches!(app.screen, Screen::Sort), "^L 应进入排序提示");
         press(&mut app, &jobs, KeyCode::Char(character));
         assert!(matches!(app.screen, Screen::Main), "选定后应回到主画面");
-        assert_eq!(app.task_sort, mode, "{character} 应套用 {label}");
+        assert_eq!(app.task_page.sort, mode, "{character} 应套用 {label}");
         assert!(
             app.message_text().is_some_and(|text| text.contains(label)),
             "提示应说明目前的排序方式：{:?}",
@@ -1879,14 +1901,14 @@ fn sort_keys_switch_the_mode_and_return_to_the_main_screen() {
     // 大寫與其他按鍵的相容性：`P` 等同 `p`。
     press_ctrl(&mut app, &jobs, 'l');
     press(&mut app, &jobs, KeyCode::Char('P'));
-    assert_eq!(app.task_sort, SortMode::Priority);
+    assert_eq!(app.task_page.sort, SortMode::Priority);
 }
 
 #[test]
 fn sort_prompt_ignores_other_keys_and_esc_cancels() {
     let (jobs, rx) = channel();
     let mut app = task_page_app();
-    app.task_sort = SortMode::Priority;
+    app.task_page.sort = SortMode::Priority;
 
     press_ctrl(&mut app, &jobs, 'l');
     for code in [KeyCode::Char('x'), KeyCode::Enter, KeyCode::Down] {
@@ -1896,12 +1918,16 @@ fn sort_prompt_ignores_other_keys_and_esc_cancels() {
             "{code:?} 不应离开排序提示"
         );
     }
-    assert_eq!(app.task_sort, SortMode::Priority, "未选定前不得改变排序");
+    assert_eq!(
+        app.task_page.sort,
+        SortMode::Priority,
+        "未选定前不得改变排序"
+    );
 
     press(&mut app, &jobs, KeyCode::Esc);
     assert!(matches!(app.screen, Screen::Main), "esc 应取消并回到主画面");
     assert_eq!(
-        app.task_sort,
+        app.task_page.sort,
         SortMode::Priority,
         "取消不得改变原本的排序方式"
     );
@@ -1919,7 +1945,7 @@ fn sort_key_only_works_on_the_task_page() {
         matches!(app.screen, Screen::Main),
         "其他页面不得进入排序提示"
     );
-    assert_eq!(app.task_sort, SortMode::Default);
+    assert_eq!(app.task_page.sort, SortMode::Default);
     assert!(rx.try_recv().is_err(), "其他页面不得送出任务");
 }
 
@@ -1934,7 +1960,7 @@ fn switching_sort_keeps_the_selection_on_the_same_item() {
     // 優先級排序：作業（高、有截止時間）排到任務（高、無截止）之前。
     press_ctrl(&mut app, &jobs, 'l');
     press(&mut app, &jobs, KeyCode::Char('p'));
-    assert_eq!(app.task_sort, SortMode::Priority);
+    assert_eq!(app.task_page.sort, SortMode::Priority);
     assert_eq!(app.page_selection(), 0, "作业应排到第一列");
     assert_eq!(
         selected_label(&app),
@@ -1962,7 +1988,7 @@ fn key_press_replaces_the_previous_message_with_the_current_hints() {
 
     // 動作本身設定的訊息仍要顯示（清除只發生在處理這次按鍵之前）。
     press(&mut app, &jobs, KeyCode::Char('p'));
-    assert_eq!(app.task_sort, SortMode::Priority);
+    assert_eq!(app.task_page.sort, SortMode::Priority);
     assert!(
         app.message_text()
             .is_some_and(|text| text.contains("已按优先级排序")),
@@ -2053,7 +2079,8 @@ fn task_form_fields_cycle_in_screen_order() {
 
 /// 搜尋輸入框目前的內容。
 fn search_value(app: &App) -> Option<String> {
-    app.task_search
+    app.task_page
+        .search
         .as_ref()
         .map(|input| input.value().to_owned())
 }
@@ -2100,7 +2127,7 @@ fn task_form_tag_field_truncates_pasted_text() {
 fn edit_prefills_the_tag_and_ctrl_u_clears_it() {
     let (jobs, _rx) = channel();
     let mut app = task_page_app();
-    app.tasks[0].tag = Some("实验".to_owned());
+    app.task_page.tasks[0].tag = Some("实验".to_owned());
 
     press_ctrl(&mut app, &jobs, 'e');
     let Screen::TaskForm(form) = &app.screen else {
@@ -2146,8 +2173,8 @@ fn task_form_tag_length_is_validated_on_save() {
 fn search_up_down_cycles_existing_tags() {
     let (jobs, _rx) = channel();
     let mut app = task_page_app();
-    app.tasks[0].tag = Some("实验".to_owned());
-    app.tasks[1].tag = Some("复习".to_owned());
+    app.task_page.tasks[0].tag = Some("实验".to_owned());
+    app.task_page.tasks[1].tag = Some("复习".to_owned());
 
     press_ctrl(&mut app, &jobs, 'f');
     // `↓` 第一次由第一個開始，之後首尾循環。
@@ -2160,7 +2187,7 @@ fn search_up_down_cycles_existing_tags() {
 
     // 重新開啟後 `↑` 第一次由最後一個開始。
     press(&mut app, &jobs, KeyCode::Esc);
-    assert_eq!(app.task_tag_cursor, None, "关闭搜索框应清除游标");
+    assert_eq!(app.task_page.tag_cursor, None, "关闭搜索框应清除游标");
     press_ctrl(&mut app, &jobs, 'f');
     press(&mut app, &jobs, KeyCode::Up);
     assert_eq!(search_value(&app).as_deref(), Some("复习"));
@@ -2171,17 +2198,17 @@ fn search_up_down_cycles_existing_tags() {
 
     // `enter` 以預填的標籤套用篩選。
     press(&mut app, &jobs, KeyCode::Enter);
-    assert_eq!(app.task_filter.as_deref(), Some("复习"));
-    assert_eq!(app.task_tag_cursor, None);
-    assert!(app.task_search.is_none(), "套用后应关闭输入框");
+    assert_eq!(app.task_page.filter.as_deref(), Some("复习"));
+    assert_eq!(app.task_page.tag_cursor, None);
+    assert!(app.task_page.search.is_none(), "套用后应关闭输入框");
 }
 
 #[test]
 fn typing_in_the_search_box_restarts_tag_suggestions() {
     let (jobs, _rx) = channel();
     let mut app = task_page_app();
-    app.tasks[0].tag = Some("实验".to_owned());
-    app.tasks[1].tag = Some("复习".to_owned());
+    app.task_page.tasks[0].tag = Some("实验".to_owned());
+    app.task_page.tasks[1].tag = Some("复习".to_owned());
 
     press_ctrl(&mut app, &jobs, 'f');
     press(&mut app, &jobs, KeyCode::Down);
@@ -2190,7 +2217,7 @@ fn typing_in_the_search_box_restarts_tag_suggestions() {
 
     // 手動編輯之後由第一個重新起算。
     type_text(&mut app, &jobs, "报");
-    assert_eq!(app.task_tag_cursor, None);
+    assert_eq!(app.task_page.tag_cursor, None);
     press(&mut app, &jobs, KeyCode::Down);
     assert_eq!(search_value(&app).as_deref(), Some("实验"));
 }
@@ -2209,6 +2236,6 @@ fn tag_suggestions_do_nothing_without_any_tag() {
         Some("报告"),
         "一个标签也没有时上下键不应改变输入"
     );
-    assert_eq!(app.task_tag_cursor, None);
+    assert_eq!(app.task_page.tag_cursor, None);
     assert_eq!(app.message_text(), None, "不应出现任何提示");
 }

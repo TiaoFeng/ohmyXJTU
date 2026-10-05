@@ -305,15 +305,15 @@ fn apply_homework(app: &mut App, update: HomeworkUpdate) {
 /// ——進入主畫面由 `VaultReady` 負責。
 fn apply_tasks(app: &mut App, tasks: Vec<Task>) {
     let previous = app.task_page_selected_id();
-    app.tasks = tasks;
+    app.task_page.tasks = tasks;
     if let Screen::TaskForm(form) = &app.screen
         && form.busy
     {
         app.set_screen(Screen::Main);
     }
     // 已刪除的任務不再存在：把殘留的勾選一併清掉，避免多選集合持續累積。
-    let alive: Vec<u64> = app.tasks.iter().map(|task| task.id).collect();
-    if let Some(selection) = app.task_multi.as_mut() {
+    let alive: Vec<u64> = app.task_page.tasks.iter().map(|task| task.id).collect();
+    if let Some(selection) = app.task_page.multi.as_mut() {
         selection.retain(|id| alive.contains(id));
     }
     app.anchor_task_selection(previous);

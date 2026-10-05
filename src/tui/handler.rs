@@ -125,7 +125,7 @@ pub fn handle_paste(app: &mut App, text: &str) {
         return;
     }
     // 任務搜尋輸入框優先於底層畫面。
-    if let Some(input) = app.task_search.as_mut() {
+    if let Some(input) = app.task_page.search.as_mut() {
         insert_text(input, text);
         return;
     }
@@ -573,7 +573,12 @@ fn handle_task_menu(app: &mut App, key: KeyEvent) {
                     controller::toggle_task_multi(app);
                 }
                 TaskMenuKind::DeleteCompleted => {
-                    let count = app.tasks.iter().filter(|task| task.completed).count();
+                    let count = app
+                        .task_page
+                        .tasks
+                        .iter()
+                        .filter(|task| task.completed)
+                        .count();
                     if count == 0 {
                         app.set_screen(Screen::Main);
                         app.set_message("没有已完成的任务");
@@ -602,7 +607,7 @@ fn handle_task_batch_menu(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
                 return;
             };
             let ids = controller::selected_task_ids(app);
-            app.task_multi = None;
+            app.task_page.multi = None;
             app.set_screen(Screen::Main);
             if ids.is_empty() {
                 app.set_message("选中的任务已不存在");
@@ -718,15 +723,16 @@ fn handle_task_search(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Enter | KeyCode::Char('\n') => {
             let keyword = app
-                .task_search
+                .task_page
+                .search
                 .as_ref()
                 .map(|input| input.value().trim().to_owned());
-            app.task_filter = keyword.filter(|keyword| !keyword.is_empty());
-            app.task_search = None;
-            app.task_tag_cursor = None;
+            app.task_page.filter = keyword.filter(|keyword| !keyword.is_empty());
+            app.task_page.search = None;
+            app.task_page.tag_cursor = None;
             app.homework_state.select(Some(0));
             let matches = app.task_filter_matches();
-            match &app.task_filter {
+            match &app.task_page.filter {
                 Some(keyword) => app.set_message(format!(
                     "筛选“{keyword}”：当前分组 {matches} 项（esc 清除）"
                 )),
@@ -734,11 +740,11 @@ fn handle_task_search(app: &mut App, key: KeyEvent) {
             }
         }
         KeyCode::Esc => {
-            app.task_search = None;
-            app.task_tag_cursor = None;
+            app.task_page.search = None;
+            app.task_page.tag_cursor = None;
             // 輸入框是以現有篩選預填的：esc 只放棄這次編輯，不會動到已套用的
             // 篩選（要清除請在主畫面按 esc），訊息必須說清楚。
-            app.set_message(if app.task_filter.is_some() {
+            app.set_message(if app.task_page.filter.is_some() {
                 "已取消编辑（保留现有筛选）"
             } else {
                 "已取消编辑"
@@ -751,8 +757,8 @@ fn handle_task_search(app: &mut App, key: KeyEvent) {
         }
         _ => {
             // 手動編輯之後重新開始選取，下一次上下鍵由頭／尾重新起算。
-            app.task_tag_cursor = None;
-            if let Some(input) = app.task_search.as_mut() {
+            app.task_page.tag_cursor = None;
+            if let Some(input) = app.task_page.search.as_mut() {
                 edit_line(input, key);
             }
         }
@@ -761,13 +767,13 @@ fn handle_task_search(app: &mut App, key: KeyEvent) {
 
 fn handle_main(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
     // 任務頁的搜尋輸入框開啟時獨占按鍵（enter 套用、esc 取消）。
-    if app.nav == NavItem::Homework && app.task_search.is_some() {
+    if app.nav == NavItem::Homework && app.task_page.search.is_some() {
         handle_task_search(app, key);
         return;
     }
     // `^D` 的二次確認：任何其他按鍵都會取消（與提示訊息保持一致）。
-    if app.task_pending_delete.is_some() && !is_ctrl_char(&key, 'd') {
-        app.task_pending_delete = None;
+    if app.task_page.pending_delete.is_some() && !is_ctrl_char(&key, 'd') {
+        app.task_page.pending_delete = None;
     }
     // 任務頁的組合鍵（新增、編輯、刪除、搜尋、設置）。
     if app.nav == NavItem::Homework && key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -824,7 +830,7 @@ fn handle_main(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
                     .modifiers
                     .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
         {
-            if app.task_multi.is_some() {
+            if app.task_page.multi.is_some() {
                 controller::toggle_task_selection(app);
             } else {
                 controller::toggle_selected_task(app, jobs);

@@ -34,9 +34,6 @@ pub enum Priority {
 }
 
 impl Priority {
-    /// 全部優先級（由高到低）。
-    pub const ALL: [Self; 3] = [Self::High, Self::Medium, Self::Low];
-
     /// 簡體中文標籤。
     pub fn label(self) -> &'static str {
         match self {
@@ -101,14 +98,6 @@ impl TaskState {
             Self::Pending => Tone::Accent,
             Self::Overdue => Tone::Danger,
             Self::Done => Tone::Success,
-        }
-    }
-
-    /// 所屬分組。
-    pub fn group(self) -> HomeworkGroup {
-        match self {
-            Self::Pending | Self::Overdue => HomeworkGroup::Unfinished,
-            Self::Done => HomeworkGroup::Completed,
         }
     }
 }
@@ -266,9 +255,7 @@ pub fn parse_deadline_input(input: &str) -> Result<Option<DateTime<FixedOffset>>
         }
     }
     if let Ok(date) = NaiveDate::parse_from_str(input, "%Y-%m-%d") {
-        let naive = date
-            .and_hms_opt(23, 59, 59)
-            .ok_or_else(|| "截止时间无效".to_owned())?;
+        let naive = end_of_day(date).ok_or_else(|| "截止时间无效".to_owned())?;
         return offset
             .from_local_datetime(&naive)
             .single()
@@ -276,6 +263,11 @@ pub fn parse_deadline_input(input: &str) -> Result<Option<DateTime<FixedOffset>>
             .ok_or_else(|| "截止时间无效".to_owned());
     }
     Err("截止时间格式无法识别（示例：2026-12-31 或 2026-12-31 12:30）".to_owned())
+}
+
+/// 只輸入日期時的截止時間：當日 23:59:59。
+fn end_of_day(date: NaiveDate) -> Option<NaiveDateTime> {
+    date.and_hms_opt(23, 59, 59)
 }
 
 /// 任務頁的一列；分段標題與空白列不可選取。
@@ -393,13 +385,16 @@ impl SortKey {
     }
 }
 
+/// 任務識別碼在排序鍵中的補零寬度：補零後字串比較等同數值比較。
+const ID_SORT_WIDTH: usize = 20;
+
 /// 自訂義任務的排序鍵。
 pub fn task_sort_key(task: &Task) -> SortKey {
     SortKey::new(
         task.deadline.map(|deadline| deadline.timestamp()),
         task.priority,
         &task.content,
-        format!("{:020}", task.id),
+        format!("{:0width$}", task.id, width = ID_SORT_WIDTH),
     )
 }
 
@@ -419,7 +414,11 @@ pub fn homework_sort_key(item: &HomeworkItem) -> SortKey {
 /// 優先級：優先級 → 截止時間 → 標題 → 識別碼；
 /// 截止時間：截止時間 → 優先級 → 標題 → 識別碼。
 /// 兩者的截止時間都是升序，沒有截止時間者一律排在同組最後。
+///
+/// [`SortMode::Default`] 不是混合排序（呼叫端 [`crate::tui::app::App::task_page_entries`]
+/// 會先以 [`SortMode::is_sorted`] 分流），該分支只為了窮盡性而與截止時間同序。
 pub fn compare(mode: SortMode, left: &SortKey, right: &SortKey) -> Ordering {
+    debug_assert!(mode.is_sorted(), "默认排序不经过 compare");
     match mode {
         SortMode::Priority => (
             left.priority,

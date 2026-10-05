@@ -67,7 +67,6 @@ fn parse_deadline_input_rejects_unknown_formats_without_leaking_input() {
 
 #[test]
 fn priority_cycles_and_labels() {
-    assert_eq!(Priority::ALL.len(), 3);
     assert_eq!(Priority::High.label(), "高");
     assert_eq!(Priority::Medium.label(), "中");
     assert_eq!(Priority::Low.label(), "低");
@@ -323,7 +322,7 @@ fn sort_keys_use_display_free_deadlines_and_numeric_task_ids() {
     // 任務識別碼補零，讓字串比較等同數值比較。
     assert_eq!(
         task_sort_key(&task(9, "a", None, Priority::Low)).id,
-        "0".repeat(19) + "9"
+        "0".repeat(ID_SORT_WIDTH - 1) + "9"
     );
     let (small, large) = (
         task_sort_key(&task(9, "a", None, Priority::Low)),

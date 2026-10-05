@@ -1773,7 +1773,19 @@ fn control_f_filters_by_keyword_and_escape_clears_it() {
     press(&mut app, &jobs, KeyCode::Esc);
     assert!(app.task_search.is_none());
     assert_eq!(app.task_filter.as_deref(), Some("报告"), "取消不应清除筛选");
-    assert_eq!(app.message_text(), Some("已取消筛选"));
+    assert_eq!(app.message_text(), Some("已取消编辑（保留现有筛选）"));
+}
+
+#[test]
+fn escape_in_the_search_box_says_nothing_was_filtered_when_none_was() {
+    let (jobs, _rx) = channel();
+    let mut app = task_page_app();
+
+    press_ctrl(&mut app, &jobs, 'f');
+    press(&mut app, &jobs, KeyCode::Esc);
+    assert!(app.task_search.is_none());
+    assert_eq!(app.task_filter, None);
+    assert_eq!(app.message_text(), Some("已取消编辑"));
 }
 
 #[test]

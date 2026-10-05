@@ -291,14 +291,6 @@ pub enum TaskEntry<'a> {
 }
 
 impl TaskEntry<'_> {
-    /// 所屬分組。
-    pub fn group(&self) -> HomeworkGroup {
-        match self {
-            Self::Task(task) => task.group(),
-            Self::Homework(item) => item.state.group(),
-        }
-    }
-
     /// 穩定識別（跨排序、跨重新載入）。
     pub fn id(&self) -> TaskEntryId {
         match self {

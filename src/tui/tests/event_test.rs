@@ -1786,6 +1786,24 @@ fn tasks_event_closes_the_task_form_after_saving() {
 }
 
 #[test]
+fn tasks_event_keeps_an_unsent_task_form_open() {
+    let mut app = app();
+    app.set_screen(Screen::TaskForm(Box::new(TaskFormState::add())));
+    if let Screen::TaskForm(form) = &mut app.screen {
+        form.content.insert('甲');
+    }
+
+    // 背景任務操作（例如 space 標記完成）的快照可能在使用者剛打開表單時抵達：
+    // 尚未送出（busy 為假）的表單不得被關掉，否則剛輸入的內容會消失。
+    apply_event(&mut app, Event::Tasks(vec![todo_task(1, "乙", false)]));
+    let Screen::TaskForm(form) = &app.screen else {
+        panic!("尚未送出的任务表单不应被快照关闭");
+    };
+    assert_eq!(form.content.value(), "甲", "用户输入的内容必须保留");
+    assert_eq!(app.tasks.len(), 1, "快照仍应套用");
+}
+
+#[test]
 fn account_change_keeps_local_tasks_but_clears_task_page_state() {
     let mut app = app();
     app.set_screen(Screen::Main);

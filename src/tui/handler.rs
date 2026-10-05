@@ -736,7 +736,13 @@ fn handle_task_search(app: &mut App, key: KeyEvent) {
         KeyCode::Esc => {
             app.task_search = None;
             app.task_tag_cursor = None;
-            app.set_message("已取消筛选");
+            // 輸入框是以現有篩選預填的：esc 只放棄這次編輯，不會動到已套用的
+            // 篩選（要清除請在主畫面按 esc），訊息必須說清楚。
+            app.set_message(if app.task_filter.is_some() {
+                "已取消编辑（保留现有筛选）"
+            } else {
+                "已取消编辑"
+            });
         }
         // 上下鍵在既有標籤間循環預填；一個標籤也沒有時等同沒反應（也不提示）。
         KeyCode::Up | KeyCode::Down => {

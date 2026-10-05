@@ -186,16 +186,21 @@ fn page_hints(app: &App) -> Vec<String> {
         NavItem::Attendance => hints.push("n/p 翻页".to_owned()),
         NavItem::Homework => {
             // 任務頁的互動模式（搜尋／多選）會接管大部分按鍵，提示以當下可用者為主。
-            if app.task_search.is_some() {
+            if app.task_page.search.is_some() {
                 hints.push("enter 应用筛选".to_owned());
                 hints.push("esc 取消".to_owned());
                 // 沒有任何標籤可選時不提示（上下鍵也等同沒反應）。
-                if app.tasks.iter().any(|task| task.display_tag().is_some()) {
+                if app
+                    .task_page
+                    .tasks
+                    .iter()
+                    .any(|task| task.display_tag().is_some())
+                {
                     hints.push("↑/↓ 选标签".to_owned());
                 }
                 return hints;
             }
-            if app.task_multi.is_some() {
+            if app.task_page.multi.is_some() {
                 hints.push("space 勾选".to_owned());
                 hints.push("enter 批量操作".to_owned());
                 hints.push("esc 退出多选".to_owned());
@@ -218,7 +223,7 @@ fn page_hints(app: &App) -> Vec<String> {
             hints.push("^f 搜索".to_owned());
             hints.push("^t 设置".to_owned());
             hints.push("^L 排序".to_owned());
-            if app.task_filter.is_some() {
+            if app.task_page.filter.is_some() {
                 hints.push("esc 清除筛选".to_owned());
             }
             hints.push("s 学期".to_owned());

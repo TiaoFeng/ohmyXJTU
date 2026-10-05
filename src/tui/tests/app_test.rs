@@ -397,7 +397,7 @@ fn task_page_combines_tasks_and_homework_in_one_list() {
     let mut app = App::new(AccessPolicy::Auto);
     app.set_screen(Screen::Main);
     app.nav = NavItem::Homework;
-    app.tasks = vec![todo(1, "写实验报告", false), todo(2, "复习", true)];
+    app.task_page.tasks = vec![todo(1, "写实验报告", false), todo(2, "复习", true)];
     app.homework = Page::Ready(HomeworkData {
         items: aggregate(&[input], now),
         ..HomeworkData::default()
@@ -440,7 +440,7 @@ fn task_page_combines_tasks_and_homework_in_one_list() {
     assert_eq!(app.page_selection(), 0, "非空清单应首尾循环");
 
     // 篩選同時作用於任務與作業，但不影響分組計數。
-    app.task_filter = Some("第一次作业".to_owned());
+    app.task_page.filter = Some("第一次作业".to_owned());
     assert_eq!(app.page_len(), 1, "筛选后只剩匹配的作业");
     assert_eq!(app.task_filter_matches(), 1);
     assert_eq!(
@@ -470,7 +470,7 @@ fn sortable_app(sort: SortMode) -> App {
     let mut app = App::new(AccessPolicy::Auto);
     app.set_screen(Screen::Main);
     app.nav = NavItem::Homework;
-    app.tasks = vec![
+    app.task_page.tasks = vec![
         Task {
             deadline: Some(
                 chrono::DateTime::parse_from_rfc3339("2026-12-31T20:00:00+08:00")
@@ -491,7 +491,7 @@ fn sortable_app(sort: SortMode) -> App {
         ),
         ..HomeworkData::default()
     });
-    app.task_sort = sort;
+    app.task_page.sort = sort;
     app
 }
 
@@ -589,7 +589,7 @@ fn sorted_entries_follow_the_selection_and_keep_filtering() {
     );
 
     // 分組與搜尋在混合排序下依然生效（搜尋會同時過濾任務與作業）。
-    app.task_filter = Some("整理".to_owned());
+    app.task_page.filter = Some("整理".to_owned());
     let labels: Vec<String> = app
         .task_page_entries()
         .into_iter()

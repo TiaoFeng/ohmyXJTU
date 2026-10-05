@@ -48,7 +48,7 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
     let title = homework_title(app, counts);
     let rows = app.task_page_rows();
     // 作業尚未載入且沒有任何任務：整頁顯示載入中／失敗／空結果。
-    if rows.is_empty() && app.tasks.is_empty() && app.homework.ready().is_none() {
+    if rows.is_empty() && app.task_page.tasks.is_empty() && app.homework.ready().is_none() {
         empty(
             frame,
             area,
@@ -62,7 +62,7 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
     // 分組標籤列＋（搜尋中）搜尋輸入框＋（更新失敗或有待核实）提示列。
     let header = homework_tabs(app, counts);
     let warning = homework_warning(app, counts);
-    let search_row = u16::from(app.task_search.is_some());
+    let search_row = u16::from(app.task_page.search.is_some());
     let header_height = 1 + search_row + u16::from(warning.is_some());
     let [header_area, body_area] =
         Layout::vertical([Constraint::Length(header_height), Constraint::Min(3)]).areas(area);
@@ -76,7 +76,7 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
         Paragraph::new(header).style(THEME.base_style()),
         header_rows[0],
     );
-    if let Some(input) = app.task_search.as_ref() {
+    if let Some(input) = app.task_page.search.as_ref() {
         draw_search(frame, input, header_rows[1]);
     }
     if let Some(line) = warning {
@@ -106,7 +106,7 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
             PageRow::Header(_) | PageRow::Spacer => needs,
         });
     // 多選模式會在列首加一個勾選框欄，欄寬計算必須同步扣除。
-    let checkbox_width = if app.task_multi.is_some() {
+    let checkbox_width = if app.task_page.multi.is_some() {
         MULTI_CHECKBOX_WIDTH
     } else {
         0
@@ -124,11 +124,11 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
     };
 
     let now = Local::now().fixed_offset();
-    // 所有借用都在這個區塊內結束（選取索引與列模型借自 `app`），
-    // 之後才能以可變借用更新清單狀態。
+    // 借用都在這個區塊內結束（`rows` 與選取索引都借用 `app`），之後才能以可變
+    // 借用更新清單狀態。
     let (items, detail, visual) = {
         let visual = visual_index(&rows, app.page_selection());
-        let multi = app.task_multi.as_ref();
+        let multi = app.task_page.multi.as_ref();
         let items: Vec<ListItem<'static>> = rows
             .iter()
             .map(|row| match row {
@@ -225,11 +225,11 @@ fn render_entries(
 ///
 /// 不經 [`super::empty`]：該函式將非載入中的文字視為失敗訊息，會讓空結果看起來像載入失敗。
 fn empty_homework(frame: &mut Frame, area: Rect, title: &str, app: &App) {
-    let message = if let Some(keyword) = &app.task_filter {
+    let message = if let Some(keyword) = &app.task_page.filter {
         format!("没有匹配的条目（筛选“{keyword}”）")
     } else if app.homework.is_loading() {
         app.homework.note().unwrap_or("正在汇总作业…").to_owned()
-    } else if app.tasks.is_empty()
+    } else if app.task_page.tasks.is_empty()
         && app
             .homework
             .ready()
@@ -286,7 +286,7 @@ fn homework_tabs(app: &App, counts: TaskPageCounts) -> Line<'static> {
             THEME.muted_style(),
         ));
     }
-    if let Some(keyword) = &app.task_filter {
+    if let Some(keyword) = &app.task_page.filter {
         spans.push(Span::styled(
             format!(
                 "  筛选“{keyword}”：{} 项（esc 清除）",
@@ -296,9 +296,9 @@ fn homework_tabs(app: &App, counts: TaskPageCounts) -> Line<'static> {
         ));
     }
     // 混合排序時分段標題不再出現，這裡說明目前的排序方式（任務與作業混在一起）。
-    if app.task_sort.is_sorted() {
+    if app.task_page.sort.is_sorted() {
         spans.push(Span::styled(
-            format!("  排序：{}（任务与作业混合）", app.task_sort.label()),
+            format!("  排序：{}（任务与作业混合）", app.task_page.sort.label()),
             THEME.accent_style(),
         ));
     }

@@ -124,8 +124,8 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
     };
 
     let now = Local::now().fixed_offset();
-    // 所有借用都在這個區塊內結束（選取索引與列模型借自 `app`），
-    // 之後才能以可變借用更新清單狀態。
+    // 借用都在這個區塊內結束（`rows` 與選取索引都借用 `app`），之後才能以可變
+    // 借用更新清單狀態。
     let (items, detail, visual) = {
         let visual = visual_index(&rows, app.page_selection());
         let multi = app.task_page.multi.as_ref();

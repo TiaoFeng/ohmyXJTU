@@ -1447,10 +1447,7 @@ fn control_a_adds_a_task_from_the_form() {
     );
 
     type_text(&mut app, &jobs, "买教材");
-    // 欄位順序：內容 → 標籤 → 描述 → 截止。
-    press(&mut app, &jobs, KeyCode::Tab);
-    press(&mut app, &jobs, KeyCode::Tab);
-    press(&mut app, &jobs, KeyCode::Tab);
+    tab_to(&mut app, &jobs, TaskField::Deadline);
     type_text(&mut app, &jobs, "2026-12-31 12:30");
     press_ctrl(&mut app, &jobs, 's');
 
@@ -1493,9 +1490,7 @@ fn task_form_reports_validation_errors_in_place() {
 
     // 截止時間格式錯誤：同樣就地報錯，且已輸入的內容保留。
     type_text(&mut app, &jobs, "买教材");
-    press(&mut app, &jobs, KeyCode::Tab);
-    press(&mut app, &jobs, KeyCode::Tab);
-    press(&mut app, &jobs, KeyCode::Tab);
+    tab_to(&mut app, &jobs, TaskField::Deadline);
     type_text(&mut app, &jobs, "不是日期");
     press_ctrl(&mut app, &jobs, 's');
     let Screen::TaskForm(form) = &app.screen else {
@@ -1532,9 +1527,7 @@ fn task_form_description_accepts_multiple_lines() {
     let mut app = task_page_app();
     press_ctrl(&mut app, &jobs, 'a');
     type_text(&mut app, &jobs, "复习");
-    // 欄位順序：內容 → 標籤 → 描述。
-    press(&mut app, &jobs, KeyCode::Tab);
-    press(&mut app, &jobs, KeyCode::Tab);
+    tab_to(&mut app, &jobs, TaskField::Description);
 
     type_text(&mut app, &jobs, "第一行");
     press(&mut app, &jobs, KeyCode::Enter);
@@ -1545,12 +1538,11 @@ fn task_form_description_accepts_multiple_lines() {
     assert_eq!(form.description.value(), "第一行\n第二行", "描述应允许多行");
     assert_eq!(form.description.line_count(), 2);
 
-    // 優先級與完成狀態以左右鍵切換（描述 → 截止 → 優先級 → 完成）。
-    press(&mut app, &jobs, KeyCode::Tab);
-    press(&mut app, &jobs, KeyCode::Tab);
+    // 優先級與完成狀態以左右鍵切換。
+    tab_to(&mut app, &jobs, TaskField::Priority);
     press(&mut app, &jobs, KeyCode::Right);
     press(&mut app, &jobs, KeyCode::Right);
-    press(&mut app, &jobs, KeyCode::Tab);
+    tab_to(&mut app, &jobs, TaskField::Completed);
     press(&mut app, &jobs, KeyCode::Char(' '));
     press_ctrl(&mut app, &jobs, 's');
 
@@ -1997,10 +1989,7 @@ fn task_form_priority_cycles_low_to_high_with_right_arrow() {
     let (jobs, _rx) = channel();
     let mut app = task_page_app();
     press_ctrl(&mut app, &jobs, 'a');
-    // 焦點依序為 內容 → 標籤 → 描述 → 截止 → 優先級。
-    for _ in 0..4 {
-        press(&mut app, &jobs, KeyCode::Tab);
-    }
+    tab_to(&mut app, &jobs, TaskField::Priority);
     let Screen::TaskForm(form) = &app.screen else {
         panic!("应停留在任务表单");
     };
@@ -2028,6 +2017,38 @@ fn task_form_priority(app: &App) -> Priority {
     }
 }
 
+/// 以 `Tab` 移動焦點到指定欄位。
+///
+/// 不硬編 Tab 次數：欄位順序改動（例如新增欄位）時測試不必跟著改，同時仍
+/// 驗證「該欄位可以由 Tab 抵達」——走完一輪（`ALL.len()` 次）仍未抵達即失敗。
+fn tab_to(app: &mut App, jobs: &Sender<Job>, field: TaskField) {
+    for _ in 0..TaskField::ALL.len() {
+        if matches!(&app.screen, Screen::TaskForm(form) if form.focus == field) {
+            return;
+        }
+        press(app, jobs, KeyCode::Tab);
+    }
+    panic!("Tab 无法聚焦到 {field:?} 字段");
+}
+
+#[test]
+fn task_form_fields_cycle_in_screen_order() {
+    // 畫面順序＝Tab 順序：`next()` 走一輪應回到起點，且順序與 `ALL` 一致。
+    let mut field = TaskField::Content;
+    let mut order = vec![field];
+    for _ in 1..TaskField::ALL.len() {
+        field = field.next();
+        order.push(field);
+    }
+    assert_eq!(order, TaskField::ALL.to_vec(), "Tab 顺序即画面字段顺序");
+    assert_eq!(field.next(), TaskField::Content, "Tab 应循环回第一个字段");
+    assert_eq!(
+        TaskField::Content.previous(),
+        TaskField::Completed,
+        "Shift+Tab 应反向循环"
+    );
+}
+
 // ── 任務標籤 ───────────────────────────────────────────
 
 /// 搜尋輸入框目前的內容。
@@ -2043,8 +2064,7 @@ fn task_form_tag_field_blocks_typing_beyond_the_limit() {
     let mut app = task_page_app();
     press_ctrl(&mut app, &jobs, 'a');
     type_text(&mut app, &jobs, "写报告");
-    // 欄位順序：內容 → 標籤。
-    press(&mut app, &jobs, KeyCode::Tab);
+    tab_to(&mut app, &jobs, TaskField::Tag);
     type_text(&mut app, &jobs, "六个汉字宽度啊");
 
     let Screen::TaskForm(form) = &app.screen else {
@@ -2067,7 +2087,7 @@ fn task_form_tag_field_truncates_pasted_text() {
     let (jobs, _rx) = channel();
     let mut app = task_page_app();
     press_ctrl(&mut app, &jobs, 'a');
-    press(&mut app, &jobs, KeyCode::Tab);
+    tab_to(&mut app, &jobs, TaskField::Tag);
     handle_paste(&mut app, "一二三四五六七八九十");
 
     let Screen::TaskForm(form) = &app.screen else {
@@ -2088,7 +2108,7 @@ fn edit_prefills_the_tag_and_ctrl_u_clears_it() {
     };
     assert_eq!(form.tag.value(), "实验", "编辑表单应预填标签");
 
-    press(&mut app, &jobs, KeyCode::Tab);
+    tab_to(&mut app, &jobs, TaskField::Tag);
     press_ctrl(&mut app, &jobs, 'u');
     let Screen::TaskForm(form) = &app.screen else {
         panic!("应停留在任务表单");

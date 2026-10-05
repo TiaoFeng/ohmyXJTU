@@ -2805,8 +2805,9 @@ fn task_page_separates_sections_with_a_spacer_and_pink_headers() {
 #[test]
 fn task_rows_show_priority_state_and_deadline_without_greying_out() {
     let mut task = todo(1, "写实验报告", Priority::High, false);
+    // 用遠未來日期：固定日期一旦跨過就會被判為「逾期」，測試不再決定性。
     task.deadline = Some(
-        chrono::DateTime::parse_from_rfc3339("2026-10-05T12:00:00+08:00").expect("固定截止时间"),
+        chrono::DateTime::parse_from_rfc3339("2099-12-31T12:00:00+08:00").expect("固定截止时间"),
     );
     let app_tasks = vec![task, todo(2, "复习", Priority::Low, false)];
     let mut app = task_page_app(app_tasks, Vec::new());
@@ -2820,7 +2821,7 @@ fn task_rows_show_priority_state_and_deadline_without_greying_out() {
     let (row_y, row) = find_row(backend, "写实验报告");
     assert!(row.contains('高'), "应显示优先级：\n{row}");
     assert!(row.contains("待完成"), "应显示状态：\n{row}");
-    assert!(row.contains("2026-10-05 12:00"), "应显示截止时间：\n{row}");
+    assert!(row.contains("2099-12-31 12:00"), "应显示截止时间：\n{row}");
 
     // 未完成的任務維持一般文字色（不以灰色弱化）。
     assert_eq!(

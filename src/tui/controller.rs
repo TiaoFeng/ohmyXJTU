@@ -192,30 +192,15 @@ pub(super) fn change_group(app: &mut App, delta: i32) {
     }
 }
 
-/// 任務頁項目的識別（排序改變後把選取錨定回同一個項目）。
-fn entry_id(entry: &TaskEntry<'_>) -> (u8, String) {
-    match entry {
-        TaskEntry::Task(task) => (0, task.id.to_string()),
-        TaskEntry::Homework(item) => (1, item.activity_id.clone()),
-    }
-}
-
 /// 套用任務頁的排序方式（`^L`）：立即生效並回到主畫面。
 ///
 /// 排序只影響顯示順序；為了不讓游標跳到別的項目，切換前先記住目前選取的項目，
 /// 切換後在清單中找回它（找不到時回到第一項）。
 pub(super) fn set_task_sort(app: &mut App, mode: SortMode) {
-    let previous = app.selected_entry().map(|entry| entry_id(&entry));
+    let previous = app.task_page_selected_id();
     app.task_sort = mode;
     app.set_screen(Screen::Main);
-    let restored = previous
-        .and_then(|id| {
-            app.task_page_entries()
-                .iter()
-                .position(|entry| entry_id(entry) == id)
-        })
-        .unwrap_or(0);
-    app.set_selection(restored.min(app.page_len().saturating_sub(1)));
+    app.anchor_task_selection(previous);
     app.set_message(match mode {
         SortMode::Default => "已恢复默认排序（任务在前、作业在后）".to_owned(),
         _ => format!("已按{}排序（任务与作业混合）", mode.label()),
@@ -510,12 +495,16 @@ pub(super) fn toggle_task_selection(app: &mut App) {
 }
 
 /// 目前勾選的任務識別碼（依清單順序）。
+///
+/// 只回傳**目前可見**的項目（當前分組＋當前搜尋）：多選狀態可能跨分組或
+/// 搜尋而保留（切回原分組時勾選仍在），但批量操作只應作用於使用者此刻看
+/// 得到的任務，否則會刪改畫面上不存在的項目。
 pub(super) fn selected_task_ids(app: &App) -> Vec<u64> {
     let Some(selection) = app.task_multi.as_ref() else {
         return Vec::new();
     };
-    app.tasks
-        .iter()
+    app.task_group_items(app.homework_group)
+        .into_iter()
         .filter(|task| selection.contains(&task.id))
         .map(|task| task.id)
         .collect()

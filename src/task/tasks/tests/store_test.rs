@@ -86,49 +86,74 @@ fn the_file_itself_contains_no_plaintext() {
             .any(|window| window == b"TOP-SECRET-CONTENT"),
         "任务文件不得包含明文内容"
     );
-    // 以其他口令載入：無法解開，走備份路徑而以空清單重新開始。
+    // 以其他口令載入：無法解開，原檔保持原樣並標記不可用。
     let mut other = new_store(&dir);
     let notice = other.init("another passphrase").unwrap().expect("提示");
-    assert!(notice.contains("已备份"));
+    assert!(notice.contains("未被修改"));
     assert!(other.tasks().is_empty());
 }
 
 #[test]
-fn unreadable_file_is_backed_up_and_reset() {
+fn unreadable_file_is_left_untouched_and_marks_the_store_unavailable() {
     let dir = tempdir().unwrap();
-    fs::write(dir.path().join("tasks.vault"), b"not an envelope at all").unwrap();
+    let path = dir.path().join("tasks.vault");
+    fs::write(&path, b"not an envelope at all").unwrap();
 
     let mut store = new_store(&dir);
     let notice = store.init(PASSPHRASE).unwrap().expect("应当有提示");
-    assert!(notice.contains("已备份"), "提示应说明已备份：{notice}");
-    assert!(store.tasks().is_empty(), "无法读取时应以空清单重新开始");
     assert!(
-        dir.path().join("tasks.vault.bak").is_file(),
-        "原文件应当被保留为 .bak"
+        notice.contains("未被修改"),
+        "提示应说明原文件未被修改：{notice}"
+    );
+    assert!(
+        notice.contains("tasks.vault"),
+        "提示应包含原文件路径：{notice}"
+    );
+    assert!(store.tasks().is_empty(), "无法读取时不得凭空产生任务");
+    assert_eq!(
+        fs::read(&path).unwrap(),
+        b"not an envelope at all",
+        "原文件必须保持原样"
+    );
+    assert!(
+        !dir.path().join("tasks.vault.bak").exists(),
+        "不得再产生 .bak 备份"
     );
 
-    // 重新 provision 之後仍可正常保存與載入。
-    store.add(task("新的任务")).unwrap();
-    let mut reloaded = new_store(&dir);
-    reloaded.init(PASSPHRASE).unwrap();
-    assert_eq!(reloaded.tasks().len(), 1);
+    // 存儲被標記為不可用：後續操作回報原因，且不覆寫原文件。
+    let err = store.add(task("新的任务")).unwrap_err();
+    assert!(
+        matches!(err, AppError::Crypto(_)),
+        "不可用时保存应回报明确错误：{err:?}"
+    );
+    assert_eq!(
+        fs::read(&path).unwrap(),
+        b"not an envelope at all",
+        "不可用时也不得改动原文件"
+    );
 }
 
 #[test]
-fn a_file_from_another_passphrase_is_backed_up_too() {
+fn a_file_from_another_passphrase_is_left_untouched() {
     let dir = tempdir().unwrap();
     let mut first = new_store(&dir);
     first.init(PASSPHRASE).unwrap();
     first.add(task("旧口令下的任务")).unwrap();
+    let before = fs::read(dir.path().join("tasks.vault")).unwrap();
 
     let mut second = new_store(&dir);
     let notice = second
         .init("a different passphrase")
         .unwrap()
         .expect("提示");
-    assert!(notice.contains("已备份"));
+    assert!(notice.contains("未被修改"));
     assert!(second.tasks().is_empty());
-    assert!(dir.path().join("tasks.vault.bak").is_file());
+    assert_eq!(
+        fs::read(dir.path().join("tasks.vault")).unwrap(),
+        before,
+        "原文件必须保持原样"
+    );
+    assert!(!dir.path().join("tasks.vault.bak").exists());
 }
 
 #[test]
@@ -216,4 +241,84 @@ fn rekey_moves_the_file_to_the_new_passphrase() {
     let mut again = new_store(&dir);
     again.init("a brand new passphrase").unwrap();
     assert_eq!(again.tasks().len(), 2);
+}
+
+#[test]
+fn rekey_is_refused_when_the_store_is_unavailable() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("tasks.vault");
+    fs::write(&path, b"not an envelope at all").unwrap();
+
+    let mut store = new_store(&dir);
+    store.init(PASSPHRASE).unwrap().expect("应当有提示");
+
+    // 存儲不可用時換口令必須被拒絕：不得以記憶體中的空任務覆寫原檔。
+    let err = store.rekey("a brand new passphrase").unwrap_err();
+    assert!(
+        matches!(err, AppError::Crypto(_)),
+        "不可用时换口令应被拒绝：{err:?}"
+    );
+    assert_eq!(
+        fs::read(&path).unwrap(),
+        b"not an envelope at all",
+        "被拒绝的换口令不得改动原文件"
+    );
+    assert!(
+        !dir.path().join("tasks.vault.bak").exists(),
+        "不得产生任何备份"
+    );
+}
+
+#[test]
+fn a_failed_reinit_drops_the_loaded_tasks_and_blocks_writes() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("tasks.vault");
+    let mut store = new_store(&dir);
+    // 先成功載入一份任務（`sealed` 與 `tasks` 都有內容）。
+    store.init(PASSPHRASE).unwrap();
+    store.add(task("第一次加载")).unwrap();
+    assert_eq!(store.tasks().len(), 1);
+
+    // 同一個實例再次初始化：原檔已被換成無法解讀的內容。
+    fs::write(&path, b"corrupted by someone else").unwrap();
+    let notice = store.init(PASSPHRASE).unwrap().expect("应当有提示");
+    assert!(notice.contains("未被修改"));
+    assert!(
+        store.tasks().is_empty(),
+        "再次初始化失败后不得保留先前的任务"
+    );
+
+    // 後續任何寫入都必須失敗，且不得改動原檔。
+    let err = store.add(task("第二次")).unwrap_err();
+    assert!(
+        matches!(err, AppError::Crypto(_)),
+        "不可用时的保存应被拒绝：{err:?}"
+    );
+    assert!(store.rekey("another passphrase").is_err());
+    assert_eq!(
+        fs::read(&path).unwrap(),
+        b"corrupted by someone else",
+        "原文件必须保持原样"
+    );
+}
+
+#[test]
+fn mark_unavailable_blocks_saves_even_with_a_loaded_key() {
+    let dir = tempdir().unwrap();
+    let mut store = new_store(&dir);
+    store.init(PASSPHRASE).unwrap();
+    store.add(task("甲")).unwrap();
+
+    // 直接標記不可用（`load()` 的硬錯誤路徑）時，記憶體中的金鑰仍在。
+    store.mark_unavailable("任务文件不可用".to_owned());
+    let err = store.add(task("乙")).unwrap_err();
+    assert!(
+        matches!(err, AppError::Crypto(_)),
+        "不可用时的保存应被拒绝：{err:?}"
+    );
+
+    // 原檔仍只有第一筆。
+    let mut reloaded = new_store(&dir);
+    reloaded.init(PASSPHRASE).unwrap();
+    assert_eq!(reloaded.tasks().len(), 1, "不得写入第二条任务");
 }

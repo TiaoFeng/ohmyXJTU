@@ -270,6 +270,17 @@ impl HomeworkData {
     }
 }
 
+/// 任務頁項目的穩定識別：排序或內容變動後據此把選取錨定回同一個項目。
+///
+/// 位置（索引）會因為分組、搜尋與排序改變而失效；識別碼不會。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TaskEntryId {
+    /// 自訂義任務的識別碼。
+    Task(u64),
+    /// 思源學堂作業的活動識別碼。
+    Homework(String),
+}
+
 /// 任務頁目前選取的項目。
 #[derive(Debug, Clone, Copy)]
 pub enum TaskEntry<'a> {
@@ -285,6 +296,14 @@ impl TaskEntry<'_> {
         match self {
             Self::Task(task) => task.group(),
             Self::Homework(item) => item.state.group(),
+        }
+    }
+
+    /// 穩定識別（跨排序、跨重新載入）。
+    pub fn id(&self) -> TaskEntryId {
+        match self {
+            Self::Task(task) => TaskEntryId::Task(task.id),
+            Self::Homework(item) => TaskEntryId::Homework(item.activity_id.clone()),
         }
     }
 }
@@ -1414,6 +1433,34 @@ impl App {
             return None;
         }
         self.task_page_entries().get(self.page_selection()).copied()
+    }
+
+    /// 任務頁目前選取項目的穩定識別（不受目前頁面影響）。
+    ///
+    /// 與 [`Self::selected_entry`] 不同，這裡不依 `nav`：背景資料更新時使用者
+    /// 可能正在別的頁面，仍然要能保留任務頁的選取。
+    pub fn task_page_selected_id(&self) -> Option<TaskEntryId> {
+        self.task_page_entries()
+            .get(self.homework_state.selected()?)
+            .map(TaskEntry::id)
+    }
+
+    /// 依先前記下的識別把任務頁的選取錨定回同一個項目。
+    ///
+    /// 找不到（項目已移除、換分組或被搜尋過濾）時夾取舊索引。長度一律以
+    /// `task_page_entries()` 為準，而非 [`Self::page_len`]——後者依 `nav`
+    /// 分派，背景更新時可能回傳別的頁面長度。
+    pub fn anchor_task_selection(&mut self, previous: Option<TaskEntryId>) {
+        let fallback = self.homework_state.selected().unwrap_or(0);
+        let restored = {
+            let entries = self.task_page_entries();
+            let len = entries.len();
+            let found = previous
+                .and_then(|id| entries.iter().position(|entry| entry.id() == id))
+                .unwrap_or(fallback);
+            found.min(len.saturating_sub(1))
+        };
+        self.homework_state.select(Some(restored));
     }
 
     /// 任務頁的可選取項目（依目前的排序方式排列）。

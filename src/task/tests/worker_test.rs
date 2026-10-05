@@ -5894,6 +5894,51 @@ fn changing_the_passphrase_reencrypts_the_task_file() {
 }
 
 #[test]
+fn changing_the_passphrase_is_refused_when_the_task_file_is_unreadable() {
+    let mut harness = harness(fake_flow(0));
+    // 先放一個無法解讀的任務檔：解鎖後任務存儲會被標記為不可用。
+    std::fs::write(harness.tasks_path(), b"not an envelope at all").expect("写入损坏的任务文件");
+    let before = std::fs::read(harness.tasks_path()).expect("读取原档");
+
+    harness
+        .dispatch(Job::Unlock {
+            passphrase: "secret123".into(),
+        })
+        .expect("任务文件不可用不应阻断解锁");
+    let events = harness.wait_until_unlocked();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Notice(message) if message.contains("任务文件无法读取")
+        )),
+        "解锁应提示任务文件无法读取：{events:?}"
+    );
+
+    // 換口令必須被拒絕：不得以記憶體中的空任務覆寫原檔。
+    let err = harness
+        .dispatch(Job::ChangePassphrase {
+            old: "secret123".into(),
+            new: "new-passphrase-1".into(),
+        })
+        .expect_err("任务文件不可用时换口令应失败");
+    assert!(
+        err.to_string().contains("任务文件无法读取"),
+        "错误应说明任务文件无法读取：{err}"
+    );
+    assert_eq!(
+        std::fs::read(harness.tasks_path()).expect("原档仍在"),
+        before,
+        "被拒绝的换口令不得改动原文件"
+    );
+    // 換口令在寫入保險庫之前就失敗：憑證口令必須維持不變。
+    harness.vault.load("secret123").expect("旧口令仍有效");
+    assert!(
+        harness.vault.load("new-passphrase-1").is_err(),
+        "新口令不得生效"
+    );
+}
+
+#[test]
 fn task_save_failure_reports_the_tasks_target() {
     let mut harness = harness(fake_flow(0));
     harness

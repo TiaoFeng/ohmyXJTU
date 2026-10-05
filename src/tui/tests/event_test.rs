@@ -6,16 +6,18 @@ use std::sync::mpsc::channel;
 use std::time::Duration;
 
 use crate::config::AccessPolicy;
-use crate::domain::homework::{HomeworkGroup, HomeworkInput, HomeworkState, aggregate};
+use crate::domain::homework::{
+    HomeworkGroup, HomeworkInput, HomeworkItem, HomeworkState, aggregate,
+};
 use crate::domain::semester::{TermCode, TermSource};
-use crate::domain::todo::{Priority, Task};
+use crate::domain::todo::{Priority, SortMode, Task};
 use crate::model::{ActivityDetailView, FlowData, ScheduleData};
 use crate::session::{AccessMode, SiteKind};
 use crate::sites::lms::LmsCourse;
 use crate::task::{CoursesData, Event, FailedTarget, HomeworkUpdate, Job};
 use crate::tui::app::{
     AgreementState, App, FormState, HomeworkData, LmsLevel, LoginScreen, NavItem, Page, Screen,
-    SettingsState, TaskFormState, TermPickerState,
+    SettingsState, TaskEntry, TaskFormState, TermPickerState,
 };
 use crate::tui::controller;
 use crate::tui::text::InputLine;
@@ -1169,6 +1171,26 @@ fn homework_update(progress: Option<(usize, usize)>) -> HomeworkUpdate {
     }
 }
 
+/// 建構作業項目（指定活動識別碼與標題）；順序由 `aggregate` 的排序鍵決定。
+fn homework_items(entries: &[(&str, &str)]) -> Vec<HomeworkItem> {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00+08:00").expect("固定时间");
+    let inputs: Vec<HomeworkInput> = entries
+        .iter()
+        .map(|(activity_id, title)| HomeworkInput {
+            course_id: "1".to_owned(),
+            course_name: "编译原理".to_owned(),
+            activity_id: (*activity_id).to_owned(),
+            title: (*title).to_owned(),
+            end_time: None,
+            description: None,
+            submit_by_group: Some(false),
+            submission_count: Some(0),
+            note: None,
+        })
+        .collect();
+    aggregate(&inputs, now)
+}
+
 /// 背景資料更新不得關閉使用者正在操作的學期選擇器。
 #[test]
 fn term_picker_survives_background_data_updates() {
@@ -1619,6 +1641,97 @@ fn tasks_event_replaces_the_list_and_anchors_the_selection() {
         app.page_group_count(HomeworkGroup::Completed),
         1,
         "分组计数应包含自訂義任务"
+    );
+}
+
+/// 作業重新載入後，選取要跟著活動識別碼（不是位置）：新項目插到前面時，
+/// 原本選中的作業會往後移，只夾取索引會指到別的作業。
+#[test]
+fn homework_event_anchors_the_selection_by_activity_id() {
+    let mut app = app();
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Homework;
+    app.homework = Page::Ready(HomeworkData {
+        term_label: Some("2026-2027 学年 第 1 学期".to_owned()),
+        term_source: Some("考勤系统"),
+        courses_included: 1,
+        courses_skipped: 0,
+        term_options: Vec::new(),
+        items: homework_items(&[("a", "甲")]),
+        issues: Vec::new(),
+        courses_failed: 0,
+        progress: None,
+    });
+    app.homework_state.select(Some(0));
+    assert!(
+        matches!(
+            app.selected_entry(),
+            Some(TaskEntry::Homework(item)) if item.activity_id == "a"
+        ),
+        "初始应选中活动 a"
+    );
+
+    // 重新載入：新增一項標題排序更前面的作業（「乙」在「甲」之前）。
+    apply_event(
+        &mut app,
+        Event::Homework(HomeworkUpdate {
+            items: homework_items(&[("a", "甲"), ("b", "乙")]),
+            ..homework_update(None)
+        }),
+    );
+
+    assert!(
+        matches!(
+            app.selected_entry(),
+            Some(TaskEntry::Homework(item)) if item.activity_id == "a"
+        ),
+        "选取应锚定在同一作业，而不是停在原索引"
+    );
+    assert_eq!(app.page_selection(), 1, "活动 a 现在排在第 2 项");
+}
+
+/// 混合排序下，任務在混合清單的位置與「任務子清單」的位置不同：選取仍要
+/// 錨定在識別碼，否則會用子清單的位置去指混合清單，選到別的項目。
+#[test]
+fn tasks_event_anchors_the_selection_under_mixed_sort() {
+    let mut app = app();
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Homework;
+    app.task_sort = SortMode::Priority;
+    let mut low = todo_task(1, "甲", false);
+    low.priority = Priority::Low;
+    let mut high = todo_task(2, "乙", false);
+    high.priority = Priority::High;
+    app.tasks = vec![low, high];
+    app.homework = Page::Ready(HomeworkData {
+        term_label: None,
+        term_source: None,
+        courses_included: 1,
+        courses_skipped: 0,
+        term_options: Vec::new(),
+        items: homework_items(&[("a", "第一次作业")]),
+        issues: Vec::new(),
+        courses_failed: 0,
+        progress: None,
+    });
+
+    // 混合排序下，低優先級的任務 1 排在最後（高優先級的任務 2 與作業在前）。
+    let index = app
+        .task_page_entries()
+        .iter()
+        .position(|entry| matches!(entry, TaskEntry::Task(task) if task.id == 1))
+        .expect("任务 1 应在清单中");
+    assert_eq!(index, 2, "低优先级任务应排在混合清单最后");
+    app.homework_state.select(Some(index));
+
+    // 重新載入同一批任務：選取必須留在任務 1，而不是退回任務子清單的位置。
+    let snapshot = app.tasks.clone();
+    apply_event(&mut app, Event::Tasks(snapshot));
+
+    assert_eq!(app.page_selection(), 2, "选取应锚定在任务 1 的混合清单位置");
+    assert!(
+        matches!(app.selected_entry(), Some(TaskEntry::Task(task)) if task.id == 1),
+        "仍应选中任务 1"
     );
 }
 

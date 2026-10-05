@@ -197,6 +197,7 @@ fn unreadable_task_file_is_reported_without_blocking() {
         store.init("other-passphrase").expect("建立旧的任務檔");
         store.add(task("旧任务")).expect("写入");
     }
+    let before = std::fs::read(service.tasks_path()).expect("读取旧档");
 
     service.init("secret123");
     let events = service.collect_events(Duration::from_secs(20), Duration::from_millis(150));
@@ -205,14 +206,56 @@ fn unreadable_task_file_is_reported_without_blocking() {
             event,
             Event::Notice(message) if message.contains("任务文件无法读取")
         )),
-        "应提示已备份并清空：{events:?}"
+        "应提示任务文件无法读取：{events:?}"
     );
     let tasks = service.snapshot(&events);
-    assert!(tasks.is_empty(), "无法解开时应以空清单重新开始");
+    assert!(tasks.is_empty(), "无法解开时不得凭空产生任务");
+    assert_eq!(
+        std::fs::read(service.tasks_path()).expect("原档仍在"),
+        before,
+        "原档必须保持原样（不得改名或覆盖）"
+    );
+}
+
+#[test]
+fn a_second_init_that_fails_does_not_let_later_saves_overwrite_the_file() {
+    let service = Service::new();
+    service.init("secret123");
+    service.collect_events(Duration::from_secs(20), Duration::from_millis(150));
+    service.dispatch(Job::AddTask {
+        task: task("第一次加载"),
+    });
+
+    // 同一個服務實例再次初始化：原檔已被換成無法解讀的內容。
+    std::fs::write(service.tasks_path(), b"corrupted by someone else").unwrap();
+    service.init("secret123");
+    let events = service.collect_events(Duration::from_secs(20), Duration::from_millis(150));
     assert!(
-        service.tasks_path().with_extension("vault.bak").exists()
-            || std::path::PathBuf::from(format!("{}.bak", service.tasks_path().display())).exists(),
-        "原档应备份为 .bak"
+        events.iter().any(|event| matches!(
+            event,
+            Event::Notice(message) if message.contains("任务文件无法读取")
+        )),
+        "再次初始化应提示任务文件无法读取：{events:?}"
+    );
+
+    // 後續保存必須失敗，且不得覆寫原檔（即使先前載入的金鑰還在記憶體中）。
+    let events = service.dispatch(Job::AddTask {
+        task: task("第二次"),
+    });
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Failed {
+                target: crate::task::protocol::FailedTarget::Tasks,
+                ..
+            }
+        )),
+        "不可用时的保存应回报任务失败：{events:?}"
+    );
+    assert_eq!(
+        std::fs::read(service.tasks_path()).unwrap(),
+        b"corrupted by someone else",
+        "原档必须保持原样"
     );
 }
 

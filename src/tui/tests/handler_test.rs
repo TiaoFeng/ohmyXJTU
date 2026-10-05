@@ -1651,6 +1651,42 @@ fn enter_in_multi_select_opens_the_batch_menu() {
     assert!(matches!(app.screen, Screen::Main), "送出后应回到主画面");
 }
 
+/// 切換分組後，多選只作用於目前可見的任務：勾選仍跨分組保留，但批量操作
+/// 不得刪改畫面上看不到的項目。
+#[test]
+fn multi_select_only_acts_on_visible_tasks_after_switching_group() {
+    use crate::domain::homework::HomeworkGroup;
+
+    let (jobs, rx) = channel();
+    let mut app = task_page_app();
+
+    // 在「未完成」勾選任務 1（未完成分組索引 0）。
+    press(&mut app, &jobs, KeyCode::Char('m'));
+    press(&mut app, &jobs, KeyCode::Char(' '));
+    assert!(
+        app.task_multi.as_ref().is_some_and(|set| set.contains(&1)),
+        "空格应勾选任务 1"
+    );
+
+    // 切到「已完成」：勾選仍在（跨分組保留），但任務 1 已不可見。
+    press(&mut app, &jobs, KeyCode::Char(']'));
+    assert_eq!(app.homework_group, HomeworkGroup::Completed);
+    assert!(
+        app.task_multi.as_ref().is_some_and(|set| set.contains(&1)),
+        "勾选跨分组保留"
+    );
+    assert!(
+        crate::tui::controller::selected_task_ids(&app).is_empty(),
+        "已完成分组看不到未完成的任务，批量操作不得作用于它"
+    );
+
+    // enter 不開選單、不送出任何任務。
+    press(&mut app, &jobs, KeyCode::Enter);
+    assert!(matches!(app.screen, Screen::Main), "不可见时不开选单");
+    assert_eq!(app.message_text(), Some("尚未选择任务（space 勾选）"));
+    assert!(rx.try_recv().is_err(), "不得送出任何批量任务");
+}
+
 #[test]
 fn control_t_menu_confirms_deleting_completed_tasks() {
     let (jobs, rx) = channel();

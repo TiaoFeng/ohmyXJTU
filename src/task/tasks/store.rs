@@ -8,8 +8,8 @@
 //! 不必重新輸入口令，也不必重跑昂貴的 Argon2id；每次保存仍使用新的 nonce。
 //! 任務不隨帳號變動：換帳號只換站點憑證，任務檔的內容與金鑰都與帳號無關。
 //!
-//! 檔案無法讀取（損毀、或由其他口令建立）時不直接覆寫：先備份為
-//! `tasks.vault.bak` 再以空清單重新開始，並回報提示訊息。
+//! 檔案無法讀取（損毀、或由其他口令建立）時不覆寫、不清空：保留原檔並把
+//! 存儲標記為不可用，回報原因與原檔路徑，由使用者確認後自行刪除。
 //!
 //! 這裡只有檔案本身；任務服務（見 [`super`]）負責在獨立執行緒上使用它。
 
@@ -70,24 +70,31 @@ impl TaskStore {
     /// 以口令載入任務檔並記住金鑰。
     ///
     /// 檔案不存在時只準備好新信封（首次保存才落盤），避免從未使用任務的
-    /// 使用者多出一個檔案。回傳需要告知使用者的提示（原檔無法讀取而備份、
-    /// 權限過寬等）；檔案層級的讀取失敗（非「不存在」）仍向上傳播。
+    /// 使用者多出一個檔案。回傳需要告知使用者的提示（原檔無法讀取、權限
+    /// 過寬等）；檔案層級的讀取失敗（非「不存在」）仍向上傳播。
     pub(crate) fn init(&mut self, passphrase: &str) -> AppResult<Option<String>> {
         let mut notices: Vec<String> = Vec::new();
         self.unavailable = None;
         match io::read_private(&self.path) {
             Ok(bytes) => {
-                if self.open(passphrase, &bytes).is_err() {
-                    let backup = self.backup_path();
-                    let _ = std::fs::rename(&self.path, &backup);
+                if let Err(err) = self.open(passphrase, &bytes) {
+                    // 無法解開或解析：不覆寫、不清空、不重建。原檔可能只是以
+                    // 其他口令建立（例如口令修改的回滾未完成），貿然重建會讓
+                    // 使用者以為任務消失；保留原檔並標記本會話不可用，由使用者
+                    // 自行確認後刪除。
+                    //
+                    // 同時丟棄先前成功載入的內容與金鑰：同一個實例可能被再次
+                    // 初始化（工作階段停用後重新解鎖），留著舊狀態會讓 `save()`
+                    // 有機會以舊內容覆寫磁碟上的原檔。
                     self.tasks.clear();
                     self.next_id = 0;
                     self.sealed = None;
-                    self.provision(passphrase)?;
-                    notices.push(format!(
-                        "任务文件无法读取，已备份为 {} 并清空",
-                        backup.display()
-                    ));
+                    let message = format!(
+                        "任务文件无法读取（{err}）；原文件（{}）未被修改。如确认不再需要，请删除该文件后重启程序。",
+                        self.path.display()
+                    );
+                    self.unavailable = Some(message.clone());
+                    return Ok(Some(message));
                 }
             }
             Err(AppError::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -193,7 +200,17 @@ impl TaskStore {
     ///
     /// 寫入成功後才替換記憶體中的信封；寫入失敗時金鑰與磁碟內容都維持原狀。
     /// 呼叫端負責與憑證保險庫之間的順序一致（見 `credentials::change_passphrase`）。
+    ///
+    /// 存儲不可用（原檔無法讀取）時直接回錯：絕不以記憶體中的（通常為空的）
+    /// 任務覆寫磁碟上的原檔，否則「原檔無法讀取時不覆寫」的保護會被換口令
+    /// 這條路徑繞過。
+    ///
+    /// 不檢查 `sealed`：換口令不需要舊金鑰，而 `lock()` 之後記憶體中的任務仍
+    /// 在（重新加密的是同一份內容）。真正要擋的是「原檔沒讀進來」的情形。
     pub(crate) fn rekey(&mut self, passphrase: &str) -> AppResult<()> {
+        if let Some(message) = &self.unavailable {
+            return Err(AppError::Crypto(message.clone()));
+        }
         let plaintext = self.serialize()?;
         let (bytes, sealed) = envelope::seal(passphrase, AAD_PREFIX, &plaintext)?;
         io::write_private_atomic(&self.path, &bytes)?;
@@ -256,12 +273,13 @@ impl TaskStore {
 
     /// 以目前信封寫入任務檔（沿用同一鹽值，只換 nonce）。
     fn save(&self) -> AppResult<()> {
-        let sealed = match (&self.sealed, &self.unavailable) {
-            (Some(sealed), _) => sealed,
-            (None, Some(message)) => return Err(AppError::Crypto(message.clone())),
-            (None, None) => {
-                return Err(AppError::Crypto("任务存储尚未解锁".to_owned()));
-            }
+        // 存儲不可用時一律拒絕寫入——**即使記憶體中還留著先前載入的金鑰**：
+        // 否則「原檔無法讀取」之後的保存會以舊內容覆寫磁碟上的原檔。
+        if let Some(message) = &self.unavailable {
+            return Err(AppError::Crypto(message.clone()));
+        }
+        let Some(sealed) = &self.sealed else {
+            return Err(AppError::Crypto("任务存储尚未解锁".to_owned()));
         };
         let bytes = envelope::reseal(sealed, AAD_PREFIX, &self.serialize()?)?;
         io::write_private_atomic(&self.path, &bytes)
@@ -283,12 +301,5 @@ impl TaskStore {
             self.next_id = next_backup;
         }
         outcome
-    }
-
-    /// 無法讀取時原檔的去向。
-    fn backup_path(&self) -> PathBuf {
-        let mut path = self.path.clone().into_os_string();
-        path.push(".bak");
-        PathBuf::from(path)
     }
 }

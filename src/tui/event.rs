@@ -17,7 +17,7 @@ use crate::task::{CoursesData, Event, FailedTarget, HomeworkUpdate, Job};
 
 use super::app::{
     App, FormKind, FormState, HomeworkData, LmsLevel, LoginScreen, Page, Screen, SettingsState,
-    TaskEntry, TermPickerState,
+    TermPickerState,
 };
 use super::controller;
 use super::text::InputLine;
@@ -244,6 +244,8 @@ fn apply_flow(app: &mut App, data: FlowData) {
 
 /// 作業更新（部分結果或終態）：部分結果維持載入中並保留已累積資料。
 fn apply_homework(app: &mut App, update: HomeworkUpdate) {
+    // 記下目前選取的項目：新結果可能重新排序或改動分組，選取要跟著識別碼。
+    let previous = app.task_page_selected_id();
     let progress = update.progress;
     let finished = progress.is_none();
     let elapsed = update.elapsed;
@@ -276,15 +278,7 @@ fn apply_homework(app: &mut App, update: HomeworkUpdate) {
         },
         None => Page::Ready(data),
     };
-    // 夾取選取索引，避免分組內容變動後越界（任務與作業共用同一組索引）。
-    let len = app.task_group_items(app.homework_group).len()
-        + app.homework_group_items(app.homework_group).len();
-    let selected = app
-        .homework_state
-        .selected()
-        .unwrap_or(0)
-        .min(len.saturating_sub(1));
-    app.homework_state.select(Some(selected));
+    app.anchor_task_selection(previous);
     if finished {
         // 新一輪結果取代了畫面上的作業：詳情捲動回到頂端。
         app.homework_scroll.reset();
@@ -308,25 +302,17 @@ fn apply_homework(app: &mut App, update: HomeworkUpdate) {
 /// `VaultReady` 之前送出），那時介面還停在解鎖表單，不該被任務快照拉進主畫面
 /// ——進入主畫面由 `VaultReady` 負責。
 fn apply_tasks(app: &mut App, tasks: Vec<Task>) {
-    let previous = match app.selected_entry() {
-        Some(TaskEntry::Task(task)) => Some(task.id),
-        _ => None,
-    };
+    let previous = app.task_page_selected_id();
     app.tasks = tasks;
     if matches!(app.screen, Screen::TaskForm(_)) {
         app.set_screen(Screen::Main);
     }
-    let len = app.task_group_items(app.homework_group).len()
-        + app.homework_group_items(app.homework_group).len();
-    let fallback = app.page_selection().min(len.saturating_sub(1));
-    let selected = previous
-        .and_then(|id| {
-            app.task_group_items(app.homework_group)
-                .iter()
-                .position(|task| task.id == id)
-        })
-        .unwrap_or(fallback);
-    app.homework_state.select(Some(selected));
+    // 已刪除的任務不再存在：把殘留的勾選一併清掉，避免多選集合持續累積。
+    let alive: Vec<u64> = app.tasks.iter().map(|task| task.id).collect();
+    if let Some(selection) = app.task_multi.as_mut() {
+        selection.retain(|id| alive.contains(id));
+    }
+    app.anchor_task_selection(previous);
 }
 
 /// 課程清單更新：以穩定的課程識別碼重新定位目前課程。

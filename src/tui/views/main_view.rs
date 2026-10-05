@@ -189,6 +189,10 @@ fn page_hints(app: &App) -> Vec<String> {
             if app.task_search.is_some() {
                 hints.push("enter 应用筛选".to_owned());
                 hints.push("esc 取消".to_owned());
+                // 沒有任何標籤可選時不提示（上下鍵也等同沒反應）。
+                if app.tasks.iter().any(|task| task.display_tag().is_some()) {
+                    hints.push("↑/↓ 选标签".to_owned());
+                }
                 return hints;
             }
             if app.task_multi.is_some() {

@@ -20,7 +20,10 @@ use crate::tui::text::InputLine;
 use crate::tui::theme::THEME;
 use crate::tui::ui::{input_window, render_list};
 
-use super::columns::{GROUP_WIDTH, RowColumns, RowNeeds, page_columns, page_min_row_width};
+use super::columns::{
+    GROUP_WIDTH, RowColumns, RowNeeds, TAG_SEPARATOR, TASK_PRIORITY_WIDTH, page_columns,
+    page_min_row_width,
+};
 use super::{
     deadline_cell, deadline_label, deadline_list_label, empty, group_label, panel_width,
     push_description, push_multiline, push_wrapped, row_width, scrolled_panel, split_detail,
@@ -474,10 +477,19 @@ fn task_item(
             },
         ));
     }
+    // 標籤欄：優先級（語意色）＋（有標籤時）「・標籤」（一般文字色）。標籤在欄寬
+    // 不足時被截掉，優先級永遠可見。
     spans.push(Span::styled(
-        format!("{} ", fit_display(task.priority.label(), columns.label)),
+        task.priority.label().to_owned(),
         THEME.status_style(task.priority.tone()),
     ));
+    let tag_width = columns.label.saturating_sub(TASK_PRIORITY_WIDTH);
+    let tag_cell = match task.display_tag() {
+        Some(tag) if tag_width > 0 => fit_display(&format!("{TAG_SEPARATOR}{tag}"), tag_width),
+        _ => " ".repeat(tag_width),
+    };
+    spans.push(Span::styled(tag_cell, Style::default().fg(THEME.text)));
+    spans.push(Span::raw(" "));
     spans.push(Span::styled(
         format!("{} ", fit_display(&task.content, columns.title)),
         Style::default().fg(THEME.text),
@@ -523,6 +535,12 @@ fn task_lines(task: &Task, now: DateTime<FixedOffset>, width: usize) -> Vec<Line
         status.width()
     );
     lines.push(status);
+    push_wrapped(
+        &mut lines,
+        format!("标签：{}", task.display_tag().unwrap_or("无")),
+        THEME.muted_style(),
+        width,
+    );
     let deadline_raw = task.deadline.map(|deadline| deadline.to_rfc3339());
     push_wrapped(
         &mut lines,

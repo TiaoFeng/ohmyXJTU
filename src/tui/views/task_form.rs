@@ -19,8 +19,8 @@ use crate::tui::ui::{centered_rect, hint_line, input_window, popup_surface};
 
 /// 彈窗寬度（含邊框）。
 const FORM_WIDTH: u16 = 64;
-/// 彈窗高度（含邊框）：內容 1＋描述 3＋截止 1＋優先級 1＋完成 1＋空行 1＋提示 1＋邊框 2。
-const FORM_HEIGHT: u16 = 11;
+/// 彈窗高度（含邊框）：內容 1＋標籤 1＋描述 3＋截止 1＋優先級 1＋完成 1＋空行 1＋提示 1＋邊框 2。
+const FORM_HEIGHT: u16 = 12;
 /// 標籤欄寬度（顯示欄，含「: 」）。
 const LABEL_WIDTH: u16 = 12;
 /// 描述欄的可見行數。
@@ -33,6 +33,7 @@ pub fn draw(frame: &mut Frame, form: &mut TaskFormState) {
 
     let [
         content_area,
+        tag_area,
         desc_area,
         deadline_area,
         priority_area,
@@ -40,6 +41,7 @@ pub fn draw(frame: &mut Frame, form: &mut TaskFormState) {
         _,
         hint_area,
     ] = Layout::vertical([
+        Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(DESC_ROWS as u16),
         Constraint::Length(1),
@@ -57,6 +59,14 @@ pub fn draw(frame: &mut Frame, form: &mut TaskFormState) {
         None,
         content_area,
         form.focus == TaskField::Content,
+    );
+    draw_text_field(
+        frame,
+        "标签",
+        &form.tag,
+        Some("（可留空，6 个汉字以内）"),
+        tag_area,
+        form.focus == TaskField::Tag,
     );
     draw_description(frame, form, desc_area);
     draw_text_field(

@@ -404,9 +404,12 @@ fn task_page_combines_tasks_and_homework_in_one_list() {
     });
 
     assert_eq!(app.page_len(), 2, "未完成分组应含一任务与一作业");
-    assert_eq!(app.page_group_count(HomeworkGroup::Unfinished), 2);
     assert_eq!(
-        app.page_group_count(HomeworkGroup::Completed),
+        app.task_page_group_counts().get(HomeworkGroup::Unfinished),
+        2
+    );
+    assert_eq!(
+        app.task_page_group_counts().get(HomeworkGroup::Completed),
         1,
         "分组计数应包含自訂義任务"
     );
@@ -441,7 +444,7 @@ fn task_page_combines_tasks_and_homework_in_one_list() {
     assert_eq!(app.page_len(), 1, "筛选后只剩匹配的作业");
     assert_eq!(app.task_filter_matches(), 1);
     assert_eq!(
-        app.page_group_count(HomeworkGroup::Unfinished),
+        app.task_page_group_counts().get(HomeworkGroup::Unfinished),
         2,
         "分组计数不受筛选影响"
     );

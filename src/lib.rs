@@ -18,6 +18,7 @@ pub mod task;
 pub mod text;
 pub mod tone;
 pub mod tui;
+pub mod webvpn;
 
 pub use error::{AppError, AppResult};
 

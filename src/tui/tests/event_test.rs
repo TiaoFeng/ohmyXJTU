@@ -1615,7 +1615,7 @@ fn tasks_event_replaces_the_list_and_anchors_the_selection() {
     let mut app = app();
     app.set_screen(Screen::Main);
     app.nav = NavItem::Homework;
-    app.tasks = vec![todo_task(1, "甲", false), todo_task(2, "乙", false)];
+    app.task_page.tasks = vec![todo_task(1, "甲", false), todo_task(2, "乙", false)];
     app.homework_state.select(Some(1));
 
     // 背景端依排序鍵重新排列後回報：選取應跟著識別碼，而不是位置。
@@ -1698,12 +1698,12 @@ fn tasks_event_anchors_the_selection_under_mixed_sort() {
     let mut app = app();
     app.set_screen(Screen::Main);
     app.nav = NavItem::Homework;
-    app.task_sort = SortMode::Priority;
+    app.task_page.sort = SortMode::Priority;
     let mut low = todo_task(1, "甲", false);
     low.priority = Priority::Low;
     let mut high = todo_task(2, "乙", false);
     high.priority = Priority::High;
-    app.tasks = vec![low, high];
+    app.task_page.tasks = vec![low, high];
     app.homework = Page::Ready(HomeworkData {
         term_label: None,
         term_source: None,
@@ -1726,7 +1726,7 @@ fn tasks_event_anchors_the_selection_under_mixed_sort() {
     app.homework_state.select(Some(index));
 
     // 重新載入同一批任務：選取必須留在任務 1，而不是退回任務子清單的位置。
-    let snapshot = app.tasks.clone();
+    let snapshot = app.task_page.tasks.clone();
     apply_event(&mut app, Event::Tasks(snapshot));
 
     assert_eq!(app.page_selection(), 2, "选取应锚定在任务 1 的混合清单位置");
@@ -1777,7 +1777,7 @@ fn tasks_event_closes_the_task_form_after_saving() {
         matches!(app.screen, Screen::Main),
         "任务快照抵达时应关闭任务表单"
     );
-    assert_eq!(app.tasks.len(), 1, "快照应已套用");
+    assert_eq!(app.task_page.tasks.len(), 1, "快照应已套用");
     assert!(
         app.message_text()
             .is_none_or(|message| !message.contains("正在保存")),
@@ -1800,7 +1800,7 @@ fn tasks_event_keeps_an_unsent_task_form_open() {
         panic!("尚未送出的任务表单不应被快照关闭");
     };
     assert_eq!(form.content.value(), "甲", "用户输入的内容必须保留");
-    assert_eq!(app.tasks.len(), 1, "快照仍应套用");
+    assert_eq!(app.task_page.tasks.len(), 1, "快照仍应套用");
 }
 
 #[test]
@@ -1808,10 +1808,10 @@ fn account_change_keeps_local_tasks_but_clears_task_page_state() {
     let mut app = app();
     app.set_screen(Screen::Main);
     app.nav = NavItem::Homework;
-    app.tasks = vec![todo_task(1, "甲", false)];
-    app.task_filter = Some("甲".to_owned());
-    app.task_multi = Some(HashSet::from([1]));
-    app.task_pending_delete = Some((1, "甲".to_owned()));
+    app.task_page.tasks = vec![todo_task(1, "甲", false)];
+    app.task_page.filter = Some("甲".to_owned());
+    app.task_page.multi = Some(HashSet::from([1]));
+    app.task_page.pending_delete = Some((1, "甲".to_owned()));
 
     apply_event(
         &mut app,
@@ -1820,9 +1820,13 @@ fn account_change_keeps_local_tasks_but_clears_task_page_state() {
         },
     );
 
-    assert_eq!(app.tasks.len(), 1, "本地任务与账号无关，换账号应保留");
-    assert!(app.task_filter.is_none(), "筛选属于暂时状态，应清除");
-    assert!(app.task_multi.is_none(), "多选属于暂时状态，应清除");
-    assert!(app.task_pending_delete.is_none(), "待确认删除应清除");
+    assert_eq!(
+        app.task_page.tasks.len(),
+        1,
+        "本地任务与账号无关，换账号应保留"
+    );
+    assert!(app.task_page.filter.is_none(), "筛选属于暂时状态，应清除");
+    assert!(app.task_page.multi.is_none(), "多选属于暂时状态，应清除");
+    assert!(app.task_page.pending_delete.is_none(), "待确认删除应清除");
     assert!(matches!(app.screen, Screen::Main));
 }

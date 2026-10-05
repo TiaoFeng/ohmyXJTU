@@ -2745,7 +2745,7 @@ fn task_page_app(tasks: Vec<Task>, items: Vec<HomeworkItem>) -> App {
     let mut app = App::new(AccessPolicy::Auto);
     app.set_screen(Screen::Main);
     app.nav = NavItem::Homework;
-    app.tasks = tasks;
+    app.task_page.tasks = tasks;
     app.homework = Page::Ready(homework_data(items, None));
     app
 }
@@ -2833,8 +2833,10 @@ fn task_rows_show_priority_state_and_deadline_without_greying_out() {
 
     // 已完成的任務移到「已完成」分組，顏色不變。
     app.homework_group = HomeworkGroup::Completed;
-    app.tasks[1].completed = true;
-    app.tasks.push(todo(3, "自习", Priority::Low, true));
+    app.task_page.tasks[1].completed = true;
+    app.task_page
+        .tasks
+        .push(todo(3, "自习", Priority::Low, true));
     app.homework_state.select(Some(1));
     let terminal = draw(WIDTH, HEIGHT, |frame| {
         crate::tui::views::draw(frame, &mut app)
@@ -2858,7 +2860,7 @@ fn task_page_marks_multi_select_checkboxes() {
         ],
         Vec::new(),
     );
-    app.task_multi = Some(HashSet::from([1]));
+    app.task_page.multi = Some(HashSet::from([1]));
 
     let terminal = draw(WIDTH, HEIGHT, |frame| {
         crate::tui::views::draw(frame, &mut app)
@@ -2903,7 +2905,7 @@ fn task_page_search_hint_and_empty_state() {
         vec![todo(1, "写实验报告", Priority::High, false)],
         Vec::new(),
     );
-    app.task_filter = Some("不存在的任务".to_owned());
+    app.task_page.filter = Some("不存在的任务".to_owned());
 
     let terminal = draw(WIDTH, HEIGHT, |frame| {
         crate::tui::views::draw(frame, &mut app)
@@ -3001,7 +3003,7 @@ fn task_page_search_box_shows_the_query_and_cursor() {
         vec![todo(1, "写实验报告", Priority::High, false)],
         Vec::new(),
     );
-    app.task_search = Some(InputLine::with_value("报告"));
+    app.task_page.search = Some(InputLine::with_value("报告"));
 
     let terminal = draw(WIDTH, HEIGHT, |frame| {
         crate::tui::views::draw(frame, &mut app)
@@ -3098,7 +3100,7 @@ fn sorted_task_page_mixes_rows_without_section_headers() {
     let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00+08:00").expect("固定时间");
     let items = aggregate(&[homework_input("待办作业", "2026-10-01 23:59:59", 0)], now);
     let mut app = task_page_app(vec![todo(1, "写实验报告", Priority::Low, false)], items);
-    app.task_sort = SortMode::Priority;
+    app.task_page.sort = SortMode::Priority;
 
     let terminal = draw(WIDTH, HEIGHT, |frame| {
         crate::tui::views::draw(frame, &mut app)
@@ -3281,7 +3283,7 @@ fn footer_shows_tag_suggestion_hint_only_when_tags_exist() {
         vec![todo(1, "写实验报告", Priority::High, false)],
         Vec::new(),
     );
-    app.task_search = Some(InputLine::with_value(""));
+    app.task_page.search = Some(InputLine::with_value(""));
 
     let terminal = draw(120, HEIGHT, |frame| {
         crate::tui::views::draw(frame, &mut app)
@@ -3292,7 +3294,7 @@ fn footer_shows_tag_suggestion_hint_only_when_tags_exist() {
         "一个标签也没有时不应提示：{footer:?}"
     );
 
-    app.tasks[0].tag = Some("实验".to_owned());
+    app.task_page.tasks[0].tag = Some("实验".to_owned());
     let terminal = draw(120, HEIGHT, |frame| {
         crate::tui::views::draw(frame, &mut app)
     });

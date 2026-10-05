@@ -2733,6 +2733,7 @@ fn todo(id: u64, content: &str, priority: Priority, completed: bool) -> Task {
         id,
         content: content.to_owned(),
         description: None,
+        tag: None,
         deadline: None,
         priority,
         completed,
@@ -2932,9 +2933,13 @@ fn task_form_popup_shows_fields_and_inline_error() {
     });
     let text = screen_text(terminal.backend());
     assert!(text.contains("添加任务"), "应显示弹窗标题：\n{text}");
-    for label in ["内容", "描述", "截止", "优先级", "完成"] {
+    for label in ["内容", "标签", "描述", "截止", "优先级", "完成"] {
         assert!(text.contains(label), "表单应显示 {label} 字段：\n{text}");
     }
+    assert!(
+        text.contains("（可留空，6 个汉字以内）"),
+        "标签字段应显示长度上限提示：\n{text}"
+    );
     assert!(
         text.contains("2026-12-31 12:30（可留空）"),
         "截止字段应显示格式提示：\n{text}"
@@ -3053,7 +3058,8 @@ fn task_batch_menu_lists_the_batch_operations() {
 #[test]
 fn task_form_edit_mode_prefills_and_shows_busy_state() {
     let mut app = App::new(AccessPolicy::Auto);
-    let task = todo(7, "写实验报告", Priority::High, true);
+    let mut task = todo(7, "写实验报告", Priority::High, true);
+    task.tag = Some("实验".to_owned());
     app.set_screen(Screen::TaskForm(Box::new(TaskFormState::edit(&task))));
 
     let terminal = draw(WIDTH, HEIGHT, |frame| {
@@ -3062,6 +3068,8 @@ fn task_form_edit_mode_prefills_and_shows_busy_state() {
     let text = screen_text(terminal.backend());
     assert!(text.contains("编辑任务"), "编辑模式标题不同：\n{text}");
     assert!(text.contains("写实验报告"), "应预填内容：\n{text}");
+    let (_, tag_row) = find_row(terminal.backend(), "标签");
+    assert!(tag_row.contains("实验"), "应预填标签：\n{tag_row}");
     assert!(text.contains("高"), "应显示优先级：\n{text}");
     assert!(text.contains("已完成"), "应显示完成状态：\n{text}");
 
@@ -3201,5 +3209,96 @@ fn pressing_sort_key_hides_the_pending_notice_immediately() {
     assert!(
         !after.contains("作业已更新"),
         "旧通知不应继续盖住画面提示：{after}"
+    );
+}
+
+// ── 任務標籤 ───────────────────────────────────────────
+
+#[test]
+fn task_rows_show_the_tag_after_the_priority() {
+    let mut tagged = todo(1, "写实验报告", Priority::High, false);
+    tagged.tag = Some("实验".to_owned());
+    // 選取第二列：反白列會覆蓋文字色，顏色斷言必須在未選取的列上進行。
+    let mut app = task_page_app(
+        vec![tagged, todo(2, "复习", Priority::Low, false)],
+        Vec::new(),
+    );
+    app.homework_state.select(Some(1));
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let backend = terminal.backend();
+    let (row_y, row) = find_row(backend, "写实验报告");
+
+    let priority_x = column_of(&row, "高");
+    let tag_x = column_of(&row, "・实验");
+    assert_eq!(
+        tag_x,
+        priority_x + 2,
+        "全角中点应紧接在优先级之后、标签紧接中点：\n{row}"
+    );
+    // 優先級用語意色、標籤用一般文字色。
+    assert_eq!(backend.buffer()[(priority_x, row_y)].fg, THEME.red);
+    assert_eq!(
+        backend.buffer()[(tag_x, row_y)].fg,
+        THEME.text,
+        "标签应为一般文字色"
+    );
+
+    // 沒有標籤的任務列不顯示中點。
+    let (_, plain) = find_row(backend, "复习");
+    assert!(!plain.contains('・'), "没有标签时不显示中点：\n{plain}");
+}
+
+#[test]
+fn task_detail_shows_the_tag_or_none() {
+    let mut tagged = todo(1, "写实验报告", Priority::High, false);
+    tagged.tag = Some("实验".to_owned());
+    let mut app = task_page_app(
+        vec![tagged, todo(2, "复习", Priority::Low, false)],
+        Vec::new(),
+    );
+    app.homework_detail = true;
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(text.contains("标签：实验"), "详情应显示标签：\n{text}");
+
+    app.homework_state.select(Some(1));
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(text.contains("标签：无"), "没有标签时显示“无”：\n{text}");
+}
+
+#[test]
+fn footer_shows_tag_suggestion_hint_only_when_tags_exist() {
+    let mut app = task_page_app(
+        vec![todo(1, "写实验报告", Priority::High, false)],
+        Vec::new(),
+    );
+    app.task_search = Some(InputLine::with_value(""));
+
+    let terminal = draw(120, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let footer = row_text(terminal.backend(), HEIGHT - 1);
+    assert!(
+        !footer.contains("选标签"),
+        "一个标签也没有时不应提示：{footer:?}"
+    );
+
+    app.tasks[0].tag = Some("实验".to_owned());
+    let terminal = draw(120, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let footer = row_text(terminal.backend(), HEIGHT - 1);
+    assert!(
+        footer.contains("↑/↓ 选标签"),
+        "有标签时应提示上下键：{footer:?}"
     );
 }

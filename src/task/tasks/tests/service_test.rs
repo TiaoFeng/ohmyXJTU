@@ -15,6 +15,7 @@ fn task(content: &str) -> Task {
         id: 0,
         content: content.to_owned(),
         description: None,
+        tag: None,
         deadline: None,
         priority: Priority::Low,
         completed: false,

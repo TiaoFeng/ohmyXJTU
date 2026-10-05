@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 
 use crate::domain::homework::{CAMPUS_UTC_OFFSET_SECS, HomeworkGroup, HomeworkItem};
+use crate::text::display_width;
 use crate::tone::Tone;
 
 /// 分段標題：自訂義任務（顯示在作業段之前）。
@@ -122,6 +123,9 @@ pub struct Task {
     /// 任務描述（可選）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// 標籤（可選；長度上限見 [`TAG_MAX_WIDTH`]）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
     /// 截止時間（可選）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline: Option<DateTime<FixedOffset>>,
@@ -154,7 +158,15 @@ impl Task {
         }
     }
 
-    /// 關鍵字是否符合（內容或描述，不分大小寫）。
+    /// 有效標籤（去除前後空白；只剩空白者視為沒有標籤）。
+    pub fn display_tag(&self) -> Option<&str> {
+        self.tag
+            .as_deref()
+            .map(str::trim)
+            .filter(|tag| !tag.is_empty())
+    }
+
+    /// 關鍵字是否符合（內容、描述或標籤，不分大小寫）。
     pub fn matches(&self, keyword: &str) -> bool {
         let keyword = keyword.trim().to_lowercase();
         if keyword.is_empty() {
@@ -165,7 +177,43 @@ impl Task {
                 .description
                 .as_ref()
                 .is_some_and(|description| description.to_lowercase().contains(&keyword))
+            || self
+                .display_tag()
+                .is_some_and(|tag| tag.to_lowercase().contains(&keyword))
     }
+}
+
+/// 標籤的長度上限（顯示欄；六個漢字寬度）。
+///
+/// 以終端顯示寬度計算（全形字佔 2 欄），與列表欄位排版的寬度語意一致。
+pub const TAG_MAX_WIDTH: usize = 12;
+
+/// 正規化使用者輸入的標籤：去除前後空白，空字串代表「沒有標籤」。
+pub fn normalize_tag(raw: &str) -> Option<String> {
+    let tag = raw.trim();
+    (!tag.is_empty()).then(|| tag.to_owned())
+}
+
+/// 標籤在目前內容下能否再容納 `extra`（以顯示寬度計）。
+pub fn tag_fits(current: &str, extra: &str) -> bool {
+    display_width(current) + display_width(extra) <= TAG_MAX_WIDTH
+}
+
+/// 所有任務用過的標籤（去重、保留首次出現順序）。
+///
+/// 供 `^F` 搜尋框的上下鍵循環預填：順序跟著任務本身的排序，使用者看到的候選
+/// 與列表一致。
+pub fn tag_options(tasks: &[Task]) -> Vec<String> {
+    let mut options: Vec<String> = Vec::new();
+    for task in tasks {
+        let Some(tag) = task.display_tag() else {
+            continue;
+        };
+        if !options.iter().any(|option| option == tag) {
+            options.push(tag.to_owned());
+        }
+    }
+    options
 }
 
 /// 排序鍵：（有無截止、截止時間、優先級、內容、識別碼）。

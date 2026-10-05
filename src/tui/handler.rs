@@ -8,7 +8,7 @@ use std::sync::mpsc::Sender;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::credentials::Secret;
-use crate::domain::todo::SortMode;
+use crate::domain::todo::{self, SortMode};
 use crate::session::SiteKind;
 use crate::task::Job;
 use crate::tui::app::{
@@ -144,10 +144,11 @@ pub fn handle_paste(app: &mut App, text: &str) {
         }
         return;
     }
-    // 任務表單：描述欄接受換行，其餘欄位忽略換行。
+    // 任務表單：描述欄接受換行，其餘欄位忽略換行。標籤欄另有寬度上限。
     if let Screen::TaskForm(form) = &mut app.screen {
         match form.focus {
             TaskField::Content => insert_text(&mut form.content, text),
+            TaskField::Tag => insert_tag_text(&mut form.tag, text),
             TaskField::Deadline => insert_text(&mut form.deadline, text),
             TaskField::Description => {
                 for character in text.chars() {
@@ -176,6 +177,30 @@ fn insert_text(line: &mut InputLine, text: &str) {
     {
         line.insert(character);
     }
+}
+
+/// 把貼上的文字插入標籤欄：超出長度上限即停（貼上自動截斷）。
+fn insert_tag_text(line: &mut InputLine, text: &str) {
+    for character in text
+        .chars()
+        .filter(|character| !matches!(character, '\n' | '\r'))
+    {
+        if !todo::tag_fits(line.value(), &character.to_string()) {
+            break;
+        }
+        line.insert(character);
+    }
+}
+
+/// 標籤欄的輸入編輯：字元超出寬度上限時直接不收（超出的字打不進去）。
+fn edit_tag_line(line: &mut InputLine, key: KeyEvent) {
+    if let KeyCode::Char(character) = key.code
+        && plain_char(&key).is_some()
+        && !todo::tag_fits(line.value(), &character.to_string())
+    {
+        return;
+    }
+    edit_line(line, key);
 }
 
 /// `Ctrl+P`：開啟或關閉帳戶設定（登入覆蓋層或協議閱讀門開啟時不生效）。
@@ -656,6 +681,7 @@ fn handle_task_form(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
     }
     match form.focus {
         TaskField::Content => edit_line(&mut form.content, key),
+        TaskField::Tag => edit_tag_line(&mut form.tag, key),
         TaskField::Deadline => edit_line(&mut form.deadline, key),
         TaskField::Description => match key.code {
             KeyCode::Enter | KeyCode::Char('\n') => form.description.insert('\n'),
@@ -686,7 +712,8 @@ fn handle_task_form(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
     }
 }
 
-/// 任務搜尋輸入框：`enter` 套用、`esc` 取消，其餘按鍵編輯輸入。
+/// 任務搜尋輸入框：`enter` 套用、`esc` 取消，`↑`／`↓` 在既有標籤間循環預填，
+/// 其餘按鍵編輯輸入。
 fn handle_task_search(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Enter | KeyCode::Char('\n') => {
@@ -696,6 +723,7 @@ fn handle_task_search(app: &mut App, key: KeyEvent) {
                 .map(|input| input.value().trim().to_owned());
             app.task_filter = keyword.filter(|keyword| !keyword.is_empty());
             app.task_search = None;
+            app.task_tag_cursor = None;
             app.homework_state.select(Some(0));
             let matches = app.task_filter_matches();
             match &app.task_filter {
@@ -707,9 +735,17 @@ fn handle_task_search(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Esc => {
             app.task_search = None;
+            app.task_tag_cursor = None;
             app.set_message("已取消筛选");
         }
+        // 上下鍵在既有標籤間循環預填；一個標籤也沒有時等同沒反應（也不提示）。
+        KeyCode::Up | KeyCode::Down => {
+            let delta = if key.code == KeyCode::Down { 1 } else { -1 };
+            controller::cycle_tag_suggestion(app, delta);
+        }
         _ => {
+            // 手動編輯之後重新開始選取，下一次上下鍵由頭／尾重新起算。
+            app.task_tag_cursor = None;
             if let Some(input) = app.task_search.as_mut() {
                 edit_line(input, key);
             }

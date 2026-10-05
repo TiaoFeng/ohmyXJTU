@@ -18,6 +18,7 @@ fn task(content: &str) -> Task {
         id: 0,
         content: content.to_owned(),
         description: None,
+        tag: None,
         deadline: None,
         priority: Priority::Low,
         completed: false,
@@ -321,4 +322,32 @@ fn mark_unavailable_blocks_saves_even_with_a_loaded_key() {
     let mut reloaded = new_store(&dir);
     reloaded.init(PASSPHRASE).unwrap();
     assert_eq!(reloaded.tasks().len(), 1, "不得写入第二条任务");
+}
+
+#[test]
+fn tags_survive_an_encrypted_round_trip() {
+    let dir = tempdir().unwrap();
+    let mut store = new_store(&dir);
+    store.init(PASSPHRASE).unwrap();
+    let tagged = Task {
+        tag: Some("实验".to_owned()),
+        ..task("写实验报告")
+    };
+    store.add(tagged).unwrap();
+
+    let mut reloaded = new_store(&dir);
+    reloaded.init(PASSPHRASE).unwrap();
+    assert_eq!(reloaded.tasks().len(), 1);
+    assert_eq!(
+        reloaded.tasks()[0].tag.as_deref(),
+        Some("实验"),
+        "标签应随加密文件往返"
+    );
+    assert!(
+        !fs::read(reloaded.path())
+            .unwrap()
+            .windows("实验".len())
+            .any(|window| window == "实验".as_bytes()),
+        "文件内不得出现明文标签"
+    );
 }

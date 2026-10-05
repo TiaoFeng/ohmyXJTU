@@ -372,6 +372,7 @@ fn todo(id: u64, content: &str, completed: bool) -> Task {
         id,
         content: content.to_owned(),
         description: None,
+        tag: None,
         deadline: None,
         priority: Priority::Low,
         completed,

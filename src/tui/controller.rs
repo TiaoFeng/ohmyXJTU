@@ -525,6 +525,31 @@ pub(super) fn open_task_search(app: &mut App) {
     }
     let input = InputLine::with_value(app.task_filter.clone().unwrap_or_default());
     app.task_search = Some(input);
+    app.task_tag_cursor = None;
+}
+
+/// 搜尋框的標籤建議：以 `delta` 在既有標籤間循環並整段預填（`^F`）。
+///
+/// 一個標籤也沒有時什麼都不做——維持輸入內容，也不顯示任何提示。順序沿用任務
+/// 本身的排序；第一次按 `↓` 由第一個開始、第一次按 `↑` 由最後一個開始，之後
+/// 首尾循環。
+pub(super) fn cycle_tag_suggestion(app: &mut App, delta: i32) {
+    // 先備妥候選清單（擁有所有權），再取 `task_search` 的可變借用。
+    let options = app.task_tag_options();
+    let len = options.len();
+    if len == 0 {
+        app.task_tag_cursor = None;
+        return;
+    }
+    let index = match app.task_tag_cursor {
+        Some(index) => (index + len + if delta >= 0 { 1 } else { len - 1 }) % len,
+        None if delta >= 0 => 0,
+        None => len - 1,
+    };
+    app.task_tag_cursor = Some(index);
+    if let Some(input) = app.task_search.as_mut() {
+        input.set(options[index].clone());
+    }
 }
 
 /// 清空任務表單目前聚焦的欄位（`^U`）。
@@ -534,6 +559,7 @@ pub(super) fn clear_focused_task_field(app: &mut App) {
     };
     match form.focus {
         TaskField::Content => form.content.clear(),
+        TaskField::Tag => form.tag.clear(),
         TaskField::Description => form.description.focused_line_mut().clear(),
         TaskField::Deadline => form.deadline.clear(),
         TaskField::Priority | TaskField::Completed => {}
@@ -570,6 +596,15 @@ fn build_task_job(form: &TaskFormState) -> Result<Job, String> {
         return Err("任务内容不能为空".to_owned());
     }
     let deadline = todo::parse_deadline_input(form.deadline.value())?;
+    let tag = todo::normalize_tag(form.tag.value());
+    if let Some(tag) = &tag
+        && !todo::tag_fits(tag, "")
+    {
+        return Err(format!(
+            "标签不能超过 {} 个汉字宽度",
+            todo::TAG_MAX_WIDTH / 2
+        ));
+    }
     let description = match form.description.value().trim() {
         "" => None,
         text => Some(text.to_owned()),
@@ -578,6 +613,7 @@ fn build_task_job(form: &TaskFormState) -> Result<Job, String> {
         id: 0,
         content,
         description,
+        tag,
         deadline,
         priority: form.priority,
         completed: form.completed,

@@ -1416,6 +1416,7 @@ fn task_page_app() -> App {
             id: 1,
             content: "写实验报告".to_owned(),
             description: Some("第三章".to_owned()),
+            tag: None,
             deadline: None,
             priority: Priority::High,
             completed: false,
@@ -1424,6 +1425,7 @@ fn task_page_app() -> App {
             id: 2,
             content: "复习".to_owned(),
             description: None,
+            tag: None,
             deadline: None,
             priority: Priority::Low,
             completed: true,
@@ -1445,7 +1447,8 @@ fn control_a_adds_a_task_from_the_form() {
     );
 
     type_text(&mut app, &jobs, "买教材");
-    // 欄位順序：內容 → 描述 → 截止。
+    // 欄位順序：內容 → 標籤 → 描述 → 截止。
+    press(&mut app, &jobs, KeyCode::Tab);
     press(&mut app, &jobs, KeyCode::Tab);
     press(&mut app, &jobs, KeyCode::Tab);
     type_text(&mut app, &jobs, "2026-12-31 12:30");
@@ -1455,6 +1458,7 @@ fn control_a_adds_a_task_from_the_form() {
         Ok(Job::AddTask { task }) => {
             assert_eq!(task.content, "买教材");
             assert_eq!(task.description, None, "描述留空时不写入");
+            assert_eq!(task.tag, None, "标签留空时不写入");
             assert_eq!(
                 task.deadline
                     .map(|deadline| deadline.format("%Y-%m-%d %H:%M").to_string()),
@@ -1489,6 +1493,7 @@ fn task_form_reports_validation_errors_in_place() {
 
     // 截止時間格式錯誤：同樣就地報錯，且已輸入的內容保留。
     type_text(&mut app, &jobs, "买教材");
+    press(&mut app, &jobs, KeyCode::Tab);
     press(&mut app, &jobs, KeyCode::Tab);
     press(&mut app, &jobs, KeyCode::Tab);
     type_text(&mut app, &jobs, "不是日期");
@@ -1527,6 +1532,8 @@ fn task_form_description_accepts_multiple_lines() {
     let mut app = task_page_app();
     press_ctrl(&mut app, &jobs, 'a');
     type_text(&mut app, &jobs, "复习");
+    // 欄位順序：內容 → 標籤 → 描述。
+    press(&mut app, &jobs, KeyCode::Tab);
     press(&mut app, &jobs, KeyCode::Tab);
 
     type_text(&mut app, &jobs, "第一行");
@@ -1978,8 +1985,8 @@ fn task_form_priority_cycles_low_to_high_with_right_arrow() {
     let (jobs, _rx) = channel();
     let mut app = task_page_app();
     press_ctrl(&mut app, &jobs, 'a');
-    // 焦點依序為 內容 → 描述 → 截止 → 優先級。
-    for _ in 0..3 {
+    // 焦點依序為 內容 → 標籤 → 描述 → 截止 → 優先級。
+    for _ in 0..4 {
         press(&mut app, &jobs, KeyCode::Tab);
     }
     let Screen::TaskForm(form) = &app.screen else {
@@ -2007,4 +2014,169 @@ fn task_form_priority(app: &App) -> Priority {
         Screen::TaskForm(form) => form.priority,
         other => panic!("应在任务表单，实际为 {other:?}"),
     }
+}
+
+// ── 任務標籤 ───────────────────────────────────────────
+
+/// 搜尋輸入框目前的內容。
+fn search_value(app: &App) -> Option<String> {
+    app.task_search
+        .as_ref()
+        .map(|input| input.value().to_owned())
+}
+
+#[test]
+fn task_form_tag_field_blocks_typing_beyond_the_limit() {
+    let (jobs, rx) = channel();
+    let mut app = task_page_app();
+    press_ctrl(&mut app, &jobs, 'a');
+    type_text(&mut app, &jobs, "写报告");
+    // 欄位順序：內容 → 標籤。
+    press(&mut app, &jobs, KeyCode::Tab);
+    type_text(&mut app, &jobs, "六个汉字宽度啊");
+
+    let Screen::TaskForm(form) = &app.screen else {
+        panic!("应停留在任务表单");
+    };
+    assert_eq!(form.tag.value(), "六个汉字宽度", "第七个汉字打不进去");
+
+    press_ctrl(&mut app, &jobs, 's');
+    match rx.try_recv() {
+        Ok(Job::AddTask { task }) => {
+            assert_eq!(task.content, "写报告");
+            assert_eq!(task.tag.as_deref(), Some("六个汉字宽度"));
+        }
+        other => panic!("应为新增任务任务，实际为 {other:?}"),
+    }
+}
+
+#[test]
+fn task_form_tag_field_truncates_pasted_text() {
+    let (jobs, _rx) = channel();
+    let mut app = task_page_app();
+    press_ctrl(&mut app, &jobs, 'a');
+    press(&mut app, &jobs, KeyCode::Tab);
+    handle_paste(&mut app, "一二三四五六七八九十");
+
+    let Screen::TaskForm(form) = &app.screen else {
+        panic!("应停留在任务表单");
+    };
+    assert_eq!(form.tag.value(), "一二三四五六", "贴上的文字应截断到上限");
+}
+
+#[test]
+fn edit_prefills_the_tag_and_ctrl_u_clears_it() {
+    let (jobs, _rx) = channel();
+    let mut app = task_page_app();
+    app.tasks[0].tag = Some("实验".to_owned());
+
+    press_ctrl(&mut app, &jobs, 'e');
+    let Screen::TaskForm(form) = &app.screen else {
+        panic!("^e 应打开编辑表单");
+    };
+    assert_eq!(form.tag.value(), "实验", "编辑表单应预填标签");
+
+    press(&mut app, &jobs, KeyCode::Tab);
+    press_ctrl(&mut app, &jobs, 'u');
+    let Screen::TaskForm(form) = &app.screen else {
+        panic!("应停留在任务表单");
+    };
+    assert!(form.tag.is_empty(), "^u 应清空聚焦的标签字段");
+}
+
+#[test]
+fn task_form_tag_length_is_validated_on_save() {
+    let (jobs, rx) = channel();
+    let mut app = task_page_app();
+    press_ctrl(&mut app, &jobs, 'a');
+    type_text(&mut app, &jobs, "写报告");
+    // 直接塞進超長標籤（繞過輸入欄的攔截）以驗證保存前的防禦檢查。
+    if let Screen::TaskForm(form) = &mut app.screen {
+        form.tag.set("七个汉字宽度啊");
+    }
+    press_ctrl(&mut app, &jobs, 's');
+
+    let Screen::TaskForm(form) = &app.screen else {
+        panic!("应停留在任务表单");
+    };
+    assert!(
+        form.error
+            .as_deref()
+            .is_some_and(|error| error.contains("标签")),
+        "应提示标签长度：{:?}",
+        form.error
+    );
+    assert!(!form.busy, "验证失败不得进入保存中");
+    assert!(rx.try_recv().is_err(), "验证失败不得送出任务");
+}
+
+#[test]
+fn search_up_down_cycles_existing_tags() {
+    let (jobs, _rx) = channel();
+    let mut app = task_page_app();
+    app.tasks[0].tag = Some("实验".to_owned());
+    app.tasks[1].tag = Some("复习".to_owned());
+
+    press_ctrl(&mut app, &jobs, 'f');
+    // `↓` 第一次由第一個開始，之後首尾循環。
+    press(&mut app, &jobs, KeyCode::Down);
+    assert_eq!(search_value(&app).as_deref(), Some("实验"));
+    press(&mut app, &jobs, KeyCode::Down);
+    assert_eq!(search_value(&app).as_deref(), Some("复习"));
+    press(&mut app, &jobs, KeyCode::Down);
+    assert_eq!(search_value(&app).as_deref(), Some("实验"), "到尾端应回卷");
+
+    // 重新開啟後 `↑` 第一次由最後一個開始。
+    press(&mut app, &jobs, KeyCode::Esc);
+    assert_eq!(app.task_tag_cursor, None, "关闭搜索框应清除游标");
+    press_ctrl(&mut app, &jobs, 'f');
+    press(&mut app, &jobs, KeyCode::Up);
+    assert_eq!(search_value(&app).as_deref(), Some("复习"));
+    press(&mut app, &jobs, KeyCode::Up);
+    assert_eq!(search_value(&app).as_deref(), Some("实验"));
+    press(&mut app, &jobs, KeyCode::Up);
+    assert_eq!(search_value(&app).as_deref(), Some("复习"), "到首端应回卷");
+
+    // `enter` 以預填的標籤套用篩選。
+    press(&mut app, &jobs, KeyCode::Enter);
+    assert_eq!(app.task_filter.as_deref(), Some("复习"));
+    assert_eq!(app.task_tag_cursor, None);
+    assert!(app.task_search.is_none(), "套用后应关闭输入框");
+}
+
+#[test]
+fn typing_in_the_search_box_restarts_tag_suggestions() {
+    let (jobs, _rx) = channel();
+    let mut app = task_page_app();
+    app.tasks[0].tag = Some("实验".to_owned());
+    app.tasks[1].tag = Some("复习".to_owned());
+
+    press_ctrl(&mut app, &jobs, 'f');
+    press(&mut app, &jobs, KeyCode::Down);
+    press(&mut app, &jobs, KeyCode::Down);
+    assert_eq!(search_value(&app).as_deref(), Some("复习"));
+
+    // 手動編輯之後由第一個重新起算。
+    type_text(&mut app, &jobs, "报");
+    assert_eq!(app.task_tag_cursor, None);
+    press(&mut app, &jobs, KeyCode::Down);
+    assert_eq!(search_value(&app).as_deref(), Some("实验"));
+}
+
+#[test]
+fn tag_suggestions_do_nothing_without_any_tag() {
+    let (jobs, _rx) = channel();
+    let mut app = task_page_app();
+    press_ctrl(&mut app, &jobs, 'f');
+    type_text(&mut app, &jobs, "报告");
+
+    press(&mut app, &jobs, KeyCode::Up);
+    press(&mut app, &jobs, KeyCode::Down);
+    assert_eq!(
+        search_value(&app).as_deref(),
+        Some("报告"),
+        "一个标签也没有时上下键不应改变输入"
+    );
+    assert_eq!(app.task_tag_cursor, None);
+    assert_eq!(app.message_text(), None, "不应出现任何提示");
 }

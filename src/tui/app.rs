@@ -385,6 +385,8 @@ pub enum TaskFormMode {
 pub enum TaskField {
     /// 內容（必填）。
     Content,
+    /// 標籤（可選；寬度上限見 [`crate::domain::todo::TAG_MAX_WIDTH`]）。
+    Tag,
     /// 描述（多行）。
     Description,
     /// 截止時間。
@@ -397,8 +399,9 @@ pub enum TaskField {
 
 impl TaskField {
     /// 全部欄位（畫面順序）。
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Content,
+        Self::Tag,
         Self::Description,
         Self::Deadline,
         Self::Priority,
@@ -408,7 +411,8 @@ impl TaskField {
     /// 下一個欄位（循環）。
     pub fn next(self) -> Self {
         match self {
-            Self::Content => Self::Description,
+            Self::Content => Self::Tag,
+            Self::Tag => Self::Description,
             Self::Description => Self::Deadline,
             Self::Deadline => Self::Priority,
             Self::Priority => Self::Completed,
@@ -420,7 +424,8 @@ impl TaskField {
     pub fn previous(self) -> Self {
         match self {
             Self::Content => Self::Completed,
-            Self::Description => Self::Content,
+            Self::Tag => Self::Content,
+            Self::Description => Self::Tag,
             Self::Deadline => Self::Description,
             Self::Priority => Self::Deadline,
             Self::Completed => Self::Priority,
@@ -435,6 +440,8 @@ pub struct TaskFormState {
     pub mode: TaskFormMode,
     /// 內容。
     pub content: InputLine,
+    /// 標籤（單行，可留空）。
+    pub tag: InputLine,
     /// 描述（多行）。
     pub description: TextArea,
     /// 截止時間（文字輸入，保存時解析）。
@@ -457,6 +464,7 @@ impl TaskFormState {
         Self {
             mode: TaskFormMode::Add,
             content: InputLine::new(),
+            tag: InputLine::new(),
             description: TextArea::new(""),
             deadline: InputLine::new(),
             priority: Priority::default(),
@@ -472,6 +480,7 @@ impl TaskFormState {
         Self {
             mode: TaskFormMode::Edit { id: task.id },
             content: InputLine::with_value(task.content.clone()),
+            tag: InputLine::with_value(task.display_tag().unwrap_or_default()),
             description: TextArea::new(task.description.as_deref().unwrap_or_default()),
             deadline: InputLine::with_value(
                 task.deadline
@@ -1139,6 +1148,8 @@ pub struct App {
     pub task_sort: SortMode,
     /// `^D` 第一次按下後等待第二次確認的任務（識別碼、內容）。
     pub task_pending_delete: Option<(u64, String)>,
+    /// 搜尋框內以 `↑`／`↓` 選取標籤建議的游標（`None` 表示尚未開始選取）。
+    pub task_tag_cursor: Option<usize>,
     /// 最近一次得知的可選學期（供學期選擇器）。
     pub term_options: Vec<TermCode>,
     /// 考勤流水頁。
@@ -1204,6 +1215,7 @@ impl App {
             task_multi: None,
             task_sort: SortMode::default(),
             task_pending_delete: None,
+            task_tag_cursor: None,
             term_options: Vec::new(),
             attendance: Page::Idle,
             lms: LmsState::default(),
@@ -1379,6 +1391,7 @@ impl App {
             self.task_search = None;
             self.task_multi = None;
             self.task_pending_delete = None;
+            self.task_tag_cursor = None;
             // 舊帳號的課程、活動與詳情一律清空。
             self.lms = LmsState::default();
             self.updated_at = UpdatedAt::default();
@@ -1509,6 +1522,11 @@ impl App {
             .filter(|task| task.group() == group)
             .filter(|task| keyword.is_none_or(|keyword| task.matches(keyword)))
             .collect()
+    }
+
+    /// 所有任務用過的標籤（去重、保留首次出現順序；供 `^F` 的上下鍵預填）。
+    pub fn task_tag_options(&self) -> Vec<String> {
+        todo::tag_options(&self.tasks)
     }
 
     /// 指定分組的項目數（作業＋任務；不受搜尋過濾影響）。

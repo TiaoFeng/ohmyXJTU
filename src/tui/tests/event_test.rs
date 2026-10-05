@@ -1639,7 +1639,7 @@ fn tasks_event_replaces_the_list_and_anchors_the_selection() {
     assert_eq!(app.page_selection(), 0, "找不到原本的任务时应夹取索引");
     assert_eq!(app.task_group_items(HomeworkGroup::Unfinished)[0].id, 1);
     assert_eq!(
-        app.page_group_count(HomeworkGroup::Completed),
+        app.task_page_group_counts().get(HomeworkGroup::Completed),
         1,
         "分组计数应包含自訂義任务"
     );

@@ -15,7 +15,7 @@ use crate::domain::homework::{HomeworkGroup, HomeworkItem};
 use crate::domain::todo::{PageRow, Task, visual_index};
 use crate::sites::lms::ActivityKind;
 use crate::text::{display_width, fit_display};
-use crate::tui::app::{App, Page, TaskEntry};
+use crate::tui::app::{App, Page, TaskPageCounts};
 use crate::tui::text::InputLine;
 use crate::tui::theme::THEME;
 use crate::tui::ui::{input_window, render_list};
@@ -42,9 +42,13 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
     // 資訊，否則底欄會一直提示「PgUp/PgDn 滚动」卻沒有東西可捲。
     app.homework_scroll.clear();
 
-    let title = homework_title(app);
+    // 任務頁的列模型與分組計數每幀只建一次（主迴圈固定 200ms 重繪一次）：
+    // 標題、分組標籤列與提示列都共用同一份結果。
+    let counts = app.task_page_group_counts();
+    let title = homework_title(app, counts);
+    let rows = app.task_page_rows();
     // 作業尚未載入且沒有任何任務：整頁顯示載入中／失敗／空結果。
-    if app.task_page_rows().is_empty() && app.tasks.is_empty() && app.homework.ready().is_none() {
+    if rows.is_empty() && app.tasks.is_empty() && app.homework.ready().is_none() {
         empty(
             frame,
             area,
@@ -56,8 +60,8 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
     }
 
     // 分組標籤列＋（搜尋中）搜尋輸入框＋（更新失敗或有待核实）提示列。
-    let header = homework_tabs(app);
-    let warning = homework_warning(app);
+    let header = homework_tabs(app, counts);
+    let warning = homework_warning(app, counts);
     let search_row = u16::from(app.task_search.is_some());
     let header_height = 1 + search_row + u16::from(warning.is_some());
     let [header_area, body_area] =
@@ -82,7 +86,7 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
         );
     }
 
-    if app.task_page_rows().is_empty() {
+    if rows.is_empty() {
         empty_homework(frame, body_area, &title, app);
         return;
     }
@@ -91,11 +95,16 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
     let detail_height = (body_area.height / 2).clamp(DETAIL_MIN_HEIGHT, DETAIL_MAX_HEIGHT);
     let (list_area, detail_area) = split_detail(body_area, app.homework_detail, detail_height);
 
-    // 任務與作業共用同一組欄寬：需求取兩者的最大值，標籤欄下限依「是否只看任務」決定。
-    let tasks_only = app.homework_group_items(app.homework_group).is_empty();
-    let needs = RowNeeds::of_homework(&app.homework_group_items(app.homework_group)).merge(
-        RowNeeds::of_tasks(&app.task_group_items(app.homework_group)),
-    );
+    // 任務與作業共用同一組欄寬：需求直接由**本幀要畫的列**推導（與畫面同一份
+    // 資料，不必再過濾一次），標籤欄下限依「是否只看任務」決定。
+    let tasks_only = !rows.iter().any(|row| matches!(row, PageRow::Homework(_)));
+    let needs = rows
+        .iter()
+        .fold(RowNeeds::default(), |needs, row| match row {
+            PageRow::Task(task) => needs.merge(RowNeeds::of_task(task)),
+            PageRow::Homework(item) => needs.merge(RowNeeds::of_homework_item(item)),
+            PageRow::Header(_) | PageRow::Spacer => needs,
+        });
     // 多選模式會在列首加一個勾選框欄，欄寬計算必須同步扣除。
     let checkbox_width = if app.task_multi.is_some() {
         MULTI_CHECKBOX_WIDTH
@@ -118,7 +127,6 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
     // 所有借用都在這個區塊內結束（選取索引與列模型借自 `app`），
     // 之後才能以可變借用更新清單狀態。
     let (items, detail, visual) = {
-        let rows = app.task_page_rows();
         let visual = visual_index(&rows, app.page_selection());
         let multi = app.task_multi.as_ref();
         let items: Vec<ListItem<'static>> = rows
@@ -135,13 +143,14 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
                 PageRow::Homework(item) => homework_item(item, columns, multi.map(|_| "    ")),
             })
             .collect();
-        // 詳情內容預先換行：列數必須已知，捲動位移才夾得住。
+        // 詳情內容預先換行：列數必須已知，捲動位移才夾得住。取的是同一份列模型
+        // 的選取項，不再重算一次任務頁清單。
         let detail = detail_area.map(|area| {
             let width = panel_width(area);
-            match app.selected_entry() {
-                Some(TaskEntry::Task(task)) => (task_lines(task, now, width), "任务详情"),
-                Some(TaskEntry::Homework(item)) => (homework_lines(item, width), "作业详情"),
-                None => (Vec::new(), "详情"),
+            match visual.and_then(|index| rows.get(index)) {
+                Some(PageRow::Task(task)) => (task_lines(task, now, width), "任务详情"),
+                Some(PageRow::Homework(item)) => (homework_lines(item, width), "作业详情"),
+                _ => (Vec::new(), "详情"),
             }
         });
         (items, detail, visual)
@@ -182,15 +191,13 @@ fn draw_search(frame: &mut Frame, input: &InputLine, area: Rect) {
 }
 
 /// 頁面標題：學期與各組計數（計數含自訂義任務）。
-fn homework_title(app: &App) -> String {
+fn homework_title(app: &App, counts: TaskPageCounts) -> String {
     match app.homework.ready() {
         Some(data) => {
             let term = data.term_label.as_deref().unwrap_or("未确定学期");
             format!(
                 "任务 · {term} · 未完成 {} / 已完成 {} / 待核实 {}",
-                app.page_group_count(HomeworkGroup::Unfinished),
-                app.page_group_count(HomeworkGroup::Completed),
-                app.page_group_count(HomeworkGroup::Unknown),
+                counts.unfinished, counts.completed, counts.unknown,
             )
         }
         None => "任务".to_owned(),
@@ -255,14 +262,10 @@ fn empty_homework(frame: &mut Frame, area: Rect, title: &str, app: &App) {
 }
 
 /// 分組標籤列（計數含自訂義任務，另附載入狀態與篩選提示）。
-fn homework_tabs(app: &App) -> Line<'static> {
+fn homework_tabs(app: &App, counts: TaskPageCounts) -> Line<'static> {
     let mut spans = Vec::new();
     for candidate in HomeworkGroup::ALL {
-        let text = format!(
-            " {} {} ",
-            candidate.label(),
-            app.page_group_count(candidate)
-        );
+        let text = format!(" {} {} ", candidate.label(), counts.get(candidate));
         let style = if candidate == app.homework_group {
             THEME.highlight_style()
         } else {
@@ -311,7 +314,7 @@ fn homework_tabs(app: &App) -> Line<'static> {
 }
 
 /// 提示列：更新失敗（保留舊資料時）或「已确认 / 待核实」。
-fn homework_warning(app: &App) -> Option<Line<'static>> {
+fn homework_warning(app: &App, counts: TaskPageCounts) -> Option<Line<'static>> {
     // 重新整理失敗但仍有舊資料：標題仍顯示舊清單，這裡明確告知並提示重試。
     if let Page::Failed {
         message,
@@ -324,7 +327,7 @@ fn homework_warning(app: &App) -> Option<Line<'static>> {
         )));
     }
 
-    let unknown = app.page_group_count(HomeworkGroup::Unknown);
+    let unknown = counts.unknown;
     let courses_failed = app.homework.ready().map_or(0, |data| data.courses_failed);
     if unknown == 0 && courses_failed == 0 {
         return None;

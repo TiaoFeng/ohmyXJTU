@@ -204,11 +204,11 @@ fn task_label_needs_grow_with_the_tag() {
     let plain = tagged_task("写报告", None);
     let tagged = tagged_task("写报告", Some("实验"));
 
-    let needs = RowNeeds::of_tasks(&[&plain]);
+    let needs = RowNeeds::of_task(&plain);
     assert_eq!(needs.label, 2, "没有标签时标签栏只需放得下优先级");
     assert_eq!(needs.title, 6);
 
-    let needs = RowNeeds::of_tasks(&[&plain, &tagged]);
+    let needs = RowNeeds::of_task(&plain).merge(RowNeeds::of_task(&tagged));
     assert_eq!(needs.label, 8, "优先级 2 + 全角中点 2 + 标签 4");
     assert_eq!(TASK_PRIORITY_WIDTH, 2, "标签由优先级之后开始");
     assert_eq!(display_width(TAG_SEPARATOR), 2);

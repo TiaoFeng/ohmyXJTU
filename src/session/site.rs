@@ -4,9 +4,9 @@ use std::fmt;
 
 use url::Url;
 
-use crate::auth::webvpn;
 use crate::error::{AppError, AppResult};
 use crate::http::{HttpClient, HttpRequest, HttpResponse};
+use crate::webvpn;
 
 /// 一般桌面瀏覽器的 User-Agent。
 pub const DESKTOP_USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \

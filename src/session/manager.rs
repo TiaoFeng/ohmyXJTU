@@ -4,11 +4,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::auth::{LoginDriver, webvpn};
+use crate::auth::LoginDriver;
 use crate::config::{AccessPolicy, Config};
 use crate::credentials::Credentials;
 use crate::error::{AppError, AppResult};
 use crate::http::{HttpClient, HttpRequest, HttpResponse, ReqwestClient};
+use crate::webvpn;
 
 use super::site::{
     AccessMode, DESKTOP_USER_AGENT, PostLogin, SiteAdapter, SiteKind, SiteLogin, SitePolicy,

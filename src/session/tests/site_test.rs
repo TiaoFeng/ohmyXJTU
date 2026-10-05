@@ -33,7 +33,7 @@ fn rewrite_for_mode_only_touches_school_urls_in_webvpn_mode() {
     );
     assert_eq!(
         rewritten,
-        crate::auth::webvpn::to_webvpn_url(school).unwrap(),
+        crate::webvpn::to_webvpn_url(school).unwrap(),
         "应与底层转换一致"
     );
 }

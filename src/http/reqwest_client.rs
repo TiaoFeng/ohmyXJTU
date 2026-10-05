@@ -7,8 +7,8 @@ use reqwest::redirect::Policy;
 use url::Url;
 
 use super::{Body, HttpClient, HttpRequest, HttpResponse, Method};
-use crate::auth::webvpn;
 use crate::error::{AppError, AppResult, NetworkKind};
+use crate::webvpn;
 
 /// 單次請求的預設逾時。
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);

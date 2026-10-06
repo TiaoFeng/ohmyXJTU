@@ -23,6 +23,13 @@ pub const LOGIN_WIDTH: u16 = 84;
 const LABEL_WIDTH: u16 = 14;
 /// 標籤與值之間的間隔。
 const LABEL_GAP: u16 = 2;
+/// 表單每個欄位佔用的列數（標籤列＋輸入列）。
+const FIELD_HEIGHT: u16 = 2;
+/// 彈窗內容以外的固定列數（上下框線、狀態列與間隔）。
+///
+/// 必須與 [`draw_form`]／[`draw_login`] 內 `Layout::vertical` 的約束總和一致，
+/// 否則欄位會被裁掉或在底部留下空白。
+const POPUP_CHROME_HEIGHT: u16 = 6;
 
 /// 置中且夾在畫面內的矩形。
 pub fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
@@ -211,18 +218,20 @@ pub fn draw_field(
 
 /// 繪製表單彈窗；`note` 不為空時顯示在欄位上方（例如上一次的登入失敗原因）。
 pub fn draw_form(frame: &mut Frame, form: &FormState, title: &str, hint: &str, note: Option<&str>) {
-    let note_rows = u16::from(note.is_some()) * 2;
-    let content_height = u16::try_from(form.fields.len()).unwrap_or(0) * 2 + note_rows + 6;
+    let note_rows = u16::from(note.is_some()) * FIELD_HEIGHT;
+    let content_height = u16::try_from(form.fields.len()).unwrap_or(0) * FIELD_HEIGHT
+        + note_rows
+        + POPUP_CHROME_HEIGHT;
     let area = centered_rect(frame.area(), FORM_WIDTH, content_height);
     let inner = popup_surface(frame, area, title);
 
     let mut constraints: Vec<Constraint> = Vec::new();
     if note.is_some() {
-        constraints.push(Constraint::Length(2));
+        constraints.push(Constraint::Length(FIELD_HEIGHT));
     }
-    constraints.extend(form.fields.iter().map(|_| Constraint::Length(2)));
+    constraints.extend(form.fields.iter().map(|_| Constraint::Length(FIELD_HEIGHT)));
     constraints.push(Constraint::Min(1));
-    constraints.push(Constraint::Length(2));
+    constraints.push(Constraint::Length(FIELD_HEIGHT));
     let chunks = Layout::vertical(constraints).split(inner);
 
     let offset = usize::from(note.is_some());
@@ -373,11 +382,11 @@ pub fn draw_login(frame: &mut Frame, screen: &LoginScreen) {
         LoginScreen::Credentials { .. } => return,
     };
 
-    let field_rows = if field.is_some() { 2 } else { 0 };
+    let field_rows = if field.is_some() { FIELD_HEIGHT } else { 0 };
     let area = centered_rect(
         frame.area(),
         LOGIN_WIDTH,
-        u16::try_from(lines.len()).unwrap_or(1) + field_rows + 6,
+        u16::try_from(lines.len()).unwrap_or(1) + field_rows + POPUP_CHROME_HEIGHT,
     );
     let inner = popup_surface(frame, area, title);
 

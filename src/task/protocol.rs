@@ -21,6 +21,12 @@ use crate::model::{ActivityDetailView, FlowData, ScheduleData};
 use crate::session::{AccessMode, SiteKind};
 use crate::sites::lms::{ActivityKind, LmsActivity, LmsCourse};
 
+/// 等待任務服務回應的上限。
+///
+/// 任務服務只做本機檔案與密碼學運算，正常情況下不會久等；超過這個時間就
+/// 視為沒有回應（換口令會因此回報失敗並把任務檔換回舊口令）。
+const TASK_REPLY_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// 等待把手的共享狀態：結果插槽與喚醒用的條件變數。
 type ReplyState = Arc<(Mutex<Option<Result<(), String>>>, Condvar)>;
 
@@ -58,7 +64,7 @@ impl TaskReply {
         let mut guard = slot.lock().unwrap_or_else(|err| err.into_inner());
         while guard.is_none() {
             let (next, timeout) = ready
-                .wait_timeout(guard, Duration::from_secs(30))
+                .wait_timeout(guard, TASK_REPLY_TIMEOUT)
                 .unwrap_or_else(|err| err.into_inner());
             guard = next;
             if timeout.timed_out() && guard.is_none() {

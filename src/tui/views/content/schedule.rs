@@ -22,6 +22,9 @@ use super::{
     too_narrow,
 };
 
+/// 清單區域的最小高度（標題與提示列之外的空間）。
+const BODY_MIN_HEIGHT: u16 = 3;
+
 /// 依目前資料繪製課表頁。
 pub(super) fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
     let title = schedule_title(app);
@@ -55,8 +58,11 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
         (header, !data.lessons.is_empty())
     };
     let header_height = u16::try_from(header.len()).unwrap_or(u16::MAX);
-    let [header_area, body_area] =
-        Layout::vertical([Constraint::Length(header_height), Constraint::Min(3)]).areas(area);
+    let [header_area, body_area] = Layout::vertical([
+        Constraint::Length(header_height),
+        Constraint::Min(BODY_MIN_HEIGHT),
+    ])
+    .areas(area);
     if !header.is_empty() {
         frame.render_widget(
             Paragraph::new(header).style(THEME.base_style()),

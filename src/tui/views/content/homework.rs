@@ -37,6 +37,8 @@ use rows::{homework_item, section_header_item, task_item};
 /// 展開詳情時的框高範圍：內容區一半，並限制在可讀區間。
 const DETAIL_MIN_HEIGHT: u16 = 7;
 const DETAIL_MAX_HEIGHT: u16 = 14;
+/// 清單區域的最小高度（標題與提示列之外的空間）。
+const BODY_MIN_HEIGHT: u16 = 3;
 /// 多選模式勾選框欄寬（`[x] `）。
 const MULTI_CHECKBOX_WIDTH: usize = 4;
 
@@ -68,8 +70,11 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
     let warning = homework_warning(app, counts);
     let search_row = u16::from(app.task_page.search.is_some());
     let header_height = 1 + search_row + u16::from(warning.is_some());
-    let [header_area, body_area] =
-        Layout::vertical([Constraint::Length(header_height), Constraint::Min(3)]).areas(area);
+    let [header_area, body_area] = Layout::vertical([
+        Constraint::Length(header_height),
+        Constraint::Min(BODY_MIN_HEIGHT),
+    ])
+    .areas(area);
     let header_rows = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(search_row),

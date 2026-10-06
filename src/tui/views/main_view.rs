@@ -13,15 +13,23 @@ use crate::tui::views::{content, settings, task_form, task_menu, term_picker};
 
 /// 側邊欄寬度。
 const SIDEBAR_WIDTH: u16 = 22;
+/// 主體區域的最小高度（其餘列數留給底部提示列）。
+const BODY_MIN_HEIGHT: u16 = 8;
+/// 內容區的最小寬度（左側是固定寬度的導航欄）。
+const CONTENT_MIN_WIDTH: u16 = 30;
 
 /// 繪製主畫面。
 ///
 /// 尺寸守衛由 `views::draw` 在最上層統一處理（所有畫面共用）。
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
-    let [body, footer] = Layout::vertical([Constraint::Min(8), Constraint::Length(1)]).areas(area);
-    let [sidebar, content_area] =
-        Layout::horizontal([Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(30)]).areas(body);
+    let [body, footer] =
+        Layout::vertical([Constraint::Min(BODY_MIN_HEIGHT), Constraint::Length(1)]).areas(area);
+    let [sidebar, content_area] = Layout::horizontal([
+        Constraint::Length(SIDEBAR_WIDTH),
+        Constraint::Min(CONTENT_MIN_WIDTH),
+    ])
+    .areas(body);
 
     draw_sidebar(frame, sidebar, app);
     content::draw(frame, content_area, app);

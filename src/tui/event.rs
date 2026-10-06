@@ -9,6 +9,7 @@ use std::sync::mpsc::Sender;
 
 use crate::config::AccessPolicy;
 use crate::domain::homework::HomeworkGroup;
+use crate::domain::semester::TermCode;
 use crate::domain::todo::Task;
 use crate::model::{ActivityDetailView, FlowData, ScheduleData};
 use crate::session::{AccessMode, SiteKind};
@@ -60,13 +61,7 @@ pub(crate) fn apply_event(app: &mut App, event: Event, jobs: &Sender<Job>) {
             options,
             suggestion,
             reason,
-        } => {
-            app.term_options = options.clone();
-            app.homework.fail("未确定本学期：按 s 选择要查看的学期");
-            app.set_screen(Screen::TermPicker(TermPickerState::new(
-                options, suggestion, reason,
-            )));
-        }
+        } => apply_homework_needs_term(app, options, suggestion, reason),
         Event::Flow(data) => apply_flow(app, *data),
         Event::CoursesTerm(term) => {
             // 只更新分區提示：課程清單本身不變，重新繪製即會依新學期重新分區。
@@ -241,6 +236,29 @@ fn apply_schedule(app: &mut App, data: ScheduleData) {
     app.updated_at.schedule = Some(now_clock());
     app.schedule_state.select(Some(0));
     app.ensure_main();
+}
+
+/// 背景載入判定不出本學期：標記作業頁，並在可以的時候直接開啟學期選擇器。
+///
+/// 學期選擇器是彈窗：只有主畫面（沒有其他彈窗）時才直接開啟。使用者可能正在
+/// 任務表單或設定裡輸入，把畫面換掉會丟掉輸入內容（與 [`apply_failure`] 的
+/// 「彈窗就地處理」原則一致）；這種情況下只標記作業頁並留下提示，關掉手上的
+/// 彈窗後按 `s` 仍可選擇（選項已記在 `App::term_options`）。
+fn apply_homework_needs_term(
+    app: &mut App,
+    options: Vec<TermCode>,
+    suggestion: Option<TermCode>,
+    reason: String,
+) {
+    app.term_options = options.clone();
+    app.homework.fail("未确定本学期：按 s 选择要查看的学期");
+    let picker = TermPickerState::new(options, suggestion, reason);
+    match app.screen {
+        // 主畫面，或選擇器已經開著（例如使用者已按 `s`）：顯示／更新它。
+        Screen::Main | Screen::TermPicker(_) => app.set_screen(Screen::TermPicker(picker)),
+        // 其他彈窗（任務表單、設定、排序提示…）：不要搶走畫面。
+        _ => app.set_message("未确定本学期：按 s 选择要查看的学期"),
+    }
 }
 
 fn apply_flow(app: &mut App, data: FlowData) {

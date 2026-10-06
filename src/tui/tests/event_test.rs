@@ -805,6 +805,8 @@ fn account_updated_leaves_form_for_main() {
 #[test]
 fn needs_term_opens_picker_and_marks_homework() {
     let mut app = app();
+    // 作業載入只可能在使用者已進入主畫面之後發生（`VaultReady` 先切到主畫面）。
+    app.set_screen(Screen::Main);
     apply_event(
         &mut app,
         Event::HomeworkNeedsTerm {
@@ -817,6 +819,70 @@ fn needs_term_opens_picker_and_marks_homework() {
     assert!(matches!(app.screen, Screen::TermPicker(_)));
     assert!(matches!(app.homework, Page::Failed { .. }));
     assert_eq!(app.term_options.len(), 1);
+}
+
+/// 背景判定不出本學期時，不得搶走使用者正在操作的彈窗。
+///
+/// 解鎖後的四頁預載會在背景載入作業：若此時使用者正在新增任務的表單裡輸入，
+/// 直接把畫面換成學期選擇器會連帶丟掉輸入內容。選項仍要記下來，關掉彈窗後按
+/// `s` 就能選擇。
+#[test]
+fn needs_term_does_not_steal_an_open_form() {
+    let mut app = app();
+    app.set_screen(Screen::TaskForm(Box::new(TaskFormState::add())));
+    app.homework.start_loading("正在汇总作业…");
+
+    apply_event(
+        &mut app,
+        Event::HomeworkNeedsTerm {
+            options: vec![TermCode::parse("2026-2027-1").expect("学期")],
+            suggestion: None,
+            reason: "考勤系统不可用".to_owned(),
+        },
+    );
+
+    assert!(
+        matches!(app.screen, Screen::TaskForm(_)),
+        "不得换掉正在输入的表单"
+    );
+    assert!(
+        matches!(app.homework, Page::Failed { .. }),
+        "仍要标记作业页"
+    );
+    assert_eq!(app.term_options.len(), 1, "选项要记下来供 `s` 使用");
+    assert!(
+        app.message_text()
+            .is_some_and(|text| text.contains("按 s 选择要查看的学期")),
+        "应留下提示：{:?}",
+        app.message_text()
+    );
+}
+
+/// 選擇器已經開著時只更新內容，不會被背景事件關掉。
+#[test]
+fn needs_term_updates_an_open_picker() {
+    let mut app = app();
+    app.set_screen(Screen::TermPicker(TermPickerState::new(
+        Vec::new(),
+        None,
+        "先前的说明".to_owned(),
+    )));
+
+    apply_event(
+        &mut app,
+        Event::HomeworkNeedsTerm {
+            options: vec![TermCode::parse("2026-2027-2").expect("学期")],
+            suggestion: None,
+            reason: "考勤系统不可用".to_owned(),
+        },
+    );
+
+    match &app.screen {
+        Screen::TermPicker(state) => {
+            assert_eq!(state.options.len(), 1, "选项应被更新");
+        }
+        other => panic!("选择器应保持开启：{other:?}"),
+    }
 }
 
 #[test]

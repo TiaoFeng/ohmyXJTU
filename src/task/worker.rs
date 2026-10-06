@@ -592,6 +592,12 @@ impl Worker {
         if !self.drain_channel(&job) {
             return;
         }
+        // 排空通道是遞迴的（見 [`Worker::queue_preload_jobs`]）：結束指令可能在
+        // 內層被吃掉，這一層收到的仍是「通道已排空」。已收到結束指令就不再送出
+        // 請求（程式正在退出，結果也沒有人要）。
+        if self.shutdown {
+            return;
+        }
         if generation != self.generation {
             // 控制任務（換帳號、切換訪問模式）已使本任務失效：
             // 通知介面解除載入中狀態，避免頁面停留在永久的「載入中」。

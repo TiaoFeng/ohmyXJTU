@@ -642,6 +642,40 @@ fn pending_data_job_survives_failed_relogin_and_resumes_afterwards() {
     assert!(harness.worker.retry.is_none(), "任务续跑后不应继续保留");
 }
 
+/// 巢狀排空通道時吃到的結束指令同樣要停止目前任務。
+///
+/// `drain_channel` 是遞迴的（`Job::Preload` 會再排空一次）：內層吃到
+/// `Job::Shutdown` 只設定旗標並回 `false`，外層拿到的卻是「通道已排空」，
+/// 於是仍會照常送出請求——程式正在退出，那些請求與結果都沒有意義。
+#[test]
+fn a_nested_drain_still_stops_the_running_task() {
+    let requests = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&requests);
+    let mut harness = harness(move |_request: &HttpRequest| {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Ok(html(""))
+    });
+    // 兩個站點都已登入：`Preload` 會直接排入四個頁面的載入並排空通道。
+    let session = harness.worker.session.as_mut().expect("会话已建立");
+    session.mark_logged_in(SiteKind::Attendance, AccessMode::Direct, Vec::new());
+    session.mark_logged_in(SiteKind::Lms, AccessMode::Direct, Vec::new());
+
+    // 通道裡依序排著「預載」與「結束」：預載的巢狀排空會吃掉結束指令。
+    harness.send_job(Job::Preload);
+    harness.send_job(Job::Shutdown);
+
+    harness
+        .dispatch(Job::LoadSchedule { force: false })
+        .expect("数据任务不应冒泡为错误");
+
+    assert!(harness.worker.shutdown, "应记下结束指令");
+    assert_eq!(
+        requests.load(Ordering::SeqCst),
+        0,
+        "结束指令之后不得再发出请求"
+    );
+}
+
 /// 等待重登的任務只有一個槽：新的失敗不得讓前一個任務靜默消失。
 ///
 /// 修復前 `report_data_failure` 直接覆寫 `retry`：被覆寫的任務收不到任何事件，

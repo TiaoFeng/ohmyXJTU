@@ -104,15 +104,6 @@ impl HomeworkGroup {
             Self::Unknown => Self::Completed,
         }
     }
-
-    /// 顯示順序索引。
-    pub fn index(self) -> usize {
-        match self {
-            Self::Unfinished => 0,
-            Self::Completed => 1,
-            Self::Unknown => 2,
-        }
-    }
 }
 
 /// 彙總輸入（由站點層組裝）。
@@ -162,11 +153,6 @@ pub struct HomeworkItem {
 }
 
 impl HomeworkItem {
-    /// 是否已逾期。
-    pub fn is_overdue(&self) -> bool {
-        self.state == HomeworkState::Overdue
-    }
-
     /// 關鍵字是否符合（作業標題或課程名稱，不分大小寫）。
     pub fn matches(&self, keyword: &str) -> bool {
         let keyword = keyword.trim().to_lowercase();

@@ -49,11 +49,6 @@ impl Credentials {
             password: password.into(),
         }
     }
-
-    /// 使用者名稱與密碼是否皆非空。
-    pub fn is_complete(&self) -> bool {
-        !self.username.trim().is_empty() && !self.password.is_empty()
-    }
 }
 
 impl Drop for Credentials {

@@ -51,9 +51,18 @@ impl CourseSlot {
     }
 }
 
+/// 週次是否可接受：週次從 1 起算，且有解析上限。
+///
+/// 上限同時決定 `ScheduleCache::max_week`（使用者能翻到第幾週），因此兩個分支
+/// 都必須套用——只讓區間分支受限的話，異常的**單值**（例如 `99999`）會把它
+/// 撐大，使用者就能翻到任意週次並對荒謬的日期範圍查考勤。
+fn is_valid_week(week: u32) -> bool {
+    (1..=MAX_PARSED_WEEK).contains(&week)
+}
+
 /// 解析週次字串，例如 `1-4,6,8-16`。
 ///
-/// 無法解析的片段會被忽略，不會讓整份課表失敗。
+/// 無法解析的片段會被忽略，不會讓整份課表失敗；超出範圍的週次一律丟棄。
 pub fn parse_weeks(text: &str) -> BTreeSet<u32> {
     let mut weeks = BTreeSet::new();
     for part in text.split([',', '，']) {
@@ -66,14 +75,17 @@ pub fn parse_weeks(text: &str) -> BTreeSet<u32> {
                 if let (Ok(start), Ok(end)) =
                     (start.trim().parse::<u32>(), end.trim().parse::<u32>())
                 {
-                    // 上限保護，避免異常字串產生超大集合。
-                    for week in start.min(end)..=end.max(start).min(MAX_PARSED_WEEK) {
-                        weeks.insert(week);
-                    }
+                    // 上限保護，避免異常字串產生超大集合（先夾取再迭代，
+                    // 否則 `1-4000000000` 會先跑完四千萬次）。
+                    let first = start.min(end);
+                    let last = end.max(start).min(MAX_PARSED_WEEK);
+                    weeks.extend((first..=last).filter(|week| is_valid_week(*week)));
                 }
             }
             None => {
-                if let Ok(week) = part.parse::<u32>() {
+                if let Ok(week) = part.parse::<u32>()
+                    && is_valid_week(week)
+                {
                     weeks.insert(week);
                 }
             }

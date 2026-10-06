@@ -57,14 +57,14 @@ mod timing;
 use cache::{LmsCache, ScheduleCache};
 use timing::LoadTiming;
 
-/// 單一任務（及其自動重試鏈）允許的自動重新登入次數上限。
+/// 自動重新登入的嘗試次數上限（首次 ＋ 1 次自動重登）。
 ///
 /// 站點持續回報登入態失效時，「自動重登 → 重試 → 再失效」會形成無上限的
 /// 迴圈；超過上限即停止自動重試並回報錯誤，由使用者手動按 `r` 重試
 ///（每次全新的使用者操作都會為該任務重新獲得額度）。
-const MAX_AUTO_RELOGINS: u8 = 1;
+const MAX_LOGIN_ATTEMPTS: u8 = 2;
 
-/// 單一資料任務允許的總嘗試次數（首次 ＋ 2 次重試）。
+/// 連線層網路錯誤的嘗試次數上限（首次 ＋ 2 次重試）。
 ///
 /// 僅用於「連線層」網路錯誤（逾時、連不上、DNS、TLS）：校內服務偶發的
 /// 逾時或連線失敗多半是短暫抖動，自動重送同一個請求即可，不必勞煩使用者
@@ -75,69 +75,54 @@ const MAX_AUTO_RELOGINS: u8 = 1;
 /// 失敗的情況仍能快速回報。
 const MAX_ATTEMPTS: u8 = 3;
 
-/// 自動重新登入額度：以任務鍵（[`DataKey`]）各自計算，用完即停止自動重試。
+/// 自動重試額度：以任務鍵（[`DataKey`]）各自計算，用完即停止自動重試。
+///
+/// 兩個上限各用一個實例（[`Worker::relogin`] 與 [`Worker::retries`]）：
+/// 登入態失效必須重新登入才能恢復，而連線抖動只要重送請求；兩者的上限、
+/// 觸發條件與歸零時機都不同，混在同一個計數器會讓「為什麼這次只重試一次」
+/// 變得難以解釋。
 ///
 /// 互動式任務（開啟活動網頁）與長載入（作業彙總）的額度互相獨立——一方
-/// 重登不會讓另一方的失效被誤判為「自動重新登入後仍然失敗」；同一任務的
-/// 自動重試鏈共用同一份額度（重試後再失效時遞減）。新的使用者操作（新的
-/// 資料請求、手動重試、執行互動式任務）為該任務重新歸零；工作階段重建、
-/// 換帳號或切換訪問模式時全部清空。
-#[derive(Debug, Default)]
-struct ReloginBudgets(HashMap<DataKey, u8>);
+/// 重試不會讓另一方的失效被誤判；同一任務的重試鏈共用同一份額度（重試後
+/// 再失效時遞減）。新的使用者操作（新的資料請求、手動重試、執行互動式
+/// 任務）為該任務重新取得完整額度；工作階段重建、換帳號或切換訪問模式時
+/// 全部清空。
+#[derive(Debug)]
+struct AttemptBudgets {
+    /// 單一任務允許的總嘗試次數（首次 ＋ 重試）。
+    max: u8,
+    /// 各任務已使用的嘗試次數。
+    used: HashMap<DataKey, u8>,
+}
 
-impl ReloginBudgets {
+impl AttemptBudgets {
+    /// 建立額度表：單一任務允許 `max` 次總嘗試（首次 ＋ `max - 1` 次重試）。
+    fn new(max: u8) -> Self {
+        Self {
+            max,
+            used: HashMap::new(),
+        }
+    }
+
     /// 讓指定任務重新取得完整額度（新的資料請求、執行互動式任務、
     /// 使用者手動重試）。
     fn reset(&mut self, key: &DataKey) {
-        self.0.remove(key);
+        self.used.remove(key);
     }
 
     /// 清空所有任務的額度（工作階段重建、換帳號或切換訪問模式時）。
     fn clear(&mut self) {
-        self.0.clear();
+        self.used.clear();
     }
 
-    /// 嘗試為指定任務消耗一次額度；已達上限時回傳 `false`。
-    fn try_consume(&mut self, key: &DataKey) -> bool {
-        let used = self.0.entry(key.clone()).or_insert(0);
-        if *used < MAX_AUTO_RELOGINS {
-            *used += 1;
-            true
-        } else {
-            false
-        }
-    }
-}
-
-/// 連線層網路錯誤的自動重試額度：以任務鍵（[`DataKey`]）各自計算。
-///
-/// 與 [`ReloginBudgets`] 刻意分開：登入態失效必須重新登入才能恢復，而
-/// 連線抖動只要重送請求；兩者的上限、觸發條件與歸零時機都不同，混在同一
-/// 個計數器會讓「為什麼這次只重試一次」變得難以解釋。
-///
-/// 新的使用者操作（新的資料請求、手動重試、執行互動式任務）為該任務重新
-/// 取得完整額度；工作階段重建、換帳號或切換訪問模式時全部清空。
-#[derive(Debug, Default)]
-struct RetryBudgets(HashMap<DataKey, u8>);
-
-impl RetryBudgets {
-    /// 讓指定任務重新取得完整重試額度。
-    fn reset(&mut self, key: &DataKey) {
-        self.0.remove(key);
-    }
-
-    /// 清空所有任務的重試額度（工作階段重建、換帳號或切換訪問模式時）。
-    fn clear(&mut self) {
-        self.0.clear();
-    }
-
-    /// 嘗試為指定任務消耗一次重試；已達上限時回傳 `None`，否則回傳即將
-    /// 進行的嘗試序號（1 起算，供進度提示使用）。
+    /// 嘗試為指定任務消耗一次額度；已達上限時回傳 `None`，否則回傳即將
+    /// 進行的嘗試序號（2 起算，供進度提示使用）。
+    ///
+    /// 能走到這裡就代表「第 1 次嘗試已經失敗」，因此計數從 1 起算：上限 3
+    /// 會依序回報 2、3，再下一次才回 `None`。
     fn try_consume(&mut self, key: &DataKey) -> Option<u8> {
-        // 能走到這裡就代表「上一次嘗試已經失敗」：首次呼叫時，第 1 次
-        // 嘗試已用掉，因此計數從 1 起算。
-        let used = self.0.entry(key.clone()).or_insert(1);
-        if *used < MAX_ATTEMPTS {
+        let used = self.used.entry(key.clone()).or_insert(1);
+        if *used < self.max {
             *used += 1;
             Some(*used)
         } else {
@@ -234,9 +219,9 @@ struct Worker {
     /// 共用 `generation`——那會連課程／活動載入一起取消。
     homework_epoch: u64,
     /// 自動重新登入額度（以任務鍵各自保存）。
-    relogin: ReloginBudgets,
+    relogin: AttemptBudgets,
     /// 連線層網路錯誤的自動重試額度（以任務鍵各自保存）。
-    retries: RetryBudgets,
+    retries: AttemptBudgets,
     /// 預載被進行中的登入擋下：該次登入收尾時補做一次（見 [`Worker::preload`]）。
     ///
     /// 使用者取消登入、憑證被拒或會話重建時一併放棄：那代表現在不該由背景
@@ -308,8 +293,8 @@ pub(crate) fn spawn_with_tasks(
         pending_data: VecDeque::new(),
         generation: 0,
         homework_epoch: 0,
-        relogin: ReloginBudgets::default(),
-        retries: RetryBudgets::default(),
+        relogin: AttemptBudgets::new(MAX_LOGIN_ATTEMPTS),
+        retries: AttemptBudgets::new(MAX_ATTEMPTS),
         preload_pending: false,
         cache: LmsCache::default(),
         schedule_cache: None,
@@ -630,7 +615,7 @@ impl Worker {
     /// 一個步進邊界立即執行（每個邊界只會執行恰一次）。每個任務都是新的
     /// 使用者操作，其自動重登額度以任務鍵獨立保存——互動操作與長載入互不
     /// 消耗（一方重登後，另一方的失效仍能嘗試自己的重登）；任務其後的重試
-    /// 鏈共用同一份額度，仍受 [`MAX_AUTO_RELOGINS`] 上限約束。回傳 `true`
+    /// 鏈共用同一份額度，仍受 [`MAX_LOGIN_ATTEMPTS`] 上限約束。回傳 `true`
     /// 代表目前有互動式登入正在進行（原本就在進行，或由本次執行觸發），
     /// 呼叫端必須暫停本輪載入（重新排隊後返回），等登入完成或取消後再繼續。
     fn flush_interactive(&mut self) -> bool {
@@ -772,7 +757,7 @@ impl Worker {
             // 自動重試鏈則共用同一份額度（重試後再失效時遞減）。
             let key = job.data_key();
             self.retry = Some(job);
-            if !key.is_some_and(|key| self.relogin.try_consume(&key)) {
+            if !key.is_some_and(|key| self.relogin.try_consume(&key).is_some()) {
                 // 自動重登後站點仍回報登入態失效：停止自動重試，避免
                 //「重登→重試→再失效」的無上限迴圈，交由使用者手動重試。
                 if let Some(job) = self.retry.take() {

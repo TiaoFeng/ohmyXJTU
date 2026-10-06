@@ -197,8 +197,8 @@ impl Harness {
                 pending_data: VecDeque::new(),
                 generation: 0,
                 homework_epoch: 0,
-                relogin: ReloginBudgets::default(),
-                retries: RetryBudgets::default(),
+                relogin: AttemptBudgets::new(MAX_LOGIN_ATTEMPTS),
+                retries: AttemptBudgets::new(MAX_ATTEMPTS),
                 preload_pending: false,
                 cache: LmsCache::default(),
                 schedule_cache: None,
@@ -4210,14 +4210,19 @@ fn interactive_open_gets_its_own_relogin_budget() {
     // 模擬作業載入與此開啟任務先前各用掉一次自動重登額度：額度按任務鍵
     // 獨立保存，新的開啟操作應重新取得自己的額度。
     assert!(
-        harness.worker.relogin.try_consume(&DataKey::Homework),
+        harness
+            .worker
+            .relogin
+            .try_consume(&DataKey::Homework)
+            .is_some(),
         "前置：额度应可用"
     );
     assert!(
         harness
             .worker
             .relogin
-            .try_consume(&DataKey::OpenActivity("7".to_owned())),
+            .try_consume(&DataKey::OpenActivity("7".to_owned()))
+            .is_some(),
         "前置：额度应可用"
     );
     harness.worker.pending_data.push_back(Job::OpenActivity {
@@ -6059,24 +6064,46 @@ fn credential_save_failure_reports_and_keeps_the_old_vault() {
     assert_eq!(stored.password, "old-password");
 }
 
-/// 自動重登額度：按任務鍵各自計算——同一任務耗盡後不得再消耗，重置只
-/// 影響該任務；其他任務的額度互不影響。
+/// 重試額度：按任務鍵各自計算——同一任務耗盡後不得再消耗，重置只影響該
+/// 任務；其他任務的額度互不影響。
 #[test]
-fn relogin_budget_is_kept_per_task() {
-    let mut budget = ReloginBudgets::default();
+fn attempt_budget_is_kept_per_task() {
+    let mut budget = AttemptBudgets::new(MAX_LOGIN_ATTEMPTS);
     let open = DataKey::OpenActivity("7".to_owned());
     let homework = DataKey::Homework;
 
-    assert!(budget.try_consume(&open), "首次应可消耗额度");
-    assert!(!budget.try_consume(&open), "同一任务的额度用尽后不得再消耗");
+    assert_eq!(
+        budget.try_consume(&open),
+        Some(2),
+        "首次消耗回報即將進行的嘗試序號"
+    );
+    assert_eq!(
+        budget.try_consume(&open),
+        None,
+        "同一任务的额度用尽后不得再消耗"
+    );
     assert!(
-        budget.try_consume(&homework),
+        budget.try_consume(&homework).is_some(),
         "其他任务的额度互不影响（不得被对方的消耗拖累）"
     );
     budget.reset(&open);
-    assert!(budget.try_consume(&open), "重置后应重新取得额度");
+    assert!(budget.try_consume(&open).is_some(), "重置后应重新取得额度");
     budget.clear();
-    assert!(budget.try_consume(&homework), "清空后所有任务重新取得额度");
+    assert!(
+        budget.try_consume(&homework).is_some(),
+        "清空后所有任务重新取得额度"
+    );
+}
+
+/// 連線重試的額度上限與自動重登不同（3 次嘗試），序號遞增到上限為止。
+#[test]
+fn connection_retry_budget_counts_up_to_its_own_limit() {
+    let mut budget = AttemptBudgets::new(MAX_ATTEMPTS);
+    let key = DataKey::Courses;
+
+    assert_eq!(budget.try_consume(&key), Some(2), "首次重試是第 2 次嘗試");
+    assert_eq!(budget.try_consume(&key), Some(3), "再下一次是第 3 次嘗試");
+    assert_eq!(budget.try_consume(&key), None, "達到上限後不得再消耗");
 }
 
 // ── 自訂義任務（任務服務） ──────────────────────────────

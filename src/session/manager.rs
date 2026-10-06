@@ -65,6 +65,22 @@ struct SiteState {
     user_id_error: Option<String>,
 }
 
+/// 校園網探測結果。
+///
+/// 判準是**網路層可達性**（見 [`SessionManager::probe_campus_network`]），
+/// 因此 4xx 也算可達；`rejection` 另外記下 4xx 的狀態碼，供
+/// [`SessionManager::probe_rejection`] 判斷後續失敗是否與探測同源。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbeOutcome {
+    /// 校內主機有回應。`rejection` 為回應的 4xx 狀態碼（若有）。
+    Reachable {
+        /// 探測被拒絕時的狀態碼。
+        rejection: Option<u16>,
+    },
+    /// 連不上校內主機（校外無法直連）。
+    Unreachable,
+}
+
 /// 會話管理器。
 ///
 /// 管理員負責三件事：
@@ -78,7 +94,7 @@ pub struct SessionManager {
     adapters: Vec<Box<dyn SiteAdapter>>,
     direct: Backend,
     webvpn: Backend,
-    probe: Option<(bool, Instant)>,
+    probe: Option<(ProbeOutcome, Instant)>,
     resolved: HashMap<SiteKind, AccessMode>,
     pending: Option<(SiteKind, PendingStage)>,
     sites: HashMap<SiteKind, SiteState>,
@@ -321,7 +337,9 @@ impl SessionManager {
             // 只有探測結果真的會改變路由時才做校園網探測（目前僅考勤系統）；
             // 思源學堂校外一律直連，探測沒有意義、只會白白多一次請求。
             AccessPolicy::Auto => {
-                if webvpn_when_off_campus && !self.probe_campus_network() {
+                if webvpn_when_off_campus
+                    && self.probe_campus_network() == ProbeOutcome::Unreachable
+                {
                     AccessMode::WebVpn
                 } else {
                     AccessMode::Direct
@@ -353,7 +371,7 @@ impl SessionManager {
         }
 
         // 直連已證明不可用：校正探測快取並記下該站改走 WebVPN。
-        self.probe = Some((false, Instant::now()));
+        self.probe = Some((ProbeOutcome::Unreachable, Instant::now()));
         self.resolved.insert(site, AccessMode::WebVpn);
         self.invalidate(site);
         true
@@ -505,7 +523,14 @@ impl SessionManager {
     }
 
     /// 探測校內網路是否可直連（結果快取五分鐘）。
-    fn probe_campus_network(&mut self) -> bool {
+    ///
+    /// 判準是**網路層可達性**：校內主機只要有回應（不含 5xx——校外攔截層常以
+    /// 5xx 呈現）就算可直連。探測網址是考勤系統的登入入口，它在校內同樣會以
+    /// 302 跳轉到統一認證，所以**不能**用「是否 2xx」判定：那只會讓探測永遠
+    /// 失敗、Auto 模式一律改走 WebVPN。
+    ///
+    /// 4xx 的回應另外記下狀態碼（見 [`Self::probe_rejection`]）。
+    fn probe_campus_network(&mut self) -> ProbeOutcome {
         if let Some((value, at)) = self.probe
             && at.elapsed() < PROBE_TTL
         {
@@ -515,14 +540,29 @@ impl SessionManager {
         let request = HttpRequest::get(CAMPUS_PROBE_URL)
             .no_redirect()
             .timeout(PROBE_TIMEOUT);
-        let reachable = self
-            .direct
-            .client
-            .send(request)
-            .is_ok_and(|response| response.status < 500);
+        let outcome = match self.direct.client.send(request) {
+            Ok(response) if response.status < 500 => ProbeOutcome::Reachable {
+                rejection: (400..500)
+                    .contains(&response.status)
+                    .then_some(response.status),
+            },
+            _ => ProbeOutcome::Unreachable,
+        };
 
-        self.probe = Some((reachable, Instant::now()));
-        reachable
+        self.probe = Some((outcome, Instant::now()));
+        outcome
+    }
+
+    /// 探測時被明確拒絕的狀態碼（若探測沒被拒絕則為 `None`）。
+    ///
+    /// 直連請求收到**與探測相同**的 4xx，代表請求與探測被同一層（很可能是
+    /// 校外的限制）以相同方式拒絕：這種情況值得允許一次有限的 WebVPN 回退，
+    /// 而單獨的業務 4xx（例如未選課）不會觸發回退。
+    pub fn probe_rejection(&self) -> Option<u16> {
+        match self.probe {
+            Some((ProbeOutcome::Reachable { rejection }, _)) => rejection,
+            _ => None,
+        }
     }
 
     fn backend(&self, mode: AccessMode) -> &Backend {

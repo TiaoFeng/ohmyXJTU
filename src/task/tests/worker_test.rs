@@ -879,6 +879,112 @@ fn connection_errors_are_retried_before_reporting_failure() {
     );
 }
 
+/// 以假站點準備好「Auto 模式 + 考勤直連 + 探測結果」的組合。
+///
+/// 正式流程在登入時才做校園網探測；測試直接觸發一次，讓探測結果（含被拒絕的
+/// 狀態碼）進快取，再標記考勤已登入。
+fn harness_in_auto_with_probe(probe_status: u16) -> Harness {
+    let mut harness = harness(move |request: &HttpRequest| {
+        // 探測網址即考勤站點的登入入口（見 `session::manager::CAMPUS_PROBE_URL`）。
+        if request.url == attendance::LOGIN_URL {
+            return Ok(HttpResponse::new(
+                probe_status,
+                request.url.clone(),
+                b"probe".to_vec(),
+            ));
+        }
+        if request.url.contains("bk-kq.xjtu.edu.cn") {
+            return Ok(HttpResponse::new(
+                403,
+                request.url.clone(),
+                b"forbidden".to_vec(),
+            ));
+        }
+        Ok(html(""))
+    });
+    harness.worker.config.access_policy = AccessPolicy::Auto;
+    let session = harness.worker.session.as_mut().expect("会话已建立");
+    session.set_access_policy(AccessPolicy::Auto);
+    assert_eq!(
+        session.resolve_access_mode(SiteKind::Attendance).unwrap(),
+        AccessMode::Direct,
+        "探測有回應時先走直連"
+    );
+    session.mark_logged_in(SiteKind::Attendance, AccessMode::Direct, Vec::new());
+    harness
+}
+
+/// 直連請求和探測被**同一個**狀態碼拒絕：Auto 模式下允許一次 WebVPN 回退。
+#[test]
+fn a_rejection_matching_the_probe_falls_back_to_webvpn() {
+    let mut harness = harness_in_auto_with_probe(403);
+    assert_eq!(
+        harness
+            .worker
+            .session
+            .as_ref()
+            .expect("会话已建立")
+            .probe_rejection(),
+        Some(403),
+        "探測被 403 拒絕時應留下訊號"
+    );
+
+    let _ = harness.dispatch(Job::LoadSchedule { force: true });
+
+    let events = harness.drain_events();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Notice(message) if message.contains("已改用 WebVPN 重试")
+        )),
+        "應提示已改走 WebVPN：{events:?}"
+    );
+    assert!(
+        events.iter().all(|event| !matches!(
+            event,
+            Event::Failed { message, .. } if message.contains("异常状态码")
+        )),
+        "回退後不應直接回報狀態碼錯誤：{events:?}"
+    );
+}
+
+/// 探測成功但業務請求被 4xx 拒絕：屬業務錯誤，不得擅自改走 WebVPN。
+#[test]
+fn a_business_rejection_without_a_probe_signal_does_not_fall_back() {
+    let mut harness = harness_in_auto_with_probe(200);
+    assert_eq!(
+        harness
+            .worker
+            .session
+            .as_ref()
+            .expect("会话已建立")
+            .probe_rejection(),
+        None
+    );
+
+    let _ = harness.dispatch(Job::LoadSchedule { force: true });
+
+    let events = harness.drain_events();
+    assert!(
+        events.iter().all(|event| !matches!(
+            event,
+            Event::Notice(message) if message.contains("已改用 WebVPN")
+        )),
+        "不得回退：{events:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Failed {
+                target: FailedTarget::Schedule,
+                message,
+                ..
+            } if message.contains("异常状态码")
+        )),
+        "應直接回報業務失敗：{events:?}"
+    );
+}
+
 /// 短暫的連線抖動：第二次嘗試成功就當作成功，不留任何失敗訊息。
 #[test]
 fn a_transient_connection_error_recovers_on_retry() {

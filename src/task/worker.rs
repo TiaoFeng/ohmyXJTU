@@ -746,13 +746,29 @@ impl Worker {
         }
 
         // 直連失敗：Auto 模式下允許改走 WebVPN 一次。
-        let switched = matches!(
+        //
+        // 兩種訊號才算「這條路由不可用」：
+        // - 連線層錯誤（逾時、連不上、DNS、TLS）：路由當下確實不通。
+        // - HTTP 4xx 且與校園網探測收到的狀態碼相同：請求與探測被同一層以
+        //   相同方式拒絕，很可能是校外限制；單獨的業務 4xx（例如未選課）
+        //   不會觸發回退。
+        let connection_level = matches!(
             &err,
             AppError::Network { kind, .. } if kind.is_connection_level()
-        ) && self
-            .session
-            .as_mut()
-            .is_some_and(|session| session.fallback_to_webvpn(site));
+        );
+        let rejected_like_probe = match &err {
+            AppError::Http { status } => self
+                .session
+                .as_ref()
+                .and_then(SessionManager::probe_rejection)
+                .is_some_and(|code| code == *status),
+            _ => false,
+        };
+        let switched = (connection_level || rejected_like_probe)
+            && self
+                .session
+                .as_mut()
+                .is_some_and(|session| session.fallback_to_webvpn(site));
         if switched {
             self.emit(Event::Notice(format!(
                 "直连不可用，已改用 WebVPN 重试：{site}"

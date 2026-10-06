@@ -538,6 +538,78 @@ fn probe_treats_under_500_status_as_reachable() {
         manager.resolve_access_mode(SiteKind::Attendance).unwrap(),
         AccessMode::Direct
     );
+    assert_eq!(
+        manager.probe_rejection(),
+        Some(403),
+        "被拒絕的狀態碼要留下來，供直連失敗時判斷是否同源"
+    );
+}
+
+/// 探測本身成功（2xx）時沒有「被拒絕」的訊號。
+#[test]
+fn successful_probe_records_no_rejection() {
+    let (mut manager, _, _) = manager_with(AccessPolicy::Auto, |_| ok_response());
+    assert_eq!(
+        manager.resolve_access_mode(SiteKind::Attendance).unwrap(),
+        AccessMode::Direct
+    );
+    assert_eq!(manager.probe_rejection(), None);
+}
+
+/// 連不上校內主機時沒有狀態碼，只有「不可直連」。
+#[test]
+fn unreachable_probe_records_no_rejection() {
+    let (mut manager, _, _) = manager_with(AccessPolicy::Auto, |request| {
+        if request.url == CAMPUS_PROBE_URL {
+            return Err(AppError::network("无法连接校园网"));
+        }
+        ok_response()
+    });
+    assert_eq!(
+        manager.resolve_access_mode(SiteKind::Attendance).unwrap(),
+        AccessMode::WebVpn
+    );
+    assert_eq!(manager.probe_rejection(), None);
+    assert!(
+        !manager.fallback_to_webvpn(SiteKind::Attendance),
+        "已在 WebVPN 时无需回退"
+    );
+}
+
+/// 5xx 代表校外攔截層而非校內服務：維持「不可直連」的既有語意。
+#[test]
+fn probe_treats_server_error_as_unreachable() {
+    let (mut manager, _, _) = manager_with(AccessPolicy::Auto, |request| {
+        if request.url == CAMPUS_PROBE_URL {
+            return Ok(HttpResponse::new(500, request.url.clone(), b"".as_slice()));
+        }
+        ok_response()
+    });
+    assert_eq!(
+        manager.resolve_access_mode(SiteKind::Attendance).unwrap(),
+        AccessMode::WebVpn
+    );
+    assert_eq!(manager.probe_rejection(), None);
+}
+
+/// 回退後探測結果被改寫為「不可直連」，先前的拒絕訊號一併清除。
+#[test]
+fn fallback_clears_the_recorded_rejection() {
+    let (mut manager, _, _) = manager_with(AccessPolicy::Auto, |request| {
+        if request.url == CAMPUS_PROBE_URL {
+            return Ok(HttpResponse::new(403, request.url.clone(), b"".as_slice()));
+        }
+        ok_response()
+    });
+    assert_eq!(
+        manager.resolve_access_mode(SiteKind::Attendance).unwrap(),
+        AccessMode::Direct
+    );
+    manager.mark_logged_in(SiteKind::Attendance, AccessMode::Direct, Vec::new());
+    assert_eq!(manager.probe_rejection(), Some(403));
+
+    assert!(manager.fallback_to_webvpn(SiteKind::Attendance));
+    assert_eq!(manager.probe_rejection(), None);
 }
 
 #[test]

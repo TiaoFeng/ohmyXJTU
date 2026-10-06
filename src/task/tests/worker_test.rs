@@ -248,6 +248,11 @@ impl Harness {
         session.mark_logged_in(SiteKind::Lms, AccessMode::Direct, Vec::new());
     }
 
+    /// 模擬介面送出任務（進通道，尚未被工作者取出）。
+    fn send_job(&self, job: Job) {
+        self._jobs.send(job).expect("发送任务");
+    }
+
     /// 執行任務（錯誤處理比照 [`Worker::run`]）。
     fn dispatch(&mut self, job: Job) -> AppResult<()> {
         let what = job.label();
@@ -1003,6 +1008,51 @@ fn preload_blocked_by_another_login_is_resumed_when_it_finishes() {
         "登入结束后应补做预载：{queued:?}"
     );
     assert!(!harness.worker.preload_pending, "补做后应清除待办");
+}
+
+/// 介面已經送出的同頁請求與預載合併，不會各查一次。
+///
+/// 解鎖時介面會送出一份當前頁面的載入，而預載又會排入四個頁面；兩者若各自
+/// 成隊，同一個頁面會被查詢兩次，第二次的結果會把使用者已經移動過的選取
+/// 重設回第一項。
+#[test]
+fn preload_merges_the_request_the_interface_already_queued() {
+    let mut harness = harness(|_request: &HttpRequest| panic!("两站已登录时预载不应发出请求"));
+    harness.login_both_sites();
+    // 模擬介面在預載之前送出的當前頁面載入（還在通道裡）。
+    harness.send_job(Job::LoadSchedule { force: false });
+
+    harness.dispatch(Job::Preload).expect("预载应成功");
+
+    let queued: Vec<String> = harness.worker.pending_data.iter().map(Job::label).collect();
+    assert_eq!(
+        queued,
+        vec!["课表", "考勤流水", "思源学堂", "作业"],
+        "同一个页面不得排入两笔：{queued:?}"
+    );
+    // 那一筆必須已經收進同一份佇列：留在通道裡就會在預載之後再執行一次。
+    assert!(
+        harness.worker.jobs.try_recv().is_err(),
+        "通道不应残留同一个页面的请求"
+    );
+}
+
+/// 介面送出的強制刷新不會被預載降級為非強制。
+#[test]
+fn preload_does_not_downgrade_a_forced_refresh() {
+    let mut harness = harness(|_request: &HttpRequest| panic!("两站已登录时预载不应发出请求"));
+    harness.login_both_sites();
+    harness.send_job(Job::LoadCourses { force: true });
+
+    harness.dispatch(Job::Preload).expect("预载应成功");
+
+    let forced = harness
+        .worker
+        .pending_data
+        .iter()
+        .filter(|job| matches!(job, Job::LoadCourses { force: true }))
+        .count();
+    assert_eq!(forced, 1, "强制刷新应原样保留");
 }
 
 /// 使用者取消登入時，待補做的預載一併放棄：不該由背景擅自重新登入。

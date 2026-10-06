@@ -61,6 +61,14 @@ impl Worker {
     /// 工作者同一時間只跑一個資料任務，把作業放在最後，使用者切換其他頁面時
     /// 才不會排在它後面乾等。
     fn queue_preload_jobs(&mut self) {
+        // 先收下介面已經送出的資料請求（解鎖時當前頁面的載入，或登入期間
+        // 使用者按下的 `r`）：它們與預載排入的任務同鍵，必須在同一份佇列裡
+        // 一起參與去重，否則同一個頁面會被查詢兩次——第二次的結果會把使用者
+        // 已經移動過的選取重設回第一項。
+        if !self.drain_channel(&Job::Preload) {
+            // 收到結束指令：程式正在退出，不必再排入預載。
+            return;
+        }
         for job in [
             Job::LoadSchedule { force: false },
             Job::LoadFlow { page: 1 },

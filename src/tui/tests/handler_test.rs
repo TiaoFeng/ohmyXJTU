@@ -1002,7 +1002,7 @@ fn enter_on_lms_activities_uses_filtered_selection() {
     press(&mut app, &jobs, KeyCode::Enter);
     assert!(matches!(
         rx.try_recv(),
-        Ok(Job::LoadActivityDetail { activity_id }) if activity_id == "2"
+        Ok(Job::LoadActivityDetail { activity_id, .. }) if activity_id == "2"
     ));
     assert_eq!(app.lms.level, LmsLevel::Detail);
     assert!(app.lms.detail.is_loading(), "应切换到详情加载中");
@@ -1118,7 +1118,7 @@ fn switching_activities_drops_the_previous_detail() {
     press(&mut app, &jobs, KeyCode::Enter);
     assert!(matches!(
         rx.try_recv(),
-        Ok(Job::LoadActivityDetail { activity_id }) if activity_id == "2"
+        Ok(Job::LoadActivityDetail { activity_id, .. }) if activity_id == "2"
     ));
     assert_eq!(app.lms.detail_activity.as_deref(), Some("2"));
     assert!(app.lms.detail.is_loading());
@@ -2353,7 +2353,7 @@ fn control_modified_keys_do_not_adjust_settings_or_the_term_picker() {
     let second = TermCode::parse("2025-2026-2").expect("学期");
     let mut app = App::new(AccessPolicy::Auto);
     app.set_screen(Screen::TermPicker(TermPickerState::new(
-        vec![first.clone(), second],
+        vec![first, second],
         None,
         "选择要查看的学期".to_owned(),
     )));
@@ -2362,4 +2362,56 @@ fn control_modified_keys_do_not_adjust_settings_or_the_term_picker() {
         panic!("应仍在学期选择器");
     };
     assert_eq!(state.selected(), Some(first), "Ctrl+J 不应移动学期选择");
+}
+
+/// `r` 在思源學堂依目前層級刷新，不把人彈回課程清單。
+///
+/// 修復前 `request` 無條件 `level = Courses`：在活動層或詳情層按 `r` 會被丟回
+/// 課程清單，`apply_courses` 也因為層級已變成 `Courses` 而走了「目前課程不存在」
+/// 的分支，連選取的課程都重設為第一門。
+#[test]
+fn refresh_on_the_lms_page_keeps_the_current_level() {
+    let (jobs, rx) = channel();
+
+    // 課程層：重新載入課程清單。
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Lms;
+    app.lms.level = LmsLevel::Courses;
+    press(&mut app, &jobs, KeyCode::Char('r'));
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(Job::LoadCourses { force: true })
+    ));
+
+    // 活動層：重載活動，層級與目前課程都不變。
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Lms;
+    app.lms.level = LmsLevel::Activities;
+    app.lms.activities_course = Some("1".to_owned());
+    press(&mut app, &jobs, KeyCode::Char('r'));
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(Job::LoadActivities { course_id, force: true }) if course_id == "1"
+    ));
+    assert_eq!(
+        app.lms.level,
+        LmsLevel::Activities,
+        "活动层刷新应留在活动层"
+    );
+    assert_eq!(app.lms.activities_course.as_deref(), Some("1"));
+
+    // 詳情層：重載詳情，層級不變。
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Lms;
+    app.lms.level = LmsLevel::Detail;
+    app.lms.detail_activity = Some("2".to_owned());
+    press(&mut app, &jobs, KeyCode::Char('r'));
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(Job::LoadActivityDetail { activity_id, force: true }) if activity_id == "2"
+    ));
+    assert_eq!(app.lms.level, LmsLevel::Detail, "详情层刷新应留在详情层");
 }

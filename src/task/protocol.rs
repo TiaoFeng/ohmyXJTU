@@ -154,6 +154,8 @@ pub enum Job {
     LoadActivityDetail {
         /// 活動識別碼。
         activity_id: String,
+        /// 是否略過快取強制重新查詢（使用者按 `r`）。
+        force: bool,
     },
     /// 開啟活動網頁（`o`）：解析目標網址後以系統瀏覽器開啟。
     OpenActivity {
@@ -344,7 +346,7 @@ impl Job {
             Self::LoadFlow { page } => Some(DataKey::Flow(*page)),
             Self::LoadCourses { .. } => Some(DataKey::Courses),
             Self::LoadActivities { course_id, .. } => Some(DataKey::Activities(course_id.clone())),
-            Self::LoadActivityDetail { activity_id } => {
+            Self::LoadActivityDetail { activity_id, .. } => {
                 Some(DataKey::ActivityDetail(activity_id.clone()))
             }
             Self::OpenActivity { activity_id, .. } => {
@@ -354,13 +356,14 @@ impl Job {
         }
     }
 
-    /// 是否為略過快取的強制刷新（課表、作業、課程與活動載入帶有 `force`）。
+    /// 是否為略過快取的強制刷新（課表、作業、課程、活動與活動詳情帶有 `force`）。
     pub(super) fn is_forced(&self) -> bool {
         match self {
             Self::LoadSchedule { force }
             | Self::LoadHomework { force }
             | Self::LoadCourses { force }
-            | Self::LoadActivities { force, .. } => *force,
+            | Self::LoadActivities { force, .. }
+            | Self::LoadActivityDetail { force, .. } => *force,
             _ => false,
         }
     }
@@ -654,7 +657,7 @@ pub(super) fn failed_target_of(job: &Job) -> FailedTarget {
 pub(super) fn resource_of(job: &Job) -> Option<String> {
     match job {
         Job::LoadActivities { course_id, .. } => Some(course_id.clone()),
-        Job::LoadActivityDetail { activity_id } => Some(activity_id.clone()),
+        Job::LoadActivityDetail { activity_id, .. } => Some(activity_id.clone()),
         _ => None,
     }
 }

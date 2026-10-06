@@ -657,8 +657,8 @@ impl Worker {
                 course_id: course_id.clone(),
                 activities: self.load_activities(course_id, *force)?,
             },
-            Job::LoadActivityDetail { activity_id } => {
-                Event::ActivityDetail(Box::new(self.load_activity_detail(activity_id)?))
+            Job::LoadActivityDetail { activity_id, force } => {
+                Event::ActivityDetail(Box::new(self.load_activity_detail(activity_id, *force)?))
             }
             Job::OpenActivity {
                 activity_id,

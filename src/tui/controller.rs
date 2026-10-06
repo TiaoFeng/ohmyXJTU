@@ -53,11 +53,50 @@ pub(super) fn request(app: &mut App, jobs: &Sender<Job>, nav: NavItem, force: bo
             app.attendance.start_loading("正在加载考勤流水…");
             let _ = jobs.send(Job::LoadFlow { page });
         }
-        NavItem::Lms => {
-            app.lms.courses.start_loading("正在加载课程…");
+        NavItem::Lms => request_lms(app, jobs, force),
+    }
+}
+
+/// 思源學堂的載入請求。
+///
+/// `r` 的語意是「刷新目前畫面」：在活動層與詳情層要重載該層，不能把使用者彈
+/// 回課程清單（原本無條件把 `level` 設回 `Courses`，`apply_courses` 因此走了
+/// 「目前課程不存在」的分支，連選取的課程都會被重設為第一門）。只有層級對應
+/// 的資源識別碼遺失時才逐層退回。
+fn request_lms(app: &mut App, jobs: &Sender<Job>, force: bool) {
+    match app.lms.level {
+        LmsLevel::Detail => {
+            if let Some(activity_id) = app.lms.detail_activity.clone() {
+                let note = detail_loading_note(app.lms.detail.ready().map(|detail| detail.kind));
+                // 保留舊詳情（stale）：重新查詢期間畫面不跳。
+                app.lms.detail.start_loading(note);
+                let _ = jobs.send(Job::LoadActivityDetail { activity_id, force });
+                return;
+            }
+            app.lms.level = LmsLevel::Activities;
+            request_lms(app, jobs, force);
+        }
+        LmsLevel::Activities => {
+            if let Some(course_id) = app.lms.activities_course.clone() {
+                app.lms.activities.start_loading("正在加载课程活动…");
+                let _ = jobs.send(Job::LoadActivities { course_id, force });
+                return;
+            }
             app.lms.level = LmsLevel::Courses;
+            request_lms(app, jobs, force);
+        }
+        LmsLevel::Courses => {
+            app.lms.courses.start_loading("正在加载课程…");
             let _ = jobs.send(Job::LoadCourses { force });
         }
+    }
+}
+
+/// 活動詳情的載入提示（作業才有提交記錄）。
+fn detail_loading_note(kind: Option<ActivityKind>) -> &'static str {
+    match kind {
+        Some(ActivityKind::Homework) => "正在加载活动详情与提交记录…",
+        _ => "正在加载活动详情…",
     }
 }
 
@@ -119,11 +158,7 @@ pub(super) fn activate(app: &mut App, jobs: &Sender<Job>) {
                 };
                 app.lms.activity_index = selected;
                 // 同理：換活動時不得沿用上一個活動的詳情。
-                let note = if kind == ActivityKind::Homework {
-                    "正在加载活动详情与提交记录…"
-                } else {
-                    "正在加载活动详情…"
-                };
+                let note = detail_loading_note(Some(kind));
                 if app.lms.detail_activity.as_deref() == Some(activity_id.as_str()) {
                     app.lms.detail.start_loading(note);
                 } else {
@@ -132,7 +167,10 @@ pub(super) fn activate(app: &mut App, jobs: &Sender<Job>) {
                 app.lms.detail_activity = Some(activity_id.clone());
                 app.lms.level = LmsLevel::Detail;
                 app.lms.detail_scroll.reset();
-                let _ = jobs.send(Job::LoadActivityDetail { activity_id });
+                let _ = jobs.send(Job::LoadActivityDetail {
+                    activity_id,
+                    force: false,
+                });
             }
             LmsLevel::Detail => {}
         },

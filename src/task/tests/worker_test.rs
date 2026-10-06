@@ -3639,6 +3639,7 @@ fn activity_detail_for_material_skips_submission_request() {
     harness
         .dispatch(Job::LoadActivityDetail {
             activity_id: "77".to_owned(),
+            force: false,
         })
         .expect("加载详情");
 
@@ -3669,6 +3670,56 @@ fn activity_detail_for_material_skips_submission_request() {
     );
 }
 
+/// 活動詳情的 `force` 要真的略過快取（介面在詳情層按 `r` 時送出）。
+///
+/// 修復前 `Job::LoadActivityDetail` 沒有 `force` 欄位、`load_activity_detail`
+/// 也硬寫 `false`，因此詳情層的 `r` 只會命中快取、畫面不會更新。
+#[test]
+fn forced_activity_detail_skips_the_cache() {
+    let site = Arc::new(FakeHomeworkSite {
+        seen: Arc::new(Mutex::new(Vec::new())),
+        courses: serde_json::json!({ "courses": [] }),
+        activities: Vec::new(),
+        details: vec![(
+            "77",
+            serde_json::json!({ "id": "77", "type": "material", "title": "课件",
+                "data": { "content": "<div>课程介绍</div>" } }),
+        )],
+        expire_first_submission: false,
+        submissions: AtomicUsize::new(0),
+        attendance_term: None,
+    });
+
+    let system = Arc::clone(&site);
+    let mut harness = harness(move |request| system.handle(request));
+    harness.login_lms_only();
+
+    let detail_requests = || {
+        site.urls()
+            .into_iter()
+            .filter(|url| url.ends_with("/api/activities/77"))
+            .count()
+    };
+    let load = |harness: &mut Harness, force: bool| {
+        harness
+            .dispatch(Job::LoadActivityDetail {
+                activity_id: "77".to_owned(),
+                force,
+            })
+            .expect("加载活动详情");
+        let _ = harness.drain_events();
+    };
+
+    load(&mut harness, false);
+    assert_eq!(detail_requests(), 1, "第一次应查询详情");
+
+    load(&mut harness, false);
+    assert_eq!(detail_requests(), 1, "非强制载入应命中详情快取");
+
+    load(&mut harness, true);
+    assert_eq!(detail_requests(), 2, "强制刷新必须重新查询详情");
+}
+
 #[test]
 fn activity_detail_for_homework_queries_submission_list() {
     let site = Arc::new(FakeHomeworkSite {
@@ -3694,6 +3745,7 @@ fn activity_detail_for_homework_queries_submission_list() {
     harness
         .dispatch(Job::LoadActivityDetail {
             activity_id: "11".to_owned(),
+            force: false,
         })
         .expect("加载详情");
 
@@ -4187,6 +4239,7 @@ fn only_open_activity_is_interactive() {
         },
         Job::LoadActivityDetail {
             activity_id: "1".to_owned(),
+            force: false,
         },
         Job::SetHomeworkTerm {
             term: "2026-2027-1".to_owned(),

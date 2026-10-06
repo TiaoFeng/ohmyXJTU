@@ -188,15 +188,6 @@ impl AppError {
     pub fn is_connection_error(&self) -> bool {
         matches!(self, Self::Network { kind, .. } if kind.is_connection_level())
     }
-
-    /// 是否值得自動重試（連線層網路錯誤，或登入態失效）。
-    ///
-    /// 伺服器有回應但內容不符預期（協定錯誤、業務錯誤、HTTP 狀態碼）、
-    /// 憑證或口令錯誤、驗證碼錯誤等一律**不**重試：重送同樣的請求只會
-    /// 得到同樣的結果，白白拉長使用者等待。
-    pub fn is_retryable(&self) -> bool {
-        self.is_connection_error() || self.needs_relogin()
-    }
 }
 
 #[cfg(test)]

@@ -642,6 +642,49 @@ fn pending_data_job_survives_failed_relogin_and_resumes_afterwards() {
     assert!(harness.worker.retry.is_none(), "任务续跑后不应继续保留");
 }
 
+/// 等待重登的任務只有一個槽：新的失敗不得讓前一個任務靜默消失。
+///
+/// 修復前 `report_data_failure` 直接覆寫 `retry`：被覆寫的任務收不到任何事件，
+/// 它那一頁就停在「載入中」——而 `ensure_page` 只在頁面尚未載入時才重新請求，
+/// 使用者若不回到該頁按 `r` 就再也無法恢復。
+#[test]
+fn a_data_failure_settles_the_task_already_waiting_to_relogin() {
+    // 公鑰取不到 → 自動重登連開始都做不到，本次失敗會走「回報原任務」的路徑。
+    let mut harness = harness(fake_flow(1));
+    // 上一個任務（課表）已因登入態失效排入待重試的槽。
+    harness.worker.retry = Some(Job::LoadSchedule { force: false });
+
+    // 第二個任務（思源學堂課程）也回報登入態失效：尚未登入時不用任何網路往返。
+    harness
+        .dispatch(Job::LoadCourses { force: false })
+        .expect("数据任务失败不应冒泡为任务错误");
+
+    let events = harness.drain_events();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::LoadingCancelled {
+                target: FailedTarget::Schedule
+            }
+        )),
+        "被取代的等待任务必须收敛，否则该页永远停在加载中：{events:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Failed {
+                target: FailedTarget::Courses,
+                ..
+            }
+        )),
+        "新的任务仍应照常回报失败：{events:?}"
+    );
+    assert!(
+        harness.worker.retry.is_none(),
+        "重登失败后不应保留待重试任务"
+    );
+}
+
 // ── 自動重登上限（避免「重登→重試→再失效」的無上限迴圈）──
 
 /// 「站點持續回報登入態失效」的假站點：資料端點永遠回傳統一認證頁，

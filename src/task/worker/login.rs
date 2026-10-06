@@ -92,7 +92,11 @@ impl Worker {
     }
 
     /// 丟棄等待重登的資料任務，並通知介面收斂該頁的載入狀態。
-    fn settle_pending_retry(&mut self) {
+    ///
+    /// 呼叫端：[`Self::cancel_login`]（使用者取消登入，不再重試）、
+    /// [`Self::finish_login`]（登入流程沒有真的驗證成功）與
+    /// [`Worker::report_data_failure`]（槽即將被另一個失敗的任務取代）。
+    pub(super) fn settle_pending_retry(&mut self) {
         if let Some(job) = self.retry.take() {
             self.emit(Event::LoadingCancelled {
                 target: failed_target_of(&job),

@@ -764,6 +764,14 @@ impl Worker {
             // 額度按任務鍵各自計算：互動式任務與長載入互不消耗；同一任務的
             // 自動重試鏈則共用同一份額度（重試後再失效時遞減）。
             let key = job.data_key();
+            // 等待重登的任務只有一個槽：槽裡可能還躺著上一個失敗的任務
+            //（例如登入被拒之後，佇列裡的下一個任務又失敗）。直接覆寫會讓
+            // 那個任務永遠收不到任何事件，它那一頁就停在「載入中」，只能回到
+            // 該頁按 `r` 才能恢復；先收斂它（介面收到 `LoadingCancelled`）。
+            //
+            // 刻意不把它排回 `pending_data`：那會讓它重新取得自動重登額度，
+            // 兩個任務互相觸發重登就變成沒有上限的迴圈。
+            self.settle_pending_retry();
             self.retry = Some(job);
             if !key.is_some_and(|key| self.relogin.try_consume(&key).is_some()) {
                 // 自動重登後站點仍回報登入態失效：停止自動重試，避免

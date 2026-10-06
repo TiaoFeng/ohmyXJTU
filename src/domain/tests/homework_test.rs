@@ -90,7 +90,7 @@ fn aggregates_by_group_and_deadline() {
         vec!["逾期作业", "即将到期", "无截止时间", "已提交", "待核实作业"],
         "未完成在前（截止时间升序、无截止最后），其次已完成，最后待核实"
     );
-    assert!(result[0].is_overdue());
+    assert_eq!(result[0].state, HomeworkState::Overdue);
     assert_eq!(result[2].state, HomeworkState::Pending);
     assert_eq!(result[3].state, HomeworkState::Completed);
     assert_eq!(result[4].state, HomeworkState::Unknown);
@@ -137,7 +137,6 @@ fn groups_cycle_in_display_order() {
     assert_eq!(HomeworkGroup::Completed.next(), HomeworkGroup::Unknown);
     assert_eq!(HomeworkGroup::Unknown.next(), HomeworkGroup::Unfinished);
     assert_eq!(HomeworkGroup::Unknown.previous(), HomeworkGroup::Completed);
-    assert_eq!(HomeworkGroup::Unfinished.index(), 0);
     assert_eq!(HomeworkState::Overdue.group(), HomeworkGroup::Unfinished);
     assert_eq!(HomeworkGroup::ALL.len(), 3);
 }

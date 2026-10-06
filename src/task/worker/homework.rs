@@ -486,7 +486,6 @@ impl Worker {
                     .current_course()
                     .cloned()
                     .ok_or_else(|| AppError::protocol("课程索引越界"))?;
-                // 詳情多已在同一批課程預取時一併抓回。
                 // 詳情多已在同一批課程預取時一併抓回；尚未補齊時只補一個波次。
                 if !runner.prefetched_details.contains_key(&activity.id) {
                     self.prefetch_details(runner)?;

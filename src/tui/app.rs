@@ -1617,7 +1617,7 @@ impl App {
     ///
     /// 尚未被要求載入的頁面（`Idle`）不受影響：解鎖後的背景預載失敗時，
     /// 使用者從未要求過那份資料，把它標成「加载失败」並不合理，也會讓
-    /// 進入該頁時（[`Self::request`] 只在 `Idle` 時才重新載入）誤以為有資料
+    /// 進入該頁時（`controller::request` 只在 `Idle` 時才重新載入）誤以為有資料
     /// 卻載入失敗。這類失敗只留底欄提示，頁面維持未載入，進入時自然重載。
     pub fn fail_target(&mut self, target: FailedTarget, message: &str) {
         match target {

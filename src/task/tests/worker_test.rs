@@ -198,6 +198,7 @@ impl Harness {
                 generation: 0,
                 homework_epoch: 0,
                 relogin: ReloginBudgets::default(),
+                retries: RetryBudgets::default(),
                 cache: LmsCache::default(),
                 schedule_cache: None,
                 schedule_week: None,
@@ -742,6 +743,329 @@ fn new_load_resets_the_relogin_budget() {
         login_posts.load(Ordering::SeqCst),
         2,
         "新的请求应重新获得一次自动重登额度"
+    );
+}
+
+/// 連線層錯誤（逾時、連不上）會自動重送同一個請求，額度用完才回報失敗。
+///
+/// 校內服務偶發逾時是常態；沒有自動重試時，一次抖動就要使用者手動按 `r`。
+#[test]
+fn connection_errors_are_retried_before_reporting_failure() {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&attempts);
+    let mut harness = harness(move |request: &HttpRequest| {
+        if request.url.as_str() == LMS_COURSES {
+            counter.fetch_add(1, Ordering::SeqCst);
+            return Err(AppError::network_kind(
+                NetworkKind::Timeout,
+                "请求超时".to_owned(),
+            ));
+        }
+        Ok(html(""))
+    });
+    harness.login_lms_only();
+
+    harness
+        .dispatch(Job::LoadCourses { force: false })
+        .expect("放弃重试后不属于任务错误");
+
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        MAX_ATTEMPTS as usize,
+        "应以总共 {MAX_ATTEMPTS} 次尝试为上限"
+    );
+    let events = harness.drain_events();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, Event::Notice(message) if message.contains("正在重试")))
+            .count(),
+        MAX_ATTEMPTS as usize - 1,
+        "每次重试都应有提示"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Failed {
+                target: FailedTarget::Courses,
+                message,
+                ..
+            } if message.contains("请求超时")
+        )),
+        "额度用完才回报失败"
+    );
+}
+
+/// 短暫的連線抖動：第二次嘗試成功就當作成功，不留任何失敗訊息。
+#[test]
+fn a_transient_connection_error_recovers_on_retry() {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&attempts);
+    let mut harness = harness(move |request: &HttpRequest| {
+        if request.url.as_str() == LMS_COURSES {
+            return if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                Err(AppError::network_kind(
+                    NetworkKind::Connect,
+                    "连接失败".to_owned(),
+                ))
+            } else {
+                Ok(json(serde_json::json!({ "courses": [] })))
+            };
+        }
+        Ok(html(""))
+    });
+    harness.login_lms_only();
+
+    harness
+        .dispatch(Job::LoadCourses { force: false })
+        .expect("短暂失败应自动恢复");
+
+    assert_eq!(attempts.load(Ordering::SeqCst), 2, "第二次尝试即成功");
+    let events = harness.drain_events();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::Courses(_))),
+        "恢复后应回报课程"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::Failed { .. })),
+        "恢复后不应回报失败"
+    );
+}
+
+/// 新的使用者请求重新取得完整重试额度（相当于按 `r` 之后又遇到一次抖动）。
+#[test]
+fn a_new_request_resets_the_connection_retry_budget() {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&attempts);
+    let mut harness = harness(move |request: &HttpRequest| {
+        if request.url.as_str() == LMS_COURSES {
+            counter.fetch_add(1, Ordering::SeqCst);
+            return Err(AppError::network_kind(
+                NetworkKind::Dns,
+                "域名解析失败".to_owned(),
+            ));
+        }
+        Ok(html(""))
+    });
+    harness.login_lms_only();
+
+    harness
+        .dispatch(Job::LoadCourses { force: false })
+        .expect("第一次加载在有界重试后结束");
+    assert_eq!(attempts.load(Ordering::SeqCst), MAX_ATTEMPTS as usize);
+
+    harness
+        .dispatch(Job::LoadCourses { force: false })
+        .expect("第二次加载同样有界");
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        MAX_ATTEMPTS as usize * 2,
+        "新的请求应重新取得完整重试额度"
+    );
+}
+
+/// 解鎖後預載：四個頁面依「由便宜到貴」的順序排入，作業放最後。
+///
+/// 工作者同一時間只跑一個資料任務；作業彙總要逐門課程查活動與提交狀態，
+/// 可能花上十秒，排在前面會讓使用者切到其他頁面時乾等。
+#[test]
+fn preload_queues_the_four_pages_cheapest_first() {
+    let mut harness = harness(|_request: &HttpRequest| panic!("已登录时预载不应发出任何请求"));
+    harness.login_both_sites();
+
+    harness.dispatch(Job::Preload).expect("预载应成功");
+
+    let queued: Vec<String> = harness.worker.pending_data.iter().map(Job::label).collect();
+    assert_eq!(
+        queued,
+        vec!["课表", "考勤流水", "思源学堂", "作业"],
+        "应由便宜到贵依序排入"
+    );
+}
+
+/// 預載只登入尚未登入的站點，已登入的不重複登入。
+#[test]
+fn preload_logs_in_the_site_that_is_not_logged_in_yet() {
+    let mut harness = harness(fake_flow(0));
+    harness.login_lms_only();
+
+    harness.dispatch(Job::Preload).expect("预载应成功");
+
+    let session = harness.worker.session.as_ref().expect("会话");
+    assert!(
+        session.is_logged_in(SiteKind::Attendance),
+        "应登录尚未登录的考勤"
+    );
+    assert!(
+        session.is_logged_in(SiteKind::Lms),
+        "已登录的思源学堂应保持"
+    );
+    assert_eq!(
+        harness.worker.pending_data.len(),
+        4,
+        "两站就绪后排入四个页面"
+    );
+}
+
+/// 預載的登入失敗：以 `FailedTarget::Preload` 回報（介面只留提示、不動頁面），
+/// 且不排入任何載入任務——登入都沒成功，排了也只是徒勞。
+#[test]
+fn preload_login_failure_reports_without_queueing_any_load() {
+    let mut harness = harness(|_request: &HttpRequest| {
+        Err(AppError::network_kind(
+            NetworkKind::Dns,
+            "域名解析失败".to_owned(),
+        ))
+    });
+
+    harness
+        .dispatch(Job::Preload)
+        .expect_err("离线时预载应失败");
+
+    assert!(
+        harness.worker.pending_data.is_empty(),
+        "登录失败不应排入任何载入任务"
+    );
+    let events = harness.drain_events();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, Event::Notice(message) if message.contains("正在重试")))
+            .count(),
+        MAX_ATTEMPTS as usize - 1,
+        "登入失败也应有自动重试提示"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Failed {
+                what,
+                target: FailedTarget::Preload,
+                ..
+            } if what == "预载"
+        )),
+        "应以预载为目标回报失败"
+    );
+}
+
+/// 已經有登入在進行時，預載靜默等待，不重啟它。
+///
+/// 重啟會覆寫 `flow`，把使用者正在輸入的驗證流程丟掉；正確做法是等這次
+/// 登入收尾時由同一條路徑繼續預載（`finish_login` 會重跑 [`Job::Preload`]）。
+#[test]
+fn preload_waits_for_a_login_that_is_already_running() {
+    let logins = Arc::new(AtomicUsize::new(0));
+    let mut harness = harness(mfa_login_responses(Arc::clone(&logins)));
+    harness
+        .dispatch(Job::RetryLogin {
+            site: SiteKind::Attendance,
+        })
+        .expect("登录应停在短信验证");
+    assert_eq!(logins.load(Ordering::SeqCst), 1, "测试前提：登入已开始");
+
+    harness.dispatch(Job::Preload).expect("预载应静默等待");
+
+    assert_eq!(logins.load(Ordering::SeqCst), 1, "不应重启进行中的登入");
+    assert!(
+        harness.worker.pending_data.is_empty(),
+        "登入完成前不应排入任何载入任务"
+    );
+}
+
+/// 尚未建立會話（例如會話在重建失敗後被停用）時預載直接報錯，不排入任務。
+#[test]
+fn preload_without_a_session_reports_an_error() {
+    let mut harness = harness(|_request: &HttpRequest| panic!("会话未建立时不应发出请求"));
+    harness.worker.session = None;
+
+    harness.dispatch(Job::Preload).expect_err("未解锁时应报错");
+
+    assert!(
+        harness.worker.pending_data.is_empty(),
+        "没有会话时不应排入任何载入任务"
+    );
+}
+
+/// 考勤登入需要簡訊驗證的假站點：用來製造「登入正在進行」的狀態。
+///
+/// `logins` 累計登入入口被請求的次數，用來觀察登入是否被重新啟動。
+fn mfa_login_responses(
+    logins: Arc<AtomicUsize>,
+) -> impl Fn(&HttpRequest) -> AppResult<HttpResponse> + Send + Sync + 'static {
+    move |request: &HttpRequest| {
+        let url = request.url.as_str();
+        if url == rsa::PUBLIC_KEY_URL {
+            return Ok(HttpResponse::new(
+                200,
+                rsa::PUBLIC_KEY_URL,
+                public_key_pem(),
+            ));
+        }
+        if url == attendance::LOGIN_URL {
+            logins.fetch_add(1, Ordering::SeqCst);
+            return Ok(HttpResponse::new(
+                200,
+                ATTENDANCE_POST,
+                login_page_with_mfa(),
+            ));
+        }
+        if url == ATTENDANCE_POST {
+            return Ok(HttpResponse::new(200, ATTENDANCE_TARGET, TARGET_BODY));
+        }
+        if url.contains("/mfa/detect") {
+            return Ok(json(serde_json::json!({
+                "code": 0,
+                "data": { "state": "s-1", "need": true }
+            })));
+        }
+        if url.contains("/initByType/securephone") {
+            return Ok(json(serde_json::json!({
+                "code": 0,
+                "data": { "securePhone": "138****1234", "gid": "g-1" }
+            })));
+        }
+        panic!("未预期的请求：{url}");
+    }
+}
+
+/// 登入進行中收到資料任務失敗：把任務排回待執行，不重啟登入。
+///
+/// 重啟登入會覆寫 `flow`，丟掉目前流程等待續跑的任務（例如使用者正在輸入的
+/// 簡訊驗證碼），也會讓 `retry` 槽被佔用；正確做法是等這次登入結束後再重跑
+/// 該任務——排入待執行的任務在登入完成前不會被取出。
+#[test]
+fn a_data_failure_during_a_login_is_parked_instead_of_restarting_it() {
+    let logins = Arc::new(AtomicUsize::new(0));
+    let mut harness = harness(mfa_login_responses(Arc::clone(&logins)));
+    harness
+        .dispatch(Job::RetryLogin {
+            site: SiteKind::Attendance,
+        })
+        .expect("登录应停在短信验证");
+    assert!(harness.worker.flow.is_some(), "测试前提：登入正在进行");
+
+    let generation = harness.worker.generation;
+    harness.worker.report_data_failure(
+        SiteKind::Attendance,
+        Job::LoadFlow { page: 1 },
+        generation,
+        AppError::SessionExpired,
+    );
+
+    assert_eq!(
+        logins.load(Ordering::SeqCst),
+        1,
+        "不得重新启动（覆盖）进行中的登入"
+    );
+    assert!(harness.worker.retry.is_none(), "不得占用待重试槽");
+    assert_eq!(
+        harness.worker.pending_data.len(),
+        1,
+        "任务应排回待执行，等登入结束后重跑"
     );
 }
 

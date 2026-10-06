@@ -98,13 +98,14 @@ impl Worker {
         }
     }
 
-    /// 等待重登的任務重新取得自動重登額度（使用者手動重試時）。
+    /// 等待重登的任務重新取得自動重登與重試額度（使用者手動重試時）。
     ///
     /// 額度按任務鍵各自保存：手動重試只為「正在等待的任務」重新計算，
     /// 不影響其他任務的額度。
     fn reset_pending_retry_budget(&mut self) {
         if let Some(key) = self.retry.as_ref().and_then(Job::data_key) {
             self.relogin.reset(&key);
+            self.retries.reset(&key);
         }
     }
 

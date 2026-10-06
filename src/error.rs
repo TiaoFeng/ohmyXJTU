@@ -179,4 +179,26 @@ impl AppError {
     pub fn needs_relogin(&self) -> bool {
         matches!(self, Self::SessionExpired)
     }
+
+    /// 是否屬於「連線層」網路錯誤（逾時、連不上、DNS、TLS）。
+    ///
+    /// 這類失敗代表這條路由當下實際連不上，多半是短暫的網路抖動：自動
+    /// 重試同一個請求有機會成功。與 [`Self::needs_relogin`] 語意互斥——
+    /// 登入態失效要靠重新登入處理，不能只重送請求。
+    pub fn is_connection_error(&self) -> bool {
+        matches!(self, Self::Network { kind, .. } if kind.is_connection_level())
+    }
+
+    /// 是否值得自動重試（連線層網路錯誤，或登入態失效）。
+    ///
+    /// 伺服器有回應但內容不符預期（協定錯誤、業務錯誤、HTTP 狀態碼）、
+    /// 憑證或口令錯誤、驗證碼錯誤等一律**不**重試：重送同樣的請求只會
+    /// 得到同樣的結果，白白拉長使用者等待。
+    pub fn is_retryable(&self) -> bool {
+        self.is_connection_error() || self.needs_relogin()
+    }
 }
+
+#[cfg(test)]
+#[path = "tests/error_test.rs"]
+mod error_test;

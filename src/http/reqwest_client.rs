@@ -10,8 +10,18 @@ use super::{Body, HttpClient, HttpRequest, HttpResponse, Method};
 use crate::error::{AppError, AppResult, NetworkKind};
 use crate::webvpn;
 
-/// 單次請求的預設逾時。
-pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+/// 單次請求的預設逾時（含連線、傳輸與讀取整段）。
+///
+/// 實測校內服務的單次往返為 0.3～3.2 秒，15 秒已相當寬裕；縮短逾時讓
+/// 「連不上、逾時」更快地暴露出來，使用者不必枯等半分鐘才看到失敗
+///（失敗後會自動重試，見 `crate::task::worker`）。
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// 建立連線（含 DNS 解析與 TLS 握手）的逾時。
+///
+/// 離線或目標不可達時，若只靠總逾時，使用者要等滿 15 秒；連線階段單獨
+/// 設 10 秒可讓這類失敗更早結束。正常請求的連線階段遠快於此值。
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// 最多跟隨的重定向次數。
 const MAX_REDIRECTS: usize = 10;
@@ -342,6 +352,10 @@ fn build_client(user_agent: &str) -> AppResult<Client> {
         // 重定向一律由本層逐跳處理（見 `ReqwestClient::send_following`）。
         .redirect(Policy::none())
         .timeout(DEFAULT_TIMEOUT)
+        // 連線階段（DNS、TCP、TLS）另有較短的逾時：目標不可達時能更快回報，
+        // 不必等滿總逾時（請求可在 [`HttpRequest::timeout`] 個別覆寫總逾時，
+        // 但連線逾時一律以此為上限）。
+        .connect_timeout(CONNECT_TIMEOUT)
         // 考勤入口（bk-kq.xjtu.edu.cn）的第一個回應以舊式多行標頭承載
         // Content-Security-Policy（續行使用裸 LF）。Hyper 預設拒收這類標頭，
         // 會讓請求在還沒開始重定向前就失敗；Python requests 對此寬容，參考實作

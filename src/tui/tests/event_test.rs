@@ -37,9 +37,110 @@ fn app() -> App {
 #[test]
 fn vault_ready_moves_to_main_and_starts_loading() {
     let mut app = app();
-    apply_event(&mut app, Event::VaultReady);
+    let (jobs, rx) = channel();
+    apply_event_with_jobs(&mut app, Event::VaultReady, &jobs);
+
     assert!(matches!(app.screen, Screen::Main), "解锁后直接进入主画面");
     assert!(app.schedule.is_loading(), "应触发当前页面的首次加载");
+
+    // 預載任務必須先送出：工作者會先登入兩個站點，再把四個頁面排進佇列；
+    // 先送可以省掉一次「沒登入 → 失敗 → 重登」的無謂往返。
+    let sent: Vec<Job> = rx.try_iter().collect();
+    assert!(
+        matches!(sent.first(), Some(Job::Preload)),
+        "预载任务必须先送出：{sent:?}"
+    );
+    assert!(
+        sent.iter()
+            .any(|job| matches!(job, Job::LoadSchedule { .. })),
+        "当前页面的加载任务仍要送出：{sent:?}"
+    );
+}
+
+/// 背景預載失敗（`FailedTarget::Preload`）只留底欄訊息，不動任何頁面。
+///
+/// 使用者從未要求過那份資料；把頁面標成「加载失败」既不合理，也會讓之後
+/// 進入該頁時（只在 `Idle` 才重新載入）卡在失敗狀態。
+#[test]
+fn preload_failure_only_sets_a_message() {
+    let mut app = app();
+    app.set_screen(Screen::Main);
+
+    apply_event(
+        &mut app,
+        Event::Failed {
+            what: "预载".to_owned(),
+            message: "网络连接失败（请求超时）".to_owned(),
+            target: FailedTarget::Preload,
+            site: Some(SiteKind::Attendance),
+            resource: None,
+        },
+    );
+
+    assert!(app.schedule.is_idle(), "预载失败不应把课表页标成失败");
+    assert!(app.homework.is_idle(), "预载失败不应把任务页标成失败");
+    assert!(app.attendance.is_idle(), "预载失败不应把流水页标成失败");
+    assert!(app.lms.courses.is_idle(), "预载失败不应把课程页标成失败");
+    assert!(
+        app.message_text()
+            .is_some_and(|text| text.contains("预载失败")),
+        "应留下提示：{:?}",
+        app.message_text()
+    );
+}
+
+/// 頁面從未被要求載入（`Idle`）時的失敗不標記頁面。
+///
+/// 背景預載走的就是這條路徑：它不把頁面設成載入中，失敗時自然也該維持
+/// 未載入，讓使用者進入該頁時能重新載入。
+#[test]
+fn failure_does_not_mark_a_page_that_was_never_requested() {
+    let mut app = app();
+    app.set_screen(Screen::Main);
+
+    apply_event(
+        &mut app,
+        Event::Failed {
+            what: "课表".to_owned(),
+            message: "网络连接失败".to_owned(),
+            target: FailedTarget::Schedule,
+            site: None,
+            resource: None,
+        },
+    );
+
+    assert!(app.schedule.is_idle(), "未要求载入的页面不应变成失败");
+    assert!(
+        app.message_text()
+            .is_some_and(|text| text.contains("课表失败")),
+        "仍要留下提示：{:?}",
+        app.message_text()
+    );
+}
+
+/// 反過來：使用者要求過的頁面（載入中）失敗時必須顯示失敗，不能被上面的
+/// 規則吞掉，否則畫面會永遠停在「載入中」。
+#[test]
+fn failure_marks_a_page_that_is_loading() {
+    let mut app = app();
+    app.set_screen(Screen::Main);
+    app.schedule.start_loading("正在加载课表…");
+
+    apply_event(
+        &mut app,
+        Event::Failed {
+            what: "课表".to_owned(),
+            message: "网络连接失败".to_owned(),
+            target: FailedTarget::Schedule,
+            site: None,
+            resource: None,
+        },
+    );
+
+    assert!(
+        matches!(app.schedule, Page::Failed { .. }),
+        "要求过的页面必须显示失败"
+    );
 }
 
 /// 課表事件同步週次與總週數；換帳號清除（回到當前週），切換訪問模式保留。

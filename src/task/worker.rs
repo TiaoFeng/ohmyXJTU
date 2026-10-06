@@ -51,6 +51,7 @@ mod credentials;
 mod data;
 mod homework;
 mod login;
+mod preload;
 mod timing;
 
 use cache::{LmsCache, ScheduleCache};
@@ -62,6 +63,17 @@ use timing::LoadTiming;
 /// 迴圈；超過上限即停止自動重試並回報錯誤，由使用者手動按 `r` 重試
 ///（每次全新的使用者操作都會為該任務重新獲得額度）。
 const MAX_AUTO_RELOGINS: u8 = 1;
+
+/// 單一資料任務允許的總嘗試次數（首次 ＋ 2 次重試）。
+///
+/// 僅用於「連線層」網路錯誤（逾時、連不上、DNS、TLS）：校內服務偶發的
+/// 逾時或連線失敗多半是短暫抖動，自動重送同一個請求即可，不必勞煩使用者
+/// 手動按 `r`。伺服器有回應但內容不符預期、憑證錯誤等不在此列
+///（見 [`AppError::is_connection_error`]）。
+///
+/// 次數與逾時相乘即為最壞等待時間（3 × 15 秒）；刻意保持小，讓真正持續
+/// 失敗的情況仍能快速回報。
+const MAX_ATTEMPTS: u8 = 3;
 
 /// 自動重新登入額度：以任務鍵（[`DataKey`]）各自計算，用完即停止自動重試。
 ///
@@ -93,6 +105,43 @@ impl ReloginBudgets {
             true
         } else {
             false
+        }
+    }
+}
+
+/// 連線層網路錯誤的自動重試額度：以任務鍵（[`DataKey`]）各自計算。
+///
+/// 與 [`ReloginBudgets`] 刻意分開：登入態失效必須重新登入才能恢復，而
+/// 連線抖動只要重送請求；兩者的上限、觸發條件與歸零時機都不同，混在同一
+/// 個計數器會讓「為什麼這次只重試一次」變得難以解釋。
+///
+/// 新的使用者操作（新的資料請求、手動重試、執行互動式任務）為該任務重新
+/// 取得完整額度；工作階段重建、換帳號或切換訪問模式時全部清空。
+#[derive(Debug, Default)]
+struct RetryBudgets(HashMap<DataKey, u8>);
+
+impl RetryBudgets {
+    /// 讓指定任務重新取得完整重試額度。
+    fn reset(&mut self, key: &DataKey) {
+        self.0.remove(key);
+    }
+
+    /// 清空所有任務的重試額度（工作階段重建、換帳號或切換訪問模式時）。
+    fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    /// 嘗試為指定任務消耗一次重試；已達上限時回傳 `None`，否則回傳即將
+    /// 進行的嘗試序號（1 起算，供進度提示使用）。
+    fn try_consume(&mut self, key: &DataKey) -> Option<u8> {
+        // 能走到這裡就代表「上一次嘗試已經失敗」：首次呼叫時，第 1 次
+        // 嘗試已用掉，因此計數從 1 起算。
+        let used = self.0.entry(key.clone()).or_insert(1);
+        if *used < MAX_ATTEMPTS {
+            *used += 1;
+            Some(*used)
+        } else {
+            None
         }
     }
 }
@@ -186,6 +235,8 @@ struct Worker {
     homework_epoch: u64,
     /// 自動重新登入額度（以任務鍵各自保存）。
     relogin: ReloginBudgets,
+    /// 連線層網路錯誤的自動重試額度（以任務鍵各自保存）。
+    retries: RetryBudgets,
     /// 思源學堂課程／活動快取。
     cache: LmsCache,
     /// 自訂義任務服務的控制代碼（任務資料在專屬執行緒上，見 `task::tasks`）。
@@ -253,6 +304,7 @@ pub(crate) fn spawn_with_tasks(
         generation: 0,
         homework_epoch: 0,
         relogin: ReloginBudgets::default(),
+        retries: RetryBudgets::default(),
         cache: LmsCache::default(),
         schedule_cache: None,
         schedule_week: None,
@@ -318,11 +370,12 @@ impl Worker {
 
     /// 執行使用者發起的全新資料任務：讓該任務重新取得自動重登額度後再執行。
     ///
-    /// 自動重登後的重試（[`Self::finish_login`]）不走這裡，額度才會遞減；
-    /// 新的刷新請求則重新獲得完整額度。
+    /// 自動重登後的重試（[`Self::finish_login`]）與連線錯誤的自動重試都不
+    /// 走這裡，額度才會遞減；新的刷新請求則重新獲得完整額度。
     fn run_fresh_data_job(&mut self, job: Job) {
         if let Some(key) = job.data_key() {
             self.relogin.reset(&key);
+            self.retries.reset(&key);
         }
         // 每次全新的作業載入都是新的一次量測：自動重登後的重試走
         // [`Self::run_data_job`]，不會重置，登入時間因此計入同一輪。
@@ -340,7 +393,8 @@ impl Worker {
         let site = self.login_site_of(&job);
         let resource = resource_of(&job);
         // 帳號切換失敗時必須丟棄待存憑證：交由 [`Self::dispatch_control`] 統一
-        // 處理（含互動驗證步驟），這裡只需要清掉暫存的驗證碼圖片。
+        // 處理（含互動驗證步驟與連線錯誤的自動重試），這裡只需要清掉暫存的
+        // 驗證碼圖片。
         if let Err(err) = self.dispatch_control(job) {
             // 登入類任務出錯即視為本次登入結束：清掉暫存的驗證碼圖片，
             // 並丟棄計時起點（該段時間仍留在載入的牆鐘總量中）。
@@ -416,11 +470,38 @@ impl Worker {
 
     /// 分派控制任務；資料任務不在這裡處理。
     ///
-    /// 帳號切換失敗的善後集中在這裡：切換本身與它的互動驗證步驟（
-    /// 圖片驗證碼、簡訊驗證、重試）都算同一次切換，任何一個失敗都必須
-    /// 丟棄待存憑證，否則稍後一次成功的登入會把沒驗證成功的帳密寫進保險庫。
-    /// 唯一例外是「驗證碼填錯」：使用者重輸即可繼續同一次切換。
+    /// 連線層的失敗（逾時、連不上、DNS、TLS）會直接重試整個任務，至多
+    /// [`MAX_ATTEMPTS`] 次嘗試：控制任務多半是登入，短暫的網路抖動不該讓
+    /// 使用者重新按一次按鈕。需要互動輸入的登入不會走到重試分支——那種
+    /// 情況下任務回傳 `Ok`，登入流程留在 `flow` 裡等使用者輸入。
+    ///
+    /// 伺服器已經回應的失敗（業務錯誤、格式不符）、憑證或驗證碼錯誤一律
+    /// 不重試（見 [`AppError::is_connection_error`]）。
     fn dispatch_control(&mut self, job: Job) -> AppResult<()> {
+        let what = job.label();
+        let mut attempt: u8 = 1;
+        loop {
+            match self.dispatch_control_once(job.clone()) {
+                Ok(()) => return Ok(()),
+                Err(err) if attempt < MAX_ATTEMPTS && err.is_connection_error() => {
+                    attempt += 1;
+                    self.emit(Event::Notice(format!(
+                        "{}失败，正在重试（{attempt}/{MAX_ATTEMPTS}）…",
+                        if what.is_empty() { "操作" } else { &what }
+                    )));
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
+    /// 執行一次控制任務，並處理帳號切換失敗的善後。
+    ///
+    /// 善後集中在這裡：切換本身與它的互動驗證步驟（圖片驗證碼、簡訊驗證、
+    /// 重試）都算同一次切換，任何一個失敗都必須丟棄待存憑證，否則稍後一次
+    /// 成功的登入會把沒驗證成功的帳密寫進保險庫。唯一例外是「驗證碼填錯」：
+    /// 使用者重輸即可繼續同一次切換。
+    fn dispatch_control_once(&mut self, job: Job) -> AppResult<()> {
         let rolls_back = is_account_switch_step(&job);
         let result = self.dispatch_control_inner(job);
         if let Err(err) = &result {
@@ -452,6 +533,7 @@ impl Worker {
                 credentials,
             } => self.create_vault(&passphrase, credentials),
             Job::Unlock { passphrase } => self.unlock(&passphrase),
+            Job::Preload => self.preload(),
             Job::SubmitCaptcha(code) => self.submit_captcha(&code),
             Job::RefreshCaptcha => self.refresh_captcha(),
             Job::SendMfaCode => self.send_mfa_code(),
@@ -553,9 +635,10 @@ impl Worker {
             let Some(job) = self.pending_data.remove(index) else {
                 continue;
             };
-            // 互動式任務是新的使用者操作：讓該任務重新取得完整重登額度。
+            // 互動式任務是新的使用者操作：讓該任務重新取得完整重登與重試額度。
             if let Some(key) = job.data_key() {
                 self.relogin.reset(&key);
+                self.retries.reset(&key);
             }
             self.execute_data_job(job);
             if self.flow.is_some() {
@@ -645,12 +728,20 @@ impl Worker {
         }
     }
 
-    /// 資料任務失敗的統一處理：有限回退 → 重新登入 → 回報錯誤。
+    /// 資料任務失敗的統一處理：等待登入 → 自動重試 → 有限回退 → 回報錯誤。
     ///
     /// `site` 為實際失敗的站點，由呼叫端決定（不一律從任務種類推導）。
     fn report_data_failure(&mut self, site: SiteKind, job: Job, generation: u64, err: AppError) {
         // 代際已變（帳號或訪問模式被切換）：舊任務的錯誤直接忽略。
         if generation != self.generation {
+            return;
+        }
+
+        // 已經有登入在進行（例如解鎖後的背景預載正在登入）：不重啟登入流程
+        //——那會丟掉目前流程等待續跑的任務——把本次任務排回待執行即可。
+        // 登入完成後 [`Self::run`] 會重新取出它，屆時成功就不會再走到這裡。
+        if self.flow.is_some() {
+            self.merge_data_job(job, None);
             return;
         }
 
@@ -695,6 +786,22 @@ impl Worker {
                     self.emit_failed(&job, Some(site), login_err);
                 }
             }
+            return;
+        }
+
+        // 連線層錯誤（逾時、連不上、DNS、TLS）：多半是校內服務的短暫抖動，
+        // 自動重送同一個請求即可；伺服器有回應但內容不符預期等情況不會
+        // 走到這裡（見 [`AppError::is_connection_error`]）。重試就地進行，
+        // 每個任務鍵至多 [`MAX_ATTEMPTS`] 次嘗試，額度用完才回報失敗。
+        if err.is_connection_error()
+            && let Some(key) = job.data_key()
+            && let Some(attempt) = self.retries.try_consume(&key)
+        {
+            self.emit(Event::Notice(format!(
+                "{}失败，正在重试（{attempt}/{MAX_ATTEMPTS}）…",
+                job.label()
+            )));
+            self.run_data_job(job);
             return;
         }
 

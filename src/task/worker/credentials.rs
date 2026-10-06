@@ -69,6 +69,7 @@ impl Worker {
         self.retry = None;
         self.generation += 1;
         self.relogin.clear();
+        self.retries.clear();
         self.pending_data.clear();
         self.cache.clear();
         // 課表快取與選定週次都屬於舊帳號。
@@ -148,6 +149,7 @@ impl Worker {
         // 換帳號後舊任務與快取一律作廢，進行中的資料任務不再回報。
         self.generation += 1;
         self.relogin.clear();
+        self.retries.clear();
         self.pending_data.clear();
         self.cache.clear();
         // 課表快取與選定週次都屬於舊帳號：一併作廢（介面也會清除頁面資料）。
@@ -177,6 +179,7 @@ impl Worker {
         // 保存設定本身不觸發登入，後續登入由各頁面按需進行。
         self.generation += 1;
         self.relogin.clear();
+        self.retries.clear();
         self.cache.clear();
         // 訪問方式變更：課表快取一併作廢（重新登入後重建）；選定週次保留。
         self.schedule_cache = None;

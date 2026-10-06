@@ -1096,6 +1096,39 @@ fn preload_failure_points_at_the_site_that_failed() {
     );
 }
 
+/// 登入收尾要續跑「兩個來源」的等待任務，不能只跑其中一個。
+///
+/// 修復前寫成 `retry.or(self.retry.take())`：`Option::or` 的參數是值傳遞，
+/// `take()` 一定會執行，但當 `retry` 已是 `Some` 時，取出的那個任務就被
+/// 靜默丟棄（頁面停在「載入中」，也沒有任何失敗事件）。
+#[test]
+fn finishing_a_login_resumes_tasks_from_both_sources() {
+    let mut harness = harness(|_request: &HttpRequest| panic!("本测试不应发出请求"));
+    harness.login_both_sites();
+    // `self.retry`：等待重登的資料任務（此處以會排入載入的控制任務代替，
+    // 以免測試真的發出請求）。
+    harness.worker.retry = Some(Job::SetScheduleWeek { week: 3 });
+
+    harness
+        .worker
+        .finish_login(
+            SiteKind::Attendance,
+            Some(Job::SetHomeworkTerm {
+                term: "2026-2027-1".to_owned(),
+            }),
+        )
+        .expect("收尾应成功");
+
+    assert!(harness.worker.retry.is_none(), "等待中的任務不应被遗留");
+    let mut queued: Vec<String> = harness.worker.pending_data.iter().map(Job::label).collect();
+    queued.sort();
+    assert_eq!(
+        queued,
+        vec!["作业", "课表"],
+        "兩邊的等待任務都應續跑：{queued:?}"
+    );
+}
+
 /// 尚未建立會話（例如會話在重建失敗後被停用）時預載直接報錯，不排入任務。
 #[test]
 fn preload_without_a_session_reports_an_error() {

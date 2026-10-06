@@ -277,7 +277,13 @@ impl Worker {
         // 登入成功後才更新保險庫，失敗的憑證不會覆蓋舊憑證。
         self.commit_pending_vault();
         // 登入成功後續跑等待中的任務（可能是資料任務或控制任務）。
-        if let Some(job) = retry.or(self.retry.take()) {
+        //
+        // 兩個來源都要跑：`retry` 是發起這次登入的任務（通常為 `None`），
+        // `self.retry` 是等待重登的資料任務。**不可**寫成
+        // `retry.or(self.retry.take())`：`Option::or` 的參數是值傳遞，
+        // `take()` 一定會執行，但當 `retry` 已是 `Some` 時，取出後的那個任務
+        // 就無人接手而靜默遺失。
+        for job in [retry, self.retry.take()].into_iter().flatten() {
             if job.is_control() {
                 let _ = self.handle_control(job);
             } else {

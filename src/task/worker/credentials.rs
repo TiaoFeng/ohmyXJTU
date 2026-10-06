@@ -141,6 +141,8 @@ impl Worker {
         self.credentials = Some(credentials);
         self.flow = None;
         self.retry = None;
+        // 新會話（換帳號或切換訪問模式）：舊的預載待辦一併作廢。
+        self.preload_pending = false;
         // 待存憑證屬於舊帳號：換帳號後一律作廢。
         self.pending_vault = None;
         // 舊帳號的登入失敗計數不再適用。

@@ -77,6 +77,8 @@ impl Worker {
         //（登入互動期間資料任務一律延後，取消後沒有事件會再觸發）。
         let had_login = self.flow.is_some() || self.pending_vault.is_some();
         self.flow = None;
+        // 使用者主動取消：一併放棄待補做的預載，不讓背景擅自重新登入。
+        self.preload_pending = false;
         self.discard_pending_vault();
         self.settle_pending_retry();
         // 無論先前有無進行中的登入都必須回報取消完成：介面據此清除等待狀態，
@@ -205,6 +207,8 @@ impl Worker {
                 // 憑證被拒：丟棄待存憑證（並還原舊憑證），不覆蓋保險庫中的舊憑證。
                 self.record_login();
                 self.flow = None;
+                // 憑證被拒：預載也做不成，放棄待補做的那一次。
+                self.preload_pending = false;
                 self.discard_pending_vault();
                 self.clear_captcha();
                 self.emit(Event::LoginFailed { site, message });
@@ -279,6 +283,11 @@ impl Worker {
             } else {
                 self.run_data_job(job);
             }
+        }
+        // 預載先前被這次登入擋下（見 [`Self::preload`]）：登入已經結束，補做。
+        // 由預載自己發起的登入帶著 [`Job::Preload`] 走上面的分支，不會重複。
+        if std::mem::take(&mut self.preload_pending) {
+            let _ = self.handle_control(Job::Preload);
         }
         Ok(())
     }

@@ -22,12 +22,16 @@ impl Worker {
     /// 這是一個可重入的狀態機：`begin_login` 需要使用者輸入驗證碼時會把流程
     /// 留在 `flow`，登入完成後由 [`Worker::finish_login`] 以同一個
     /// [`Job::Preload`] 重新進入本函式，接著處理下一個站點。站點是否已登入
-    /// 直接問會話管理器，因此不需要額外的 Worker 欄位。
+    /// 直接問會話管理器。
     pub(super) fn preload(&mut self) -> AppResult<()> {
-        // 已經有登入在進行（例如使用者在預載途中自行觸發了登入）：讓它先跑完，
-        // 預載會由該流程的收尾重新進入；若在這裡重啟登入，會丟掉目前流程
-        // 等待續跑的任務。
+        // 已經有登入在進行（例如使用者解鎖後立刻按 `r`，資料任務先觸發了自動
+        // 重登）：不重啟它——那會丟掉目前流程等待續跑的驗證碼輸入——改為記下
+        // 「預載還沒做」，由這次登入的收尾補做（見 [`Worker::finish_login`]）。
+        //
+        // 只有預載自己發起的登入帶著 [`Job::Preload`] 續跑；其他任務發起的
+        // 登入收尾時只續跑它自己的任務，不在這裡記下就會整批遺失。
         if self.flow.is_some() {
+            self.preload_pending = true;
             return Ok(());
         }
         match self.pending_preload_site()? {

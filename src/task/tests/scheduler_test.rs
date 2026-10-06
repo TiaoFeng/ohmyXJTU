@@ -95,6 +95,7 @@ impl ThreadWorker {
             homework_epoch: 0,
             relogin: ReloginBudgets::default(),
             retries: RetryBudgets::default(),
+            preload_pending: false,
             cache: LmsCache::default(),
             schedule_cache: None,
             schedule_week: None,

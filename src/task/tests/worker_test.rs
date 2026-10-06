@@ -199,6 +199,7 @@ impl Harness {
                 homework_epoch: 0,
                 relogin: ReloginBudgets::default(),
                 retries: RetryBudgets::default(),
+                preload_pending: false,
                 cache: LmsCache::default(),
                 schedule_cache: None,
                 schedule_week: None,
@@ -952,10 +953,11 @@ fn preload_login_failure_reports_without_queueing_any_load() {
     );
 }
 
-/// 已經有登入在進行時，預載靜默等待，不重啟它。
+/// 已經有登入在進行時，預載靜默等待，不重啟它，並記下待補做。
 ///
-/// 重啟會覆寫 `flow`，把使用者正在輸入的驗證流程丟掉；正確做法是等這次
-/// 登入收尾時由同一條路徑繼續預載（`finish_login` 會重跑 [`Job::Preload`]）。
+/// 重啟會覆寫 `flow`，把使用者正在輸入的驗證流程丟掉。預載只能等這次登入
+/// 收尾：由預載自己發起的登入會帶著 `Job::Preload` 續跑，其他任務發起的
+/// 登入則靠 `preload_pending` 補做（見下一個測試）。
 #[test]
 fn preload_waits_for_a_login_that_is_already_running() {
     let logins = Arc::new(AtomicUsize::new(0));
@@ -973,6 +975,51 @@ fn preload_waits_for_a_login_that_is_already_running() {
     assert!(
         harness.worker.pending_data.is_empty(),
         "登入完成前不应排入任何载入任务"
+    );
+    assert!(harness.worker.preload_pending, "应记下待补做的预载");
+}
+
+/// 由其他任務發起的登入結束後，被擋下的預載會補做。
+///
+/// 回歸：修復前 `preload` 在 `flow` 存在時只回報成功就結束，而收尾的
+/// `finish_login` 只續跑 `flow.retry`／`retry` 兩者（此時皆為 `None`），
+/// 四頁預載從此不再發生。
+#[test]
+fn preload_blocked_by_another_login_is_resumed_when_it_finishes() {
+    let mut harness = harness(|_request: &HttpRequest| panic!("两站已登录时预载不应发出请求"));
+    harness.login_both_sites();
+    // 模擬「先前被進行中的登入擋下」。
+    harness.worker.preload_pending = true;
+
+    harness
+        .worker
+        .finish_login(SiteKind::Attendance, None)
+        .expect("收尾应成功");
+
+    let queued: Vec<String> = harness.worker.pending_data.iter().map(Job::label).collect();
+    assert_eq!(
+        queued,
+        vec!["课表", "考勤流水", "思源学堂", "作业"],
+        "登入结束后应补做预载：{queued:?}"
+    );
+    assert!(!harness.worker.preload_pending, "补做后应清除待办");
+}
+
+/// 使用者取消登入時，待補做的預載一併放棄：不該由背景擅自重新登入。
+#[test]
+fn cancelling_a_login_abandons_the_pending_preload() {
+    let mut harness = harness(|_request: &HttpRequest| panic!("本测试不应发出请求"));
+    harness.worker.preload_pending = true;
+
+    harness.dispatch(Job::CancelLogin).expect("取消应成功");
+
+    assert!(
+        !harness.worker.preload_pending,
+        "使用者取消后不得由背景重新发起预载"
+    );
+    assert!(
+        harness.worker.pending_data.is_empty(),
+        "取消后不应排入任何载入任务"
     );
 }
 

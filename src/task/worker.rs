@@ -237,6 +237,11 @@ struct Worker {
     relogin: ReloginBudgets,
     /// 連線層網路錯誤的自動重試額度（以任務鍵各自保存）。
     retries: RetryBudgets,
+    /// 預載被進行中的登入擋下：該次登入收尾時補做一次（見 [`Worker::preload`]）。
+    ///
+    /// 使用者取消登入、憑證被拒或會話重建時一併放棄：那代表現在不該由背景
+    /// 擅自重新登入。
+    preload_pending: bool,
     /// 思源學堂課程／活動快取。
     cache: LmsCache,
     /// 自訂義任務服務的控制代碼（任務資料在專屬執行緒上，見 `task::tasks`）。
@@ -305,6 +310,7 @@ pub(crate) fn spawn_with_tasks(
         homework_epoch: 0,
         relogin: ReloginBudgets::default(),
         retries: RetryBudgets::default(),
+        preload_pending: false,
         cache: LmsCache::default(),
         schedule_cache: None,
         schedule_week: None,

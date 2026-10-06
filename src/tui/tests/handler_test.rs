@@ -2297,3 +2297,69 @@ fn tag_suggestions_do_nothing_without_any_tag() {
     assert_eq!(app.task_page.tag_cursor, None);
     assert_eq!(app.message_text(), None, "不应出现任何提示");
 }
+
+/// 主畫面的單鍵操作不接受 Ctrl／Alt 修飾鍵。
+///
+/// 這些按鍵若一併吃組合鍵會造成意外副作用：`Ctrl+O` 會開啟瀏覽器、`Ctrl+R`
+/// 會強制重新查詢、`Ctrl+S` 會開啟學期選擇器、`Ctrl+Q` 會直接結束程式。
+/// 修復前（選取停在作業上）`Ctrl+O` 與 `Ctrl+R` 都會真的送出任務。
+#[test]
+fn control_modified_keys_do_not_trigger_main_screen_shortcuts() {
+    let (jobs, rx) = channel();
+    let mut app = task_page_app();
+    app.term_options = vec![TermCode::parse("2026-2027-1").expect("学期")];
+    // 選取移到作業（索引 1）：修復前 `Ctrl+O` 會為它送出 `OpenActivity`。
+    app.select_next();
+
+    press_ctrl(&mut app, &jobs, 'o');
+    press_ctrl(&mut app, &jobs, 'r');
+    press_ctrl(&mut app, &jobs, 's');
+    press_ctrl(&mut app, &jobs, 'h');
+    press_ctrl(&mut app, &jobs, 'q');
+
+    assert!(rx.try_recv().is_err(), "组合键不应送出任何任务");
+    assert!(!app.quit, "Ctrl+Q 不应退出");
+    assert!(
+        matches!(app.screen, Screen::Main),
+        "Ctrl+S 不应打开学期选择器"
+    );
+    assert_eq!(app.nav, NavItem::Homework, "Ctrl+H 不应切换页面");
+}
+
+/// 設定選單與學期選擇器同樣不接受 Ctrl／Alt 修飾鍵。
+///
+/// 兩者的 `h`／`l`／`j`／`k` 都只綁定單鍵；帶修飾鍵時不該改動訪問模式草稿
+/// （修復前 `Ctrl+L` 會真的把草稿切到下一個模式）或移動學期選取。
+#[test]
+fn control_modified_keys_do_not_adjust_settings_or_the_term_picker() {
+    let (jobs, _rx) = channel();
+
+    // 設定選單：移到「訪問模式」後 `Ctrl+L` 不應改動草稿。
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Settings(SettingsState::open(AccessPolicy::Auto)));
+    press(&mut app, &jobs, KeyCode::Down);
+    press(&mut app, &jobs, KeyCode::Down);
+    press_ctrl(&mut app, &jobs, 'l');
+    let Screen::Settings(state) = app.screen else {
+        panic!("应仍在设定选单");
+    };
+    assert!(
+        !state.policy_dirty(app.access_policy),
+        "Ctrl+L 不应改动访问模式草稿"
+    );
+
+    // 學期選擇器：`Ctrl+J` 不應移動選取。
+    let first = TermCode::parse("2026-2027-1").expect("学期");
+    let second = TermCode::parse("2025-2026-2").expect("学期");
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::TermPicker(TermPickerState::new(
+        vec![first.clone(), second],
+        None,
+        "选择要查看的学期".to_owned(),
+    )));
+    press_ctrl(&mut app, &jobs, 'j');
+    let Screen::TermPicker(state) = app.screen else {
+        panic!("应仍在学期选择器");
+    };
+    assert_eq!(state.selected(), Some(first), "Ctrl+J 不应移动学期选择");
+}

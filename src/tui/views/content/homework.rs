@@ -1,8 +1,12 @@
 //! 任務頁：自訂義任務與思源學堂作業的合併清單（未完成／已完成／待核实三分組）。
 //!
-//! 分組內先顯示「任务」段（使用者自己新增的），再顯示「作业」段（思源學堂），
-//! 兩段之間留一列空白；分段標題以強調色（粉）呈現，不分深淺灰。任務與作業
-//! 共用同一組欄位骨架、同一組選取索引（任務在前）與同一個詳情面板。
+//! 預設排序（`SortMode::Default`）下，分組内先顯示「任务」段（使用者自己新增
+//! 的），再顯示「作业」段（思源學堂），兩段之間留一列空白；分段標題以強調色
+//! （粉）呈現，不分深淺灰。切到優先級或截止時間排序時沒有分段標題，任務與
+//! 作業混合排列（見 `App::task_page_entries`）。
+//!
+//! 不論哪種排序，任務與作業都共用同一組欄位骸架、同一組選取索引與同一個
+//! 詳情面板。
 //!
 //! 本檔只負責頁面本身（清單、分段標籤、提示列、空狀態與繪製流程）：列的建構
 //! 見 [`rows`]，詳情面板的內容見 [`detail`]。
@@ -33,6 +37,8 @@ use rows::{homework_item, section_header_item, task_item};
 /// 展開詳情時的框高範圍：內容區一半，並限制在可讀區間。
 const DETAIL_MIN_HEIGHT: u16 = 7;
 const DETAIL_MAX_HEIGHT: u16 = 14;
+/// 清單區域的最小高度（標題與提示列之外的空間）。
+const BODY_MIN_HEIGHT: u16 = 3;
 /// 多選模式勾選框欄寬（`[x] `）。
 const MULTI_CHECKBOX_WIDTH: usize = 4;
 
@@ -64,8 +70,11 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
     let warning = homework_warning(app, counts);
     let search_row = u16::from(app.task_page.search.is_some());
     let header_height = 1 + search_row + u16::from(warning.is_some());
-    let [header_area, body_area] =
-        Layout::vertical([Constraint::Length(header_height), Constraint::Min(3)]).areas(area);
+    let [header_area, body_area] = Layout::vertical([
+        Constraint::Length(header_height),
+        Constraint::Min(BODY_MIN_HEIGHT),
+    ])
+    .areas(area);
     let header_rows = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(search_row),

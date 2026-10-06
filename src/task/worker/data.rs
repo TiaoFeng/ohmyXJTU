@@ -256,8 +256,9 @@ impl Worker {
     pub(super) fn load_activity_detail(
         &mut self,
         activity_id: &str,
+        force: bool,
     ) -> AppResult<ActivityDetailView> {
-        let activity = self.lms_activity_detail(activity_id, false)?;
+        let activity = self.lms_activity_detail(activity_id, force)?;
         // 正文先轉純文字：`activity_from` 會取走活動，且轉換只需做一次。
         let description = activity.body();
         let session = self.session_mut()?;

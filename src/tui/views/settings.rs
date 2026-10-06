@@ -9,9 +9,14 @@ use crate::tui::app::{App, SettingsState};
 use crate::tui::theme::THEME;
 use crate::tui::ui::{hint_line, menu_item};
 
+/// 彈窗寬度。
+const SETTINGS_WIDTH: u16 = 60;
+/// 彈窗高度。
+const SETTINGS_HEIGHT: u16 = 12;
+
 /// 繪製設定選單。
 pub fn draw(frame: &mut Frame, app: &App, state: SettingsState) {
-    let area = crate::tui::ui::centered_rect(frame.area(), 60, 12);
+    let area = crate::tui::ui::centered_rect(frame.area(), SETTINGS_WIDTH, SETTINGS_HEIGHT);
     let inner = crate::tui::ui::popup_surface(frame, area, "账户设置");
 
     let chunks = Layout::vertical([Constraint::Min(5), Constraint::Length(2)]).split(inner);

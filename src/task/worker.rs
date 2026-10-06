@@ -25,8 +25,9 @@
 //!   整輪載入之後；若其觸發重新登入，本輪載入先暫停並重新排隊。
 //! - 重複的資料查詢會被合併；帳號或訪問模式變更後，進行中的資料任務立即
 //!   中止且不再回報舊結果。
-//! - 解鎖憑證後不預先登入任何站點：頁面需要時才按站點惰性登入，
-//!   因此考勤系統故障不會拖垮思源學堂。
+//! - 解鎖憑證後由 [`Job::Preload`] 主動登入兩個站點並預載四個頁面（順序與
+//!   失敗處理見 `worker::preload`）；預載失敗只留提示，各頁面仍可自己重試
+//!   與惰性載入，因此考勤系統故障不會拖垮思源學堂。
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -317,12 +318,6 @@ pub(crate) fn spawn_with_tasks(
 
 impl Worker {
     fn run(&mut self) {
-        // 設定檔在啟動時損毁重建：提醒使用者協議同意與記住的學期已重設。
-        if self.config.rebuilt {
-            self.emit(Event::Notice(
-                "配置文件已损坏并重建：已同意的协议与记住的学期已重置".to_owned(),
-            ));
-        }
         loop {
             // 資料載入中途收到結束指令：立即停止（排隊中的任務一併丟棄）。
             if self.shutdown {
@@ -592,6 +587,12 @@ impl Worker {
         if !self.drain_channel(&job) {
             return;
         }
+        // 排空通道是遞迴的（見 [`Worker::queue_preload_jobs`]）：結束指令可能在
+        // 內層被吃掉，這一層收到的仍是「通道已排空」。已收到結束指令就不再送出
+        // 請求（程式正在退出，結果也沒有人要）。
+        if self.shutdown {
+            return;
+        }
         if generation != self.generation {
             // 控制任務（換帳號、切換訪問模式）已使本任務失效：
             // 通知介面解除載入中狀態，避免頁面停留在永久的「載入中」。
@@ -657,8 +658,8 @@ impl Worker {
                 course_id: course_id.clone(),
                 activities: self.load_activities(course_id, *force)?,
             },
-            Job::LoadActivityDetail { activity_id } => {
-                Event::ActivityDetail(Box::new(self.load_activity_detail(activity_id)?))
+            Job::LoadActivityDetail { activity_id, force } => {
+                Event::ActivityDetail(Box::new(self.load_activity_detail(activity_id, *force)?))
             }
             Job::OpenActivity {
                 activity_id,
@@ -764,6 +765,14 @@ impl Worker {
             // 額度按任務鍵各自計算：互動式任務與長載入互不消耗；同一任務的
             // 自動重試鏈則共用同一份額度（重試後再失效時遞減）。
             let key = job.data_key();
+            // 等待重登的任務只有一個槽：槽裡可能還躺著上一個失敗的任務
+            //（例如登入被拒之後，佇列裡的下一個任務又失敗）。直接覆寫會讓
+            // 那個任務永遠收不到任何事件，它那一頁就停在「載入中」，只能回到
+            // 該頁按 `r` 才能恢復；先收斂它（介面收到 `LoadingCancelled`）。
+            //
+            // 刻意不把它排回 `pending_data`：那會讓它重新取得自動重登額度，
+            // 兩個任務互相觸發重登就變成沒有上限的迴圈。
+            self.settle_pending_retry();
             self.retry = Some(job);
             if !key.is_some_and(|key| self.relogin.try_consume(&key).is_some()) {
                 // 自動重登後站點仍回報登入態失效：停止自動重試，避免

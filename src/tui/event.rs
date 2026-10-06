@@ -9,6 +9,7 @@ use std::sync::mpsc::Sender;
 
 use crate::config::AccessPolicy;
 use crate::domain::homework::HomeworkGroup;
+use crate::domain::semester::TermCode;
 use crate::domain::todo::Task;
 use crate::model::{ActivityDetailView, FlowData, ScheduleData};
 use crate::session::{AccessMode, SiteKind};
@@ -60,13 +61,7 @@ pub(crate) fn apply_event(app: &mut App, event: Event, jobs: &Sender<Job>) {
             options,
             suggestion,
             reason,
-        } => {
-            app.term_options = options.clone();
-            app.homework.fail("未确定本学期：按 s 选择要查看的学期");
-            app.set_screen(Screen::TermPicker(TermPickerState::new(
-                options, suggestion, reason,
-            )));
-        }
+        } => apply_homework_needs_term(app, options, suggestion, reason),
         Event::Flow(data) => apply_flow(app, *data),
         Event::CoursesTerm(term) => {
             // 只更新分區提示：課程清單本身不變，重新繪製即會依新學期重新分區。
@@ -135,7 +130,6 @@ fn apply_needs_captcha(app: &mut App, path: PathBuf) {
     if app.login_cancel_pending {
         return;
     }
-    app.captcha_path = Some(path.clone());
     let previous_error = match app.login.as_deref() {
         Some(LoginScreen::Captcha { error, .. }) => error.clone(),
         _ => None,
@@ -243,7 +237,50 @@ fn apply_schedule(app: &mut App, data: ScheduleData) {
     app.ensure_main();
 }
 
+/// 判定不出本學期時的作業頁訊息（作業頁可見時 `s` 直接可用）。
+const NEEDS_TERM_MESSAGE: &str = "未确定本学期：按 s 选择要查看的学期";
+/// 同上，但畫面上有彈窗時的訊息。
+///
+/// 彈窗獨占按鍵（`popup_owns_keys`），`s` 根本到不了主畫面；而且這是一則暫時
+/// 訊息，使用者按下的任何鍵（包含用來關閉彈窗的 `esc`）都會先把它清掉，因此
+/// 必須在文字裡說清楚下一步該做什麼。
+const NEEDS_TERM_POPUP_MESSAGE: &str = "未确定本学期：请先关闭当前窗口，再按 s 选择学期";
+
+/// 背景載入判定不出本學期：標記作業頁，並在可以的時候直接開啟學期選擇器。
+///
+/// 學期選擇器是彈窗：只有主畫面（沒有其他彈窗）時才直接開啟。使用者可能正在
+/// 任務表單或設定裡輸入，把畫面換掉會丟掉輸入內容（與 [`apply_failure`] 的
+/// 「彈窗就地處理」原則一致）；這種情況下只標記作業頁並留下提示，關掉手上的
+/// 彈窗後按 `s` 仍可選擇（選項已記在 `App::term_options`）。
+fn apply_homework_needs_term(
+    app: &mut App,
+    options: Vec<TermCode>,
+    suggestion: Option<TermCode>,
+    reason: String,
+) {
+    app.term_options = options.clone();
+    app.homework.fail(NEEDS_TERM_MESSAGE);
+    let picker = TermPickerState::new(options, suggestion, reason);
+    match app.screen {
+        // 主畫面，或選擇器已經開著（例如使用者已按 `s`）：顯示／更新它。
+        Screen::Main | Screen::TermPicker(_) => app.set_screen(Screen::TermPicker(picker)),
+        // 其他彈窗（任務表單、設定、排序提示…）：不要搶走畫面。
+        _ => app.set_message(NEEDS_TERM_POPUP_MESSAGE),
+    }
+}
+
 fn apply_flow(app: &mut App, data: FlowData) {
+    // 遲到的舊頁結果：翻頁指令要等已在執行中的舊頁載入回報後才生效，那筆結果
+    // 仍會送達介面。使用者已指定別的頁碼時丟棄它，否則會清掉「正在加载第 N
+    // 页…」、把「更新於」往回寫，畫面也顯示成不是使用者要的那一頁（與課表的
+    // 切週過濾同理，見 `App::flow_pending_page`）。
+    if app
+        .flow_pending_page
+        .is_some_and(|pending| pending != data.page)
+    {
+        return;
+    }
+    app.flow_pending_page = None;
     app.attendance = Page::Ready(data);
     app.updated_at.attendance = Some(now_clock());
     app.flow_state.select(Some(0));
@@ -264,8 +301,6 @@ fn apply_homework(app: &mut App, update: HomeworkUpdate) {
         .count();
     let data = HomeworkData {
         term_label: update.term_label,
-        term_source: update.term_source.map(|source| source.label()),
-        courses_included: update.courses_included,
         courses_skipped: update.courses_skipped,
         term_options: update.term_options,
         items: update.items,

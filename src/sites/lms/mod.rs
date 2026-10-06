@@ -140,6 +140,14 @@ pub struct SubmissionSummary {
 pub(crate) const MISSING_SUBMIT_BY_GROUP_NOTE: &str =
     "活动详情缺少提交单位字段（submit_by_group），无法确认提交状态";
 
+/// 提交記錄回應中預期的欄位（任一存在即視為提交列表）。
+///
+/// 參考實作的 `extractSubmissionList` 同時讀 `list` 與 `uploads`，兩者都缺時
+/// 代表這不是提交列表的回應（例如業務錯誤物件）；此時必須回報協定錯誤，
+/// 而不是當成「零筆提交」——後者會讓作業顯示成「未提交／逾期」，違反
+/// 「無法確認時標示待核实」的規則（見 `domain::homework::judge`）。
+const SUBMISSION_LIST_KEYS: [&str; 2] = ["list", "uploads"];
+
 /// 思源學堂 API。
 pub struct LmsApi<'a> {
     session: &'a mut SessionManager,
@@ -379,7 +387,23 @@ impl<'a> LmsApi<'a> {
             format!("{BASE_URL}/api/activities/{activity_id}/students/{user_id}/submission_list")
         };
 
-        self.send_json(HttpRequest::get(url), "查询作业提交记录")
+        let value: Value = self.send_json(HttpRequest::get(url), "查询作业提交记录")?;
+        if !SUBMISSION_LIST_KEYS
+            .iter()
+            .any(|key| value.get(key).is_some())
+        {
+            return Err(AppError::protocol(
+                "提交记录响应缺少清单字段（list/uploads），无法确认提交状态",
+            ));
+        }
+        // 欄位存在但不是陣列（或個別項目解析失敗）一律回報或跳過：見
+        // `parse_lenient` 的契約。
+        let list = value
+            .get("list")
+            .cloned()
+            .unwrap_or_else(|| Value::Array(Vec::new()));
+        let (list, _) = parse_lenient::<LmsSubmission>(list, "查询作业提交记录")?;
+        Ok(LmsSubmissionList { list })
     }
 }
 

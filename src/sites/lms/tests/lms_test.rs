@@ -427,6 +427,67 @@ fn post_login_rejects_maintenance_and_login_pages() {
     assert_eq!(login.user_id.as_deref(), Some("7788"));
 }
 
+/// 回應必須看起來像提交列表：`list` 與 `uploads` 都沒有時不可當成「零筆提交」。
+///
+/// 當成 0 筆會讓作業被判定成「未提交／逾期」（`domain::homework::judge`），
+/// 而這正是「無法確認時必須標示待核实」要避免的。少了 `list` 但仍有 `uploads`
+///（伺服器在沒有任何提交時的形態）仍視為零筆。
+#[test]
+fn submission_list_without_expected_fields_is_a_protocol_error() {
+    use std::sync::Arc;
+
+    use crate::config::{AccessPolicy, Config};
+    use crate::http::HttpClient;
+    use crate::http::fake::FakeClient;
+    use crate::session::{AccessMode, SessionManager, SiteKind};
+
+    // （回應本文, 是否為合法的提交列表, 有效提交數）
+    let cases = [
+        (json!({"code": 1, "message": "参数错误"}), false, 0),
+        (json!({}), false, 0),
+        (json!({"list": []}), true, 0),
+        (json!({"uploads": []}), true, 0),
+        (
+            json!({"list": [{"id": 1, "is_latest_version": true}]}),
+            true,
+            1,
+        ),
+    ];
+
+    for (body, valid, expected) in cases {
+        let payload = serde_json::to_vec(&body).expect("序列化固定回应");
+        let client = Arc::new(FakeClient::with_responder(move |_request: &HttpRequest| {
+            Ok(HttpResponse::new(
+                200,
+                "https://lms.xjtu.edu.cn/api/activities/9001/groups/42/submission_list",
+                payload.clone(),
+            ))
+        }));
+        let direct: Arc<dyn HttpClient> = client.clone();
+        let webvpn: Arc<dyn HttpClient> = client;
+        let config = Config {
+            access_policy: AccessPolicy::Direct,
+            ..Config::default()
+        };
+        let mut session = SessionManager::with_clients(&config, direct, webvpn);
+        session.register(Box::new(LmsSite));
+        session.mark_logged_in(SiteKind::Lms, AccessMode::Direct, Vec::new());
+        let mut api = LmsApi::new(&mut session);
+
+        // 以小組作業查詢：不需要先取得使用者 ID，一次請求即可。
+        match api.submissions("9001", true, Some("42")) {
+            Ok(list) => {
+                assert!(valid, "不该把 {body} 当成提交列表");
+                assert_eq!(list.effective_count(), expected, "{body}");
+            }
+            Err(err) => {
+                assert!(!valid, "{body} 应可解析：{err}");
+                assert!(matches!(err, AppError::Protocol(_)), "{err:?}");
+            }
+        }
+    }
+}
+
 #[test]
 fn effective_count_excludes_old_versions() {
     let value = json!({

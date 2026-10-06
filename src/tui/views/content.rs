@@ -115,12 +115,18 @@ fn too_narrow(frame: &mut Frame, area: Rect, title: &str, required: usize, avail
     );
 }
 
+/// 詳情面板展開時，清單區域仍要保留的最小高度。
+const LIST_MIN_HEIGHT: u16 = 6;
+
 fn split_detail(area: Rect, open: bool, detail_height: u16) -> (Rect, Option<Rect>) {
     if !open {
         return (area, None);
     }
-    let [list, detail] =
-        Layout::vertical([Constraint::Min(6), Constraint::Length(detail_height)]).areas(area);
+    let [list, detail] = Layout::vertical([
+        Constraint::Min(LIST_MIN_HEIGHT),
+        Constraint::Length(detail_height),
+    ])
+    .areas(area);
     (list, Some(detail))
 }
 

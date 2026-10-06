@@ -49,15 +49,54 @@ pub(super) fn request(app: &mut App, jobs: &Sender<Job>, nav: NavItem, force: bo
             let _ = jobs.send(Job::LoadHomework { force });
         }
         NavItem::Attendance => {
-            let page = app.attendance.ready().map_or(1, |data| data.page);
+            let page = flow_page(app);
             app.attendance.start_loading("正在加载考勤流水…");
             let _ = jobs.send(Job::LoadFlow { page });
         }
-        NavItem::Lms => {
-            app.lms.courses.start_loading("正在加载课程…");
+        NavItem::Lms => request_lms(app, jobs, force),
+    }
+}
+
+/// 思源學堂的載入請求。
+///
+/// `r` 的語意是「刷新目前畫面」：在活動層與詳情層要重載該層，不能把使用者彈
+/// 回課程清單（原本無條件把 `level` 設回 `Courses`，`apply_courses` 因此走了
+/// 「目前課程不存在」的分支，連選取的課程都會被重設為第一門）。只有層級對應
+/// 的資源識別碼遺失時才逐層退回。
+fn request_lms(app: &mut App, jobs: &Sender<Job>, force: bool) {
+    match app.lms.level {
+        LmsLevel::Detail => {
+            if let Some(activity_id) = app.lms.detail_activity.clone() {
+                let note = detail_loading_note(app.lms.detail.ready().map(|detail| detail.kind));
+                // 保留舊詳情（stale）：重新查詢期間畫面不跳。
+                app.lms.detail.start_loading(note);
+                let _ = jobs.send(Job::LoadActivityDetail { activity_id, force });
+                return;
+            }
+            app.lms.level = LmsLevel::Activities;
+            request_lms(app, jobs, force);
+        }
+        LmsLevel::Activities => {
+            if let Some(course_id) = app.lms.activities_course.clone() {
+                app.lms.activities.start_loading("正在加载课程活动…");
+                let _ = jobs.send(Job::LoadActivities { course_id, force });
+                return;
+            }
             app.lms.level = LmsLevel::Courses;
+            request_lms(app, jobs, force);
+        }
+        LmsLevel::Courses => {
+            app.lms.courses.start_loading("正在加载课程…");
             let _ = jobs.send(Job::LoadCourses { force });
         }
+    }
+}
+
+/// 活動詳情的載入提示（作業才有提交記錄）。
+fn detail_loading_note(kind: Option<ActivityKind>) -> &'static str {
+    match kind {
+        Some(ActivityKind::Homework) => "正在加载活动详情与提交记录…",
+        _ => "正在加载活动详情…",
     }
 }
 
@@ -117,13 +156,8 @@ pub(super) fn activate(app: &mut App, jobs: &Sender<Job>) {
                     };
                     (activity.id.clone(), activity.kind())
                 };
-                app.lms.activity_index = selected;
                 // 同理：換活動時不得沿用上一個活動的詳情。
-                let note = if kind == ActivityKind::Homework {
-                    "正在加载活动详情与提交记录…"
-                } else {
-                    "正在加载活动详情…"
-                };
+                let note = detail_loading_note(Some(kind));
                 if app.lms.detail_activity.as_deref() == Some(activity_id.as_str()) {
                     app.lms.detail.start_loading(note);
                 } else {
@@ -132,7 +166,10 @@ pub(super) fn activate(app: &mut App, jobs: &Sender<Job>) {
                 app.lms.detail_activity = Some(activity_id.clone());
                 app.lms.level = LmsLevel::Detail;
                 app.lms.detail_scroll.reset();
-                let _ = jobs.send(Job::LoadActivityDetail { activity_id });
+                let _ = jobs.send(Job::LoadActivityDetail {
+                    activity_id,
+                    force: false,
+                });
             }
             LmsLevel::Detail => {}
         },
@@ -266,21 +303,36 @@ pub(super) fn scroll_detail(app: &mut App, command: DetailScroll) {
     }
 }
 
+/// 考勤流水目前「該顯示」的頁碼。
+///
+/// 使用者最後選定但尚未回報的頁碼優先（見 `App::flow_pending_page`），其次才是
+/// 畫面上已有的資料頁碼（載入中保留的是舊資料），最後回退第 1 頁。
+fn flow_page(app: &App) -> u32 {
+    app.flow_pending_page
+        .or_else(|| app.attendance.ready().map(|data| data.page))
+        .unwrap_or(1)
+}
+
 /// 考勤流水分頁（`n`／`p`）；超出頁數範圍時不動作。
+///
+/// 目標頁以 [`flow_page`] 為準：載入期間 `ready()` 仍是上一頁，拿它計算會讓
+/// 連續按鍵（例如連按兩次 `n`）都算成同一頁而只前進一次。目標頁另記在
+/// `App::flow_pending_page`：已在執行中的舊頁載入不會被作廢（翻頁指令要等它
+/// 回報後才生效），其結果必須由 `event::apply_flow` 依此欄位丟棄。
 pub(super) fn change_flow_page(app: &mut App, jobs: &Sender<Job>, delta: i32) {
     if app.nav != NavItem::Attendance {
         return;
     }
-    let (page, total_pages) = match app.attendance.ready() {
-        Some(data) => (data.page, data.total_pages),
-        None => return,
+    let Some(total_pages) = app.attendance.ready().map(|data| data.total_pages) else {
+        return;
     };
-    let target = i32::try_from(page).unwrap_or(1) + delta;
+    let target = i32::try_from(flow_page(app)).unwrap_or(1) + delta;
     if target < 1 || target > i32::try_from(total_pages).unwrap_or(1) {
         return;
     }
 
     let target = u32::try_from(target).unwrap_or(1);
+    app.flow_pending_page = Some(target);
     app.attendance
         .start_loading(format!("正在加载第 {target} 页…"));
     let _ = jobs.send(Job::LoadFlow { page: target });

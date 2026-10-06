@@ -130,15 +130,6 @@ impl<T> Page<T> {
         }
     }
 
-    /// 目前可顯示的資料（可變）。
-    pub fn ready_mut(&mut self) -> Option<&mut T> {
-        match self {
-            Self::Ready(value) => Some(value),
-            Self::Loading { stale, .. } | Self::Failed { stale, .. } => stale.as_mut(),
-            Self::Idle => None,
-        }
-    }
-
     /// 載入中或失敗的說明文字。
     pub fn note(&self) -> Option<&str> {
         match self {
@@ -219,8 +210,6 @@ pub struct LmsState {
     pub detail_scroll: ScrollState,
     /// 選取的課程索引。
     pub course_index: usize,
-    /// 選取的活動索引（相對於目前分組過濾後的清單）。
-    pub activity_index: usize,
     /// 活動列表目前顯示的分組。
     pub activity_group: ActivityGroup,
     /// 課程列表的當前學期（供分區顯示；`None` 表示無法判定）。
@@ -234,10 +223,6 @@ pub struct LmsState {
 pub struct HomeworkData {
     /// 學期標籤。
     pub term_label: Option<String>,
-    /// 學期判定來源標籤。
-    pub term_source: Option<&'static str>,
-    /// 納入查詢的課程數。
-    pub courses_included: usize,
     /// 缺少學期資訊而未納入的課程數。
     pub courses_skipped: usize,
     /// 可選學期（供選擇器使用）。
@@ -259,14 +244,6 @@ impl HomeworkData {
             .iter()
             .filter(|item| item.state.group() == group)
             .collect()
-    }
-
-    /// 指定分組的項目數。
-    pub fn group_count(&self, group: HomeworkGroup) -> usize {
-        self.items
-            .iter()
-            .filter(|item| item.state.group() == group)
-            .count()
     }
 }
 
@@ -1205,14 +1182,21 @@ pub struct App {
     pub term_options: Vec<TermCode>,
     /// 考勤流水頁。
     pub attendance: Page<FlowData>,
+    /// 使用者以 `n`／`p` 指定、但尚未收到該頁資料的目標頁碼。
+    ///
+    /// 與課表的 [`Self::schedule_pending_week`] 同理，但有兩個用途：翻頁指令
+    /// 要等已在執行中的舊頁載入回報後才生效，那筆結果必須據此丟棄；而翻頁的
+    /// 目標頁也必須以「使用者最後選定的頁碼」計算——`ready()` 在載入期間保留
+    /// 的是舊資料，拿它計算會讓連續按鍵全部算成同一頁。
+    ///
+    /// 收到相符的資料後即清空。
+    pub flow_pending_page: Option<u32>,
     /// 思源學堂頁。
     pub lms: LmsState,
     /// 訪問策略設定。
     pub access_policy: AccessPolicy,
     /// 各站點目前的登入狀態（站點 → 實際訪問方式）。
     pub site_modes: HashMap<SiteKind, AccessMode>,
-    /// 驗證碼圖片路徑（顯示於狀態列）。
-    pub captcha_path: Option<PathBuf>,
     /// 等待主迴圈以系統瀏覽器開啟的網址。
     pub pending_open: Option<String>,
     /// 暫時訊息（自動過期）。
@@ -1263,10 +1247,10 @@ impl App {
             task_page: TaskPageState::default(),
             term_options: Vec::new(),
             attendance: Page::Idle,
+            flow_pending_page: None,
             lms: LmsState::default(),
             access_policy,
             site_modes: HashMap::new(),
-            captcha_path: None,
             pending_open: None,
             message: None,
             quit: false,
@@ -1430,6 +1414,7 @@ impl App {
             self.schedule_pending_week = None;
             self.homework = Page::Idle;
             self.attendance = Page::Idle;
+            self.flow_pending_page = None;
             // 自訂義任務屬於本機資料，與帳號無關：內容保留，只清掉任務頁的
             // 暫時狀態（搜尋、多選、待確認刪除）。
             self.task_page.clear_transient();
@@ -1632,7 +1617,7 @@ impl App {
     ///
     /// 尚未被要求載入的頁面（`Idle`）不受影響：解鎖後的背景預載失敗時，
     /// 使用者從未要求過那份資料，把它標成「加载失败」並不合理，也會讓
-    /// 進入該頁時（[`Self::request`] 只在 `Idle` 時才重新載入）誤以為有資料
+    /// 進入該頁時（`controller::request` 只在 `Idle` 時才重新載入）誤以為有資料
     /// 卻載入失敗。這類失敗只留底欄提示，頁面維持未載入，進入時自然重載。
     pub fn fail_target(&mut self, target: FailedTarget, message: &str) {
         match target {

@@ -37,12 +37,12 @@ use super::*;
 const WIDTH: u16 = 100;
 /// 測試終端高度。
 const HEIGHT: u16 = 30;
-/// 表單彈窗（76 寬）內框的起始欄位。
-const FORM_INNER_X: u16 = (WIDTH - 76) / 2 + 1;
+/// 表單彈窗內框的起始欄位。
+const FORM_INNER_X: u16 = (WIDTH - crate::tui::ui::FORM_WIDTH) / 2 + 1;
 /// 表單彈窗的內框寬度。
-const FORM_INNER_WIDTH: u16 = 76 - 2;
-/// 驗證碼彈窗（84 寬）內框的起始欄位。
-const LOGIN_INNER_X: u16 = (WIDTH - 84) / 2 + 1;
+const FORM_INNER_WIDTH: u16 = crate::tui::ui::FORM_WIDTH - 2;
+/// 驗證碼彈窗內框的起始欄位。
+const LOGIN_INNER_X: u16 = (WIDTH - crate::tui::ui::LOGIN_WIDTH) / 2 + 1;
 
 /// 以測試終端繪製畫面。
 fn draw(width: u16, height: u16, render: impl FnOnce(&mut Frame)) -> Terminal<TestBackend> {
@@ -329,8 +329,6 @@ fn draws_homework_groups_and_switches_them() {
     app.nav = NavItem::Homework;
     app.homework = Page::Ready(HomeworkData {
         term_label: Some("2026-2027 学年 第 1 学期".to_owned()),
-        term_source: Some("考勤系统"),
-        courses_included: 2,
         courses_skipped: 1,
         term_options: Vec::new(),
         items,
@@ -435,8 +433,6 @@ fn draws_homework_unknown_warning_with_reason() {
     app.nav = NavItem::Homework;
     app.homework = Page::Ready(HomeworkData {
         term_label: Some("2026-2027 学年 第 1 学期".to_owned()),
-        term_source: Some("考勤系统"),
-        courses_included: 1,
         courses_skipped: 0,
         term_options: Vec::new(),
         items,
@@ -781,8 +777,6 @@ fn flow_rows_degrade_on_narrow_terminal() {
 fn homework_data(items: Vec<HomeworkItem>, progress: Option<(usize, usize)>) -> HomeworkData {
     HomeworkData {
         term_label: Some("2026-2027 学年 第 1 学期".to_owned()),
-        term_source: Some("考勤系统"),
-        courses_included: 2,
         courses_skipped: 0,
         term_options: Vec::new(),
         items,
@@ -2479,6 +2473,45 @@ fn footer_keeps_page_hints_on_narrow_terminals() {
         "宽终端应显示完整提示：{footer:?}"
     );
     assert!(!footer.contains('…'), "全部显示时不应有省略号：{footer:?}");
+}
+
+/// 彈窗接管按鍵時，底欄只留登入狀態。
+///
+/// 各彈窗自己畫按鍵提示（見 `views::settings`／`term_picker`／`task_form`／
+/// `task_menu` 的 `hint_line`）；底欄再列一次主畫面的操作，只會顯示當下按不到
+/// 的鍵（例如任務表單開啟時的「^P 账户设置」）。
+#[test]
+fn footer_lists_only_the_session_label_while_a_popup_is_open() {
+    let popups = [
+        Screen::TaskForm(Box::new(TaskFormState::add())),
+        Screen::Settings(SettingsState::open(AccessPolicy::Auto)),
+        Screen::TermPicker(TermPickerState::new(
+            vec![TermCode::parse("2026-2027-1").expect("学期")],
+            None,
+            "考勤系统不可用".to_owned(),
+        )),
+    ];
+
+    for screen in popups {
+        let mut app = App::new(AccessPolicy::Auto);
+        app.set_screen(screen);
+        let terminal = draw(200, HEIGHT, |frame| {
+            crate::tui::views::draw(frame, &mut app)
+        });
+        let footer = row_text(terminal.backend(), HEIGHT - 1);
+        assert!(
+            footer.contains("[未登录 自动]"),
+            "应保留登录状态：{footer:?}"
+        );
+        assert!(
+            !footer.contains("^P 账户设置"),
+            "弹窗开启时不得列出主画面按键：{footer:?}"
+        );
+        assert!(
+            !footer.contains("q 退出"),
+            "弹窗开启时不得列出主画面操作：{footer:?}"
+        );
+    }
 }
 
 /// 思源學堂活動詳情顯示說明，且長說明可捲動。

@@ -4024,6 +4024,105 @@ fn only_open_activity_is_interactive() {
     }
 }
 
+/// 只有發送簡訊驗證碼不適合自動重送：重送可能讓使用者收到兩條簡訊。
+#[test]
+fn only_the_sms_send_is_not_replayable() {
+    assert!(!Job::SendMfaCode.is_replayable(), "发送短信有可见副作用");
+
+    for job in [
+        Job::RefreshCaptcha,
+        Job::SubmitCaptcha("1234".into()),
+        Job::VerifyMfaCode("123456".into()),
+        Job::RetryLogin {
+            site: SiteKind::Attendance,
+        },
+        Job::LoadSchedule { force: false },
+        Job::OpenActivity {
+            activity_id: "1".to_owned(),
+            course_id: None,
+            kind: lms::ActivityKind::Homework,
+        },
+    ] {
+        assert!(job.is_replayable(), "{job:?} 可以原樣重送");
+    }
+}
+
+/// 送碼端點連線失敗時直接回報，不自動重送（免得發出兩條簡訊）。
+#[test]
+fn connection_errors_do_not_replay_the_sms_send() {
+    let sends = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&sends);
+    let mut harness = harness(move |request: &HttpRequest| {
+        let url = request.url.as_str();
+        if url == rsa::PUBLIC_KEY_URL {
+            return Ok(HttpResponse::new(
+                200,
+                rsa::PUBLIC_KEY_URL,
+                public_key_pem(),
+            ));
+        }
+        if url == attendance::LOGIN_URL {
+            return Ok(HttpResponse::new(
+                200,
+                ATTENDANCE_POST,
+                login_page_with_mfa(),
+            ));
+        }
+        if url.contains("/mfa/detect") {
+            return Ok(json(serde_json::json!({
+                "code": 0,
+                "data": { "state": "s-1", "need": true }
+            })));
+        }
+        if url.contains("/initByType/securephone") {
+            return Ok(json(serde_json::json!({
+                "code": 0,
+                "data": { "securePhone": "138****1234", "gid": "g-1" }
+            })));
+        }
+        if url.contains("/securephone/send") {
+            counter.fetch_add(1, Ordering::SeqCst);
+            return Err(AppError::network_kind(
+                NetworkKind::Timeout,
+                "请求超时".to_owned(),
+            ));
+        }
+        panic!("未预期的请求：{url}");
+    });
+    harness
+        .dispatch(Job::RetryLogin {
+            site: SiteKind::Attendance,
+        })
+        .expect("登录应停在短信验证");
+
+    harness
+        .dispatch(Job::SendMfaCode)
+        .expect_err("发送失败应直接回报");
+
+    assert_eq!(
+        sends.load(Ordering::SeqCst),
+        1,
+        "不得自动重送（使用者可能因此收到两条短信）"
+    );
+    let events = harness.drain_events();
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::Notice(message) if message.contains("正在重试"))),
+        "不应有自动重试提示：{events:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Failed {
+                target: FailedTarget::Login,
+                ..
+            }
+        )),
+        "应直接回报失败：{events:?}"
+    );
+}
+
 #[test]
 fn flush_interactive_runs_the_queued_open_and_keeps_other_jobs() {
     let mut harness = harness(|request: &HttpRequest| -> AppResult<HttpResponse> {

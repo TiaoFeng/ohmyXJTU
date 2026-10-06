@@ -326,6 +326,16 @@ impl Job {
         matches!(self, Self::OpenActivity { .. })
     }
 
+    /// 連線層失敗時，是否可以原樣重送這個任務。
+    ///
+    /// 絕大多數任務重送一次就只是「再送同一個請求」，但發送簡訊驗證碼
+    /// **有可見的副作用**：逾時可能代表請求已經送達、只是回應沒收到，重送
+    /// 會讓使用者收到兩條簡訊。這類任務不自動重試，失敗直接回報，由使用者
+    /// 自行決定要不要再按一次。
+    pub fn is_replayable(&self) -> bool {
+        !matches!(self, Self::SendMfaCode)
+    }
+
     /// 資料任務的合併鍵；同鍵的排隊請求視為重複而合併。
     pub(super) fn data_key(&self) -> Option<DataKey> {
         match self {

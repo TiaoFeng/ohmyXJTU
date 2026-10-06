@@ -467,14 +467,19 @@ impl Worker {
     /// 情況下任務回傳 `Ok`，登入流程留在 `flow` 裡等使用者輸入。
     ///
     /// 伺服器已經回應的失敗（業務錯誤、格式不符）、憑證或驗證碼錯誤一律
-    /// 不重試（見 [`AppError::is_connection_error`]）。
+    /// 不重試（見 [`AppError::is_connection_error`]）；有可見副作用的任務
+    /// 也不重試（見 [`Job::is_replayable`]）。
     fn dispatch_control(&mut self, job: Job) -> AppResult<()> {
         let what = job.label();
         let mut attempt: u8 = 1;
         loop {
             match self.dispatch_control_once(job.clone()) {
                 Ok(()) => return Ok(()),
-                Err(err) if attempt < MAX_ATTEMPTS && err.is_connection_error() => {
+                Err(err)
+                    if attempt < MAX_ATTEMPTS
+                        && job.is_replayable()
+                        && err.is_connection_error() =>
+                {
                     attempt += 1;
                     self.emit(Event::Notice(format!(
                         "{}失败，正在重试（{attempt}/{MAX_ATTEMPTS}）…",

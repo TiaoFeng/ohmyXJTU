@@ -1472,6 +1472,47 @@ fn cancel_login_settles_the_waiting_page() {
     );
 }
 
+/// 切換訪問模式時取消進行中的登入流程。
+///
+/// 流程裡的驅動器配著舊的後端與路線；續用它完成登入會把舊客戶端的 cookie
+/// 與新的訪問方式湊在一起（`SessionManager::set_access_policy` 已作廢登入
+/// 步驟，這裡確認介面上的覆蓋層也會被收斂，而不是留在等待輸入的畫面）。
+#[test]
+fn changing_access_policy_cancels_an_in_flight_login() {
+    let client: Arc<dyn HttpClient> =
+        Arc::new(FakeClient::with_responder(|request: &HttpRequest| {
+            Ok(HttpResponse::new(200, request.url.clone(), "<html></html>"))
+        }));
+    let driver =
+        LoginDriver::new(client, attendance::LOGIN_URL, &"0".repeat(32)).expect("建立登录驱动器");
+
+    let mut harness = harness(|_request: &HttpRequest| panic!("取消登录不应触发网络请求"));
+    harness.worker.flow = Some(LoginFlow {
+        site: SiteKind::Attendance,
+        driver: Box::new(driver),
+        retry: None,
+    });
+
+    harness
+        .dispatch(Job::SetAccessPolicy(AccessPolicy::WebVpn))
+        .expect("切换访问模式应当成功");
+
+    assert!(harness.worker.flow.is_none(), "应丢弃配着旧后端的登录流程");
+    let events = harness.drain_events();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::LoginCancelled)),
+        "应回报取消完成，界面才能关闭登录覆盖层：{events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::AccessPolicyUpdated(AccessPolicy::WebVpn))),
+        "仍要回报访问方式已更新：{events:?}"
+    );
+}
+
 // ── 資料任務合併（強制刷新優先、同鍵至多一筆）──────────
 
 #[test]

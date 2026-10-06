@@ -196,6 +196,11 @@ impl SessionManager {
     }
 
     /// 更新訪問策略並清除已解析的結果與探測快取。
+    ///
+    /// 進行中的登入步驟（[`Self::pending`]）一併作廢：它是配着當時解析出來的
+    /// 訪問方式與後端建立的，切換策略後路線與後端都可能不同，續用它完成登入
+    /// 會把「舊後端的 cookie」與「新的訪問方式」湊在一起（見
+    /// [`Self::complete_login_step`]）。
     pub fn set_access_policy(&mut self, policy: AccessPolicy) {
         if self.policy != policy {
             self.policy = policy;
@@ -203,6 +208,7 @@ impl SessionManager {
             self.resolved.clear();
             self.webvpn.logged_in = false;
             self.sites.clear();
+            self.pending = None;
         }
     }
 

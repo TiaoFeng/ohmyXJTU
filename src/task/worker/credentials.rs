@@ -179,6 +179,12 @@ impl Worker {
         if let Some(session) = self.session.as_mut() {
             session.set_access_policy(policy);
         }
+        // 進行中的登入流程配着舊的後端與路線，續用它會在完成登入時把舊客戶端
+        // 的 cookie 與新的訪問方式湊在一起（見 `SessionManager::set_access_policy`）。
+        // 一併取消：介面會關閉登入覆蓋層，之後的登入重新走新模式的完整流程。
+        if self.flow.is_some() || self.pending_vault.is_some() {
+            self.cancel_login()?;
+        }
         // 訪問方式變更：進行中的資料任務作廢，快取失效。
         // 保存設定本身不觸發登入，後續登入由各頁面按需進行。
         self.generation += 1;

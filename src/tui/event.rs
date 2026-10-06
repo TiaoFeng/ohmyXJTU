@@ -244,6 +244,17 @@ fn apply_schedule(app: &mut App, data: ScheduleData) {
 }
 
 fn apply_flow(app: &mut App, data: FlowData) {
+    // 遲到的舊頁結果：翻頁指令要等已在執行中的舊頁載入回報後才生效，那筆結果
+    // 仍會送達介面。使用者已指定別的頁碼時丟棄它，否則會清掉「正在加载第 N
+    // 页…」、把「更新於」往回寫，畫面也顯示成不是使用者要的那一頁（與課表的
+    // 切週過濾同理，見 `App::flow_pending_page`）。
+    if app
+        .flow_pending_page
+        .is_some_and(|pending| pending != data.page)
+    {
+        return;
+    }
+    app.flow_pending_page = None;
     app.attendance = Page::Ready(data);
     app.updated_at.attendance = Some(now_clock());
     app.flow_state.select(Some(0));

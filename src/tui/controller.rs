@@ -49,7 +49,7 @@ pub(super) fn request(app: &mut App, jobs: &Sender<Job>, nav: NavItem, force: bo
             let _ = jobs.send(Job::LoadHomework { force });
         }
         NavItem::Attendance => {
-            let page = app.attendance.ready().map_or(1, |data| data.page);
+            let page = flow_page(app);
             app.attendance.start_loading("正在加载考勤流水…");
             let _ = jobs.send(Job::LoadFlow { page });
         }
@@ -266,21 +266,36 @@ pub(super) fn scroll_detail(app: &mut App, command: DetailScroll) {
     }
 }
 
+/// 考勤流水目前「該顯示」的頁碼。
+///
+/// 使用者最後選定但尚未回報的頁碼優先（見 `App::flow_pending_page`），其次才是
+/// 畫面上已有的資料頁碼（載入中保留的是舊資料），最後回退第 1 頁。
+fn flow_page(app: &App) -> u32 {
+    app.flow_pending_page
+        .or_else(|| app.attendance.ready().map(|data| data.page))
+        .unwrap_or(1)
+}
+
 /// 考勤流水分頁（`n`／`p`）；超出頁數範圍時不動作。
+///
+/// 目標頁以 [`flow_page`] 為準：載入期間 `ready()` 仍是上一頁，拿它計算會讓
+/// 連續按鍵（例如連按兩次 `n`）都算成同一頁而只前進一次。目標頁另記在
+/// `App::flow_pending_page`：已在執行中的舊頁載入不會被作廢（翻頁指令要等它
+/// 回報後才生效），其結果必須由 `event::apply_flow` 依此欄位丟棄。
 pub(super) fn change_flow_page(app: &mut App, jobs: &Sender<Job>, delta: i32) {
     if app.nav != NavItem::Attendance {
         return;
     }
-    let (page, total_pages) = match app.attendance.ready() {
-        Some(data) => (data.page, data.total_pages),
-        None => return,
+    let Some(total_pages) = app.attendance.ready().map(|data| data.total_pages) else {
+        return;
     };
-    let target = i32::try_from(page).unwrap_or(1) + delta;
+    let target = i32::try_from(flow_page(app)).unwrap_or(1) + delta;
     if target < 1 || target > i32::try_from(total_pages).unwrap_or(1) {
         return;
     }
 
     let target = u32::try_from(target).unwrap_or(1);
+    app.flow_pending_page = Some(target);
     app.attendance
         .start_loading(format!("正在加载第 {target} 页…"));
     let _ = jobs.send(Job::LoadFlow { page: target });

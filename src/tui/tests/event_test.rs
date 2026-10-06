@@ -288,6 +288,93 @@ fn pending_week_cleared_on_account_change_but_kept_on_mode_change() {
     assert_eq!(app.schedule_week, None);
 }
 
+/// 套用一筆考勤流水事件（`page` 用來辨識是哪一頁的資料）。
+fn apply_flow_event(app: &mut App, page: u32) {
+    apply_event(
+        app,
+        Event::Flow(Box::new(FlowData {
+            records: Vec::new(),
+            page,
+            total_pages: 5,
+            total: 0,
+        })),
+    );
+}
+
+/// 翻頁待回期間丟棄遲到的舊頁結果。
+///
+/// 流水載入是單步任務：翻頁指令要等已在執行中的舊頁載入回報後才生效，那筆
+/// 結果仍會送達介面。若照單全收，它會清掉「正在加载第 N 页…」、把「更新於」
+/// 往回寫，畫面也顯示成不是使用者要的那一頁。
+#[test]
+fn stale_flow_event_is_discarded_while_a_page_switch_is_pending() {
+    let mut app = app();
+    app.nav = NavItem::Attendance;
+    apply_flow_event(&mut app, 1);
+    assert!(app.attendance.ready().is_some());
+
+    // 使用者按 `n`：送出翻頁任務並記下目標頁。
+    let (jobs, rx) = channel();
+    controller::change_flow_page(&mut app, &jobs, 1);
+    assert_eq!(app.flow_pending_page, Some(2));
+    assert!(matches!(rx.try_recv(), Ok(Job::LoadFlow { page: 2 })));
+    assert!(app.attendance.is_loading());
+
+    // 舊頁（第 1 頁）的載入此時才回報：必須丟棄。
+    apply_flow_event(&mut app, 1);
+    assert_eq!(app.flow_pending_page, Some(2), "待回页码不应被清除");
+    assert!(app.attendance.is_loading(), "应维持在加载中");
+
+    // 目標頁的結果抵達：套用並清除待回頁碼。
+    apply_flow_event(&mut app, 2);
+    assert_eq!(app.flow_pending_page, None);
+    assert_eq!(app.attendance.ready().map(|data| data.page), Some(2));
+}
+
+/// 沒有待回頁碼時，頁碼與上次顯示不同仍必須套用。
+///
+/// 過濾只用「尚未回報的目標頁」比對，不拿畫面上的頁碼比：載入期間 `ready()`
+/// 保留的是舊資料，拿它比對會把合法結果誤丟，頁面反而停在「載入中」。
+#[test]
+fn flow_event_without_a_pending_switch_is_always_applied() {
+    let mut app = app();
+    app.attendance = Page::Ready(FlowData {
+        records: Vec::new(),
+        page: 3,
+        total_pages: 5,
+        total: 0,
+    });
+
+    apply_flow_event(&mut app, 1);
+
+    assert_eq!(app.attendance.ready().map(|data| data.page), Some(1));
+    assert_eq!(app.flow_pending_page, None);
+}
+
+/// 待回頁碼的生命週期：換帳號清除，切換訪問模式保留（與課表的待回週次一致）。
+#[test]
+fn pending_flow_page_follows_the_account_lifecycle() {
+    let mut app = app();
+    app.flow_pending_page = Some(2);
+
+    apply_event(
+        &mut app,
+        Event::SessionsCleared {
+            account_changed: false,
+        },
+    );
+    assert_eq!(app.flow_pending_page, Some(2), "切换访问模式应保留待回页码");
+
+    apply_event(
+        &mut app,
+        Event::SessionsCleared {
+            account_changed: true,
+        },
+    );
+    assert_eq!(app.flow_pending_page, None, "换账号应清除待回页码");
+    assert!(app.attendance.is_idle());
+}
+
 #[test]
 fn captcha_event_resets_input_but_keeps_error() {
     let mut app = app();

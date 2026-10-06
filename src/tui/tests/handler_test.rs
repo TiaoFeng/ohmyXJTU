@@ -287,6 +287,37 @@ fn refresh_keeps_flow_page() {
     assert!(matches!(rx.try_recv(), Ok(Job::LoadFlow { page: 3 })));
 }
 
+/// 連續翻頁：目標頁以「使用者最後選定的頁碼」計算，而不是畫面上的舊頁。
+///
+/// `Page::start_loading` 會保留舊資料，所以載入期間 `ready()` 仍是上一頁；
+/// 拿它計算會讓連按兩次 `n` 都算成同一頁，只前進一頁。
+#[test]
+fn flow_paging_counts_from_the_pending_page() {
+    let (jobs, rx) = channel();
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Attendance;
+    app.attendance = Page::Ready(crate::model::FlowData {
+        records: Vec::new(),
+        page: 1,
+        total_pages: 5,
+        total: 0,
+    });
+
+    press(&mut app, &jobs, KeyCode::Char('n'));
+    assert!(matches!(rx.try_recv(), Ok(Job::LoadFlow { page: 2 })));
+    assert_eq!(app.flow_pending_page, Some(2), "应记下待回的目标页码");
+
+    // 第 2 頁還沒回來就再按一次：應以第 2 頁為基準前進到第 3 頁。
+    press(&mut app, &jobs, KeyCode::Char('n'));
+    assert!(matches!(rx.try_recv(), Ok(Job::LoadFlow { page: 3 })));
+    assert_eq!(app.flow_pending_page, Some(3));
+
+    // 往回一頁同樣以最後選定的頁碼為基準。
+    press(&mut app, &jobs, KeyCode::Char('p'));
+    assert!(matches!(rx.try_recv(), Ok(Job::LoadFlow { page: 2 })));
+}
+
 #[test]
 fn flow_paging_respects_bounds() {
     let (jobs, rx) = channel();

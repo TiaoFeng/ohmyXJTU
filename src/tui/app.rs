@@ -1205,6 +1205,15 @@ pub struct App {
     pub term_options: Vec<TermCode>,
     /// 考勤流水頁。
     pub attendance: Page<FlowData>,
+    /// 使用者以 `n`／`p` 指定、但尚未收到該頁資料的目標頁碼。
+    ///
+    /// 與課表的 [`Self::schedule_pending_week`] 同理，但有兩個用途：翻頁指令
+    /// 要等已在執行中的舊頁載入回報後才生效，那筆結果必須據此丟棄；而翻頁的
+    /// 目標頁也必須以「使用者最後選定的頁碼」計算——`ready()` 在載入期間保留
+    /// 的是舊資料，拿它計算會讓連續按鍵全部算成同一頁。
+    ///
+    /// 收到相符的資料後即清空。
+    pub flow_pending_page: Option<u32>,
     /// 思源學堂頁。
     pub lms: LmsState,
     /// 訪問策略設定。
@@ -1263,6 +1272,7 @@ impl App {
             task_page: TaskPageState::default(),
             term_options: Vec::new(),
             attendance: Page::Idle,
+            flow_pending_page: None,
             lms: LmsState::default(),
             access_policy,
             site_modes: HashMap::new(),
@@ -1430,6 +1440,7 @@ impl App {
             self.schedule_pending_week = None;
             self.homework = Page::Idle;
             self.attendance = Page::Idle;
+            self.flow_pending_page = None;
             // 自訂義任務屬於本機資料，與帳號無關：內容保留，只清掉任務頁的
             // 暫時狀態（搜尋、多選、待確認刪除）。
             self.task_page.clear_transient();

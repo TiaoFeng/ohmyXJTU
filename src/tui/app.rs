@@ -1629,21 +1629,35 @@ impl App {
     }
 
     /// 將指定位置標記為失敗（錯誤只影響對應頁面）。
+    ///
+    /// 尚未被要求載入的頁面（`Idle`）不受影響：解鎖後的背景預載失敗時，
+    /// 使用者從未要求過那份資料，把它標成「加载失败」並不合理，也會讓
+    /// 進入該頁時（[`Self::request`] 只在 `Idle` 時才重新載入）誤以為有資料
+    /// 卻載入失敗。這類失敗只留底欄提示，頁面維持未載入，進入時自然重載。
     pub fn fail_target(&mut self, target: FailedTarget, message: &str) {
         match target {
-            FailedTarget::Schedule => self.schedule.fail(message),
-            FailedTarget::Homework => self.homework.fail(message),
-            FailedTarget::Flow => self.attendance.fail(message),
-            FailedTarget::Courses => self.lms.courses.fail(message),
-            FailedTarget::Activities => self.lms.activities.fail(message),
-            FailedTarget::ActivityDetail => self.lms.detail.fail(message),
+            FailedTarget::Schedule => Self::fail_requested(&mut self.schedule, message),
+            FailedTarget::Homework => Self::fail_requested(&mut self.homework, message),
+            FailedTarget::Flow => Self::fail_requested(&mut self.attendance, message),
+            FailedTarget::Courses => Self::fail_requested(&mut self.lms.courses, message),
+            FailedTarget::Activities => Self::fail_requested(&mut self.lms.activities, message),
+            FailedTarget::ActivityDetail => Self::fail_requested(&mut self.lms.detail, message),
             FailedTarget::Login
             | FailedTarget::Credentials
             | FailedTarget::ActivityOpen
+            | FailedTarget::Preload
             | FailedTarget::Settings
             | FailedTarget::Agreement
             | FailedTarget::Tasks => {}
         }
+    }
+
+    /// 標記頁面失敗；頁面從未被要求載入時直接忽略（見 [`Self::fail_target`]）。
+    fn fail_requested<T>(page: &mut Page<T>, message: &str) {
+        if page.is_idle() {
+            return;
+        }
+        page.fail(message);
     }
 
     /// 解除載入中狀態（進行中的載入被取消時）。
@@ -1660,6 +1674,7 @@ impl App {
             FailedTarget::Login
             | FailedTarget::Credentials
             | FailedTarget::ActivityOpen
+            | FailedTarget::Preload
             | FailedTarget::Settings
             | FailedTarget::Agreement
             | FailedTarget::Tasks => {}

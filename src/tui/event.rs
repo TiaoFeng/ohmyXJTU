@@ -104,11 +104,19 @@ pub(crate) fn apply_event(app: &mut App, event: Event, jobs: &Sender<Job>) {
     }
 }
 
-/// 憑證已就緒：清掉殘留的登入覆蓋層，直接進入主畫面
-///（不預先登入任何站點），由目前頁面按需觸發惰性登入。
+/// 憑證已就緒：清掉殘留的登入覆蓋層，進入主畫面，並請工作者在背景預熱。
+///
+/// 預載任務**先送**：工作者會先登入兩個站點，再把四個頁面的載入任務排進
+/// 佇列，之後送出的目前頁面載入任務會在登入完成後才執行（登入進行中資料
+/// 任務一律延後）。即使順序顛倒也不會出錯，但先送可以少一次無謂的
+/// 「沒登入 → 失敗 → 重登」往返。
+///
+/// 預載失敗只留提示（`FailedTarget::Preload` 不動任何頁面），四個頁面維持
+/// 未載入，進入該頁時仍會正常載入。
 fn apply_vault_ready(app: &mut App, jobs: &Sender<Job>) {
     app.login = None;
     app.login_cancel_pending = false;
+    let _ = jobs.send(Job::Preload);
     if app.is_main() {
         // 修改帳號後回到主畫面：舊資料屬於舊帳號，強制刷新目前頁面。
         let nav = app.nav;

@@ -690,3 +690,16 @@ fn webvpn_proxy_targets_define_the_origin() {
     let broken = Url::parse("https://webvpn.xjtu.edu.cn/https/zzzz/broken").expect("解析");
     assert!(!same_origin(&broken, &broken), "无法判定时应视为跨源");
 }
+
+/// 逾時是對外承諾的數值：縮短它是為了讓失敗更快暴露，讓使用者不必
+/// 枯等半分鐘才看到錯誤（失敗後由工作者自動重試）。改動這兩個值時
+/// 必須一併確認自動重試的次數仍能接受。
+#[test]
+fn timeouts_stay_short_and_ordered() {
+    assert_eq!(super::DEFAULT_TIMEOUT, Duration::from_secs(15));
+    assert_eq!(super::CONNECT_TIMEOUT, Duration::from_secs(10));
+    assert!(
+        super::CONNECT_TIMEOUT < super::DEFAULT_TIMEOUT,
+        "连線階段必須先於總逾時結束"
+    );
+}

@@ -27,7 +27,8 @@ impl Worker {
         // 之後介面在收到 `VaultReady` 時才可能送出的任務操作一定排在它後面。
         // 首次建立保險庫即以此口令準備好任務信封（任務檔首次保存時才落盤）。
         self.tasks.init(&passphrase.into());
-        // 不預先登入任何站點：頁面載入需要時才按站點惰性登入。
+        // 介面收到 [`Event::VaultReady`] 後會送出 `Job::Preload`：工作者隨即
+        // 登入兩個站點並預載四個頁面（見 [`Worker::preload`]）。
         self.emit(Event::VaultReady);
         Ok(())
     }
@@ -39,7 +40,8 @@ impl Worker {
         // 任務檔與保險庫共用同一組口令；解鎖後才有金鑰可以讀寫。先送
         // `InitTasks` 再回報 `VaultReady`：介面開始操作時服務已有口令。
         self.tasks.init(&passphrase.into());
-        // 不預先登入任何站點：頁面載入需要時才按站點惰性登入。
+        // 介面收到 [`Event::VaultReady`] 後會送出 `Job::Preload`：工作者隨即
+        // 登入兩個站點並預載四個頁面（見 [`Worker::preload`]）。
         self.emit(Event::VaultReady);
         self.report_vault_permissions();
         Ok(())
@@ -69,6 +71,7 @@ impl Worker {
         self.retry = None;
         self.generation += 1;
         self.relogin.clear();
+        self.retries.clear();
         self.pending_data.clear();
         self.cache.clear();
         // 課表快取與選定週次都屬於舊帳號。
@@ -140,6 +143,8 @@ impl Worker {
         self.credentials = Some(credentials);
         self.flow = None;
         self.retry = None;
+        // 新會話（換帳號或切換訪問模式）：舊的預載待辦一併作廢。
+        self.preload_pending = false;
         // 待存憑證屬於舊帳號：換帳號後一律作廢。
         self.pending_vault = None;
         // 舊帳號的登入失敗計數不再適用。
@@ -148,6 +153,7 @@ impl Worker {
         // 換帳號後舊任務與快取一律作廢，進行中的資料任務不再回報。
         self.generation += 1;
         self.relogin.clear();
+        self.retries.clear();
         self.pending_data.clear();
         self.cache.clear();
         // 課表快取與選定週次都屬於舊帳號：一併作廢（介面也會清除頁面資料）。
@@ -177,6 +183,7 @@ impl Worker {
         // 保存設定本身不觸發登入，後續登入由各頁面按需進行。
         self.generation += 1;
         self.relogin.clear();
+        self.retries.clear();
         self.cache.clear();
         // 訪問方式變更：課表快取一併作廢（重新登入後重建）；選定週次保留。
         self.schedule_cache = None;

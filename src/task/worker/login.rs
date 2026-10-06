@@ -77,6 +77,8 @@ impl Worker {
         //（登入互動期間資料任務一律延後，取消後沒有事件會再觸發）。
         let had_login = self.flow.is_some() || self.pending_vault.is_some();
         self.flow = None;
+        // 使用者主動取消：一併放棄待補做的預載，不讓背景擅自重新登入。
+        self.preload_pending = false;
         self.discard_pending_vault();
         self.settle_pending_retry();
         // 無論先前有無進行中的登入都必須回報取消完成：介面據此清除等待狀態，
@@ -98,13 +100,14 @@ impl Worker {
         }
     }
 
-    /// 等待重登的任務重新取得自動重登額度（使用者手動重試時）。
+    /// 等待重登的任務重新取得自動重登與重試額度（使用者手動重試時）。
     ///
     /// 額度按任務鍵各自保存：手動重試只為「正在等待的任務」重新計算，
     /// 不影響其他任務的額度。
     fn reset_pending_retry_budget(&mut self) {
         if let Some(key) = self.retry.as_ref().and_then(Job::data_key) {
             self.relogin.reset(&key);
+            self.retries.reset(&key);
         }
     }
 
@@ -204,6 +207,8 @@ impl Worker {
                 // 憑證被拒：丟棄待存憑證（並還原舊憑證），不覆蓋保險庫中的舊憑證。
                 self.record_login();
                 self.flow = None;
+                // 憑證被拒：預載也做不成，放棄待補做的那一次。
+                self.preload_pending = false;
                 self.discard_pending_vault();
                 self.clear_captcha();
                 self.emit(Event::LoginFailed { site, message });
@@ -272,12 +277,23 @@ impl Worker {
         // 登入成功後才更新保險庫，失敗的憑證不會覆蓋舊憑證。
         self.commit_pending_vault();
         // 登入成功後續跑等待中的任務（可能是資料任務或控制任務）。
-        if let Some(job) = retry.or(self.retry.take()) {
+        //
+        // 兩個來源都要跑：`retry` 是發起這次登入的任務（通常為 `None`），
+        // `self.retry` 是等待重登的資料任務。**不可**寫成
+        // `retry.or(self.retry.take())`：`Option::or` 的參數是值傳遞，
+        // `take()` 一定會執行，但當 `retry` 已是 `Some` 時，取出後的那個任務
+        // 就無人接手而靜默遺失。
+        for job in [retry, self.retry.take()].into_iter().flatten() {
             if job.is_control() {
                 let _ = self.handle_control(job);
             } else {
                 self.run_data_job(job);
             }
+        }
+        // 預載先前被這次登入擋下（見 [`Self::preload`]）：登入已經結束，補做。
+        // 由預載自己發起的登入帶著 [`Job::Preload`] 走上面的分支，不會重複。
+        if std::mem::take(&mut self.preload_pending) {
+            let _ = self.handle_control(Job::Preload);
         }
         Ok(())
     }

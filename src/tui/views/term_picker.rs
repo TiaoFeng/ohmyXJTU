@@ -9,9 +9,14 @@ use crate::tui::app::TermPickerState;
 use crate::tui::theme::THEME;
 use crate::tui::ui::{hint_line, menu_item};
 
+/// 彈窗寬度。
+const PICKER_WIDTH: u16 = 62;
+/// 彈窗高度。
+const PICKER_HEIGHT: u16 = 16;
+
 /// 繪製學期選擇器。
 pub fn draw(frame: &mut Frame, state: &TermPickerState) {
-    let area = crate::tui::ui::centered_rect(frame.area(), 62, 16);
+    let area = crate::tui::ui::centered_rect(frame.area(), PICKER_WIDTH, PICKER_HEIGHT);
     let inner = crate::tui::ui::popup_surface(frame, area, "选择学期");
 
     let chunks = Layout::vertical([

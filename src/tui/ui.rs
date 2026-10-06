@@ -15,6 +15,10 @@ use crate::tui::theme::THEME;
 pub const MIN_WIDTH: u16 = 64;
 /// 視窗最小高度。
 pub const MIN_HEIGHT: u16 = 18;
+/// 憑證表單彈窗（首次設定、解鎖、修改帳號／口令）的寬度。
+pub const FORM_WIDTH: u16 = 76;
+/// 登入互動彈窗（進度、驗證碼、簡訊驗證）的寬度；比表單寬以容納提示文字。
+pub const LOGIN_WIDTH: u16 = 84;
 /// 表單標籤欄的顯示寬度（以終端列計，不是字元數）。
 const LABEL_WIDTH: u16 = 14;
 /// 標籤與值之間的間隔。
@@ -209,7 +213,7 @@ pub fn draw_field(
 pub fn draw_form(frame: &mut Frame, form: &FormState, title: &str, hint: &str, note: Option<&str>) {
     let note_rows = u16::from(note.is_some()) * 2;
     let content_height = u16::try_from(form.fields.len()).unwrap_or(0) * 2 + note_rows + 6;
-    let area = centered_rect(frame.area(), 76, content_height);
+    let area = centered_rect(frame.area(), FORM_WIDTH, content_height);
     let inner = popup_surface(frame, area, title);
 
     let mut constraints: Vec<Constraint> = Vec::new();
@@ -372,7 +376,7 @@ pub fn draw_login(frame: &mut Frame, screen: &LoginScreen) {
     let field_rows = if field.is_some() { 2 } else { 0 };
     let area = centered_rect(
         frame.area(),
-        84,
+        LOGIN_WIDTH,
         u16::try_from(lines.len()).unwrap_or(1) + field_rows + 6,
     );
     let inner = popup_surface(frame, area, title);

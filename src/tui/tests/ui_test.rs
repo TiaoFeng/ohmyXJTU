@@ -37,12 +37,12 @@ use super::*;
 const WIDTH: u16 = 100;
 /// 測試終端高度。
 const HEIGHT: u16 = 30;
-/// 表單彈窗（76 寬）內框的起始欄位。
-const FORM_INNER_X: u16 = (WIDTH - 76) / 2 + 1;
+/// 表單彈窗內框的起始欄位。
+const FORM_INNER_X: u16 = (WIDTH - crate::tui::ui::FORM_WIDTH) / 2 + 1;
 /// 表單彈窗的內框寬度。
-const FORM_INNER_WIDTH: u16 = 76 - 2;
-/// 驗證碼彈窗（84 寬）內框的起始欄位。
-const LOGIN_INNER_X: u16 = (WIDTH - 84) / 2 + 1;
+const FORM_INNER_WIDTH: u16 = crate::tui::ui::FORM_WIDTH - 2;
+/// 驗證碼彈窗內框的起始欄位。
+const LOGIN_INNER_X: u16 = (WIDTH - crate::tui::ui::LOGIN_WIDTH) / 2 + 1;
 
 /// 以測試終端繪製畫面。
 fn draw(width: u16, height: u16, render: impl FnOnce(&mut Frame)) -> Terminal<TestBackend> {

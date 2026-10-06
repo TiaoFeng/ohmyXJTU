@@ -130,15 +130,6 @@ impl<T> Page<T> {
         }
     }
 
-    /// 目前可顯示的資料（可變）。
-    pub fn ready_mut(&mut self) -> Option<&mut T> {
-        match self {
-            Self::Ready(value) => Some(value),
-            Self::Loading { stale, .. } | Self::Failed { stale, .. } => stale.as_mut(),
-            Self::Idle => None,
-        }
-    }
-
     /// 載入中或失敗的說明文字。
     pub fn note(&self) -> Option<&str> {
         match self {
@@ -259,14 +250,6 @@ impl HomeworkData {
             .iter()
             .filter(|item| item.state.group() == group)
             .collect()
-    }
-
-    /// 指定分組的項目數。
-    pub fn group_count(&self, group: HomeworkGroup) -> usize {
-        self.items
-            .iter()
-            .filter(|item| item.state.group() == group)
-            .count()
     }
 }
 

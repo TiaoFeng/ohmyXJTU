@@ -556,8 +556,8 @@ fn homework_event_updates_groups_and_counts() {
     );
 
     let data = app.homework.ready().expect("应有作业资料");
-    assert_eq!(data.group_count(HomeworkGroup::Unfinished), 1);
-    assert_eq!(data.group_count(HomeworkGroup::Completed), 0);
+    assert_eq!(data.group_items(HomeworkGroup::Unfinished).len(), 1);
+    assert_eq!(data.group_items(HomeworkGroup::Completed).len(), 0);
     assert_eq!(
         app.message_text(),
         Some("已更新作业：未完成 1 项（用时 1.2s）")

@@ -55,6 +55,10 @@ impl InputLine {
     }
 
     /// 是否為密碼欄位。
+    ///
+    /// 僅供測試斷言遮蔽設定（生產碼以 `FieldRole::is_secret` 決定是否填入
+    /// 遮蔽內容）：標記為 `cfg(test)`，避免讓人以為有生產呼叫端。
+    #[cfg(test)]
     pub fn is_masked(&self) -> bool {
         self.masked
     }
@@ -220,6 +224,10 @@ impl TextArea {
     }
 
     /// 邏輯行數。
+    ///
+    /// 僅供測試斷言（繪製走 [`Self::line`]）：標記為 `cfg(test)`，避免讓人
+    /// 以為有生產呼叫端。
+    #[cfg(test)]
     pub fn line_count(&self) -> usize {
         self.lines.len()
     }

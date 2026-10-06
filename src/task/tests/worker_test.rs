@@ -4215,6 +4215,59 @@ fn opening_lesson_without_player_url_falls_back_to_home() {
     );
 }
 
+/// 伺服器回傳的播放網址不在校內網域時一律拒絕開啟：它帶有存取 token。
+#[test]
+fn opening_lesson_with_an_external_player_url_falls_back_to_home() {
+    let mut harness = harness(|request| {
+        let url = request.url.clone();
+        if url.contains("/player-url") {
+            return Ok(json(serde_json::json!({
+                "url": "https://example.com/player?token=secret-token"
+            })));
+        }
+        panic!("未预期的请求：{url}");
+    });
+    harness.login_lms_only();
+
+    harness
+        .dispatch(Job::OpenActivity {
+            activity_id: "23".to_owned(),
+            course_id: None,
+            kind: lms::ActivityKind::Lesson,
+        })
+        .expect("打开活动");
+
+    let events = harness.drain_events();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Notice(message)
+                if message.contains("无法获取播放地址") && message.contains("example.com")
+        )),
+        "应说明被拒绝的主机：{events:?}"
+    );
+    assert!(
+        events.iter().all(|event| !matches!(
+            event,
+            Event::OpenUrl(url) if url.contains("example.com")
+        )),
+        "不得开启非校内网址：{events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .all(|event| !format!("{event:?}").contains("secret-token")),
+        "任何事件都不得带出存取 token：{events:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::OpenUrl(url) if url == "https://lms.xjtu.edu.cn"
+        )),
+        "应回退到思源学堂首页"
+    );
+}
+
 #[test]
 fn only_open_activity_is_interactive() {
     let open = Job::OpenActivity {

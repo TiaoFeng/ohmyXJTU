@@ -1,7 +1,7 @@
 //! 以系統預設瀏覽器開啟網址。
 //!
-//! 只允許 `http`/`https`；命令與參數逐一傳遞（`Command`），不經過 shell
-//! 字串拼接，避免注入。實際的 URL 來源一律是伺服器回應或既定常數
+//! 只允許校內網域的 `https` 網址；命令與參數逐一傳遞（`Command`），不經過
+//! shell 字串拼接，避免注入。實際的 URL 來源是伺服器回應或既定常數
 //! （例如思源學堂首頁），不拼接未經驗證的路徑。
 
 use std::process::{Child, Command, Stdio};
@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use url::Url;
 
 use crate::error::{AppError, AppResult};
+use crate::webvpn::is_school_host;
 
 /// 啟動後等待啟動器結束的寬限時間。
 ///
@@ -20,6 +21,7 @@ const LAUNCH_GRACE: Duration = Duration::from_millis(200);
 
 /// 以系統預設瀏覽器開啟網址（不等待程序結束）。
 ///
+/// 開啟前先經 [`ensure_openable`] 檢驗目標（所有平台路徑都經 [`command_for`]）。
 /// 三個標準串流都接到 null：`xdg-open` 之類的啟動器會把訊息寫到 stdout／stderr，
 /// 直接繼承會打亂 TUI 畫面。子行程交由獨立執行緒回收，避免每開一次就累積殭屍。
 pub fn open_url(url: &str) -> AppResult<()> {
@@ -74,10 +76,10 @@ fn reap_launcher(mut child: Child) -> AppResult<()> {
 }
 
 /// 依平台組出開啟網址的系統命令（供測試檢驗程式與參數）。
+///
+/// 這是所有開啟路徑的必經點，因此 [`ensure_openable`] 的檢驗也放在這裡。
 pub fn command_for(target_os: &str, url: &str) -> AppResult<(&'static str, Vec<String>)> {
-    if !is_http_url(url) {
-        return Err(AppError::protocol("只能打开 http 或 https 网址"));
-    }
+    ensure_openable(url)?;
 
     let (program, args) = match target_os {
         "macos" => ("open", vec![url.to_owned()]),
@@ -94,9 +96,24 @@ pub fn command_for(target_os: &str, url: &str) -> AppResult<(&'static str, Vec<S
     Ok((program, args))
 }
 
-/// 是否為可開啟的 http/https 網址。
-fn is_http_url(url: &str) -> bool {
-    Url::parse(url).is_ok_and(|parsed| matches!(parsed.scheme(), "http" | "https"))
+/// 確認網址可安全交給系統瀏覽器：必須是 `https`，且主機為校內網域。
+///
+/// 要開啟的網址可能來自伺服器（例如思源學堂的播放地址，附帶存取 token）：
+/// 只允許校內主機，才不會在回應被篡改、後端出現開放重導或代理被污染時，
+/// 把 token 與查詢參數送去第三方。`webvpn.xjtu.edu.cn` 本身也是校內主機，
+/// 因此 WebVPN 模式沿用同一條規則（改寫後的網址仍會通過檢驗）。
+///
+/// 錯誤訊息只含主機名，不含完整網址（見 [`AppError::UntrustedUrl`]）。
+pub fn ensure_openable(url: &str) -> AppResult<()> {
+    let parsed = Url::parse(url).map_err(|_| AppError::protocol("网址无法解析，已阻止打开"))?;
+    let host = parsed.host_str().unwrap_or_default();
+    if parsed.scheme() != "https" {
+        return Err(AppError::untrusted_url(host, "必须使用 https"));
+    }
+    if !is_school_host(host) {
+        return Err(AppError::untrusted_url(host, "非校内网域"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

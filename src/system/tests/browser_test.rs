@@ -67,6 +67,66 @@ fn rejects_non_http_urls() {
     assert!(open_url("javascript:alert(1)").is_err());
 }
 
+/// 只允許校內 `https` 網址：外部主機、後綴混淆與 http 降級都必須拒絕。
+///
+/// 要開啟的網址可能來自伺服器且附帶存取 token（思源學堂的播放地址），
+/// 一旦被導向校外主機就等於把 token 交給第三方。
+#[test]
+fn rejects_urls_that_are_not_school_https() {
+    for url in [
+        "https://example.com/player?token=abc",
+        "http://lms.xjtu.edu.cn/lesson",
+        "https://lms.xjtu.edu.cn.evil.com/lesson?token=abc",
+        "https://evil-xjtu.edu.cn/lesson",
+        "https://xjtu.edu.cn.evil.com/",
+    ] {
+        // 實際入口是 `command_for`（`open_url` 也經由它）：確認命令不會被組出來。
+        let err = command_for("linux", url).unwrap_err();
+        assert!(
+            matches!(err, AppError::UntrustedUrl { .. }),
+            "应为网址拒绝错误：{url} → {err}"
+        );
+        let message = err.to_string();
+        assert!(
+            !message.contains("token"),
+            "错误讯息不得含网址内容：{message}"
+        );
+        assert!(
+            !message.contains("/lesson"),
+            "错误讯息不得含路径：{message}"
+        );
+        // 單元層入口適用同一組規則。
+        ensure_openable(url).unwrap_err();
+    }
+
+    // 校內 https（含 WebVPN 主機）仍可開啟，且命令組法不變。
+    for url in [
+        "https://lms.xjtu.edu.cn/lesson/player?token=abc",
+        "https://webvpn.xjtu.edu.cn/https/77726476706e69737468656265737421/lesson",
+        "https://xjtu.edu.cn/",
+    ] {
+        ensure_openable(url).unwrap_or_else(|err| panic!("校内 https 应允许：{url} → {err}"));
+        let (program, args) = command_for("linux", url)
+            .unwrap_or_else(|err| panic!("校内 https 应可组出命令：{err}"));
+        assert_eq!(program, "xdg-open");
+        assert_eq!(args, vec![url.to_owned()], "网址必须原样传递");
+    }
+}
+
+/// 無法解析的網址同樣拒絕，且不使用「網址被拒」的訊息（避免誤導）。
+#[test]
+fn rejects_unparsable_urls_without_echoing_them() {
+    let err = ensure_openable("https:// lms.xjtu.edu.cn/lesson?token=abc").unwrap_err();
+    assert!(
+        matches!(err, AppError::Protocol(_)),
+        "格式错误应为协定错误：{err}"
+    );
+    assert!(
+        !err.to_string().contains("token"),
+        "错误讯息不得含网址内容：{err}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn reap_launcher_reports_immediate_failure() {

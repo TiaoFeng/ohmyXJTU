@@ -314,10 +314,17 @@ impl Worker {
     }
 
     /// 課程內容的播放器網址（由伺服器回傳，附帶存取 token）。
+    ///
+    /// 回傳前先確認目標可安全開啟（校內 `https`）：網址帶有存取 token，一旦
+    /// 伺服器回應被篡改或後端出現開放重導，開啟它就等於把 token 送去第三方。
+    /// 不合格時視同「取不到播放地址」——呼叫端會提示並回退到思源學堂首頁
+    /// （見 [`Self::open_activity_url`]）。
     fn lesson_player_url(&mut self, activity_id: &str) -> AppResult<String> {
         let session = self.session_mut()?;
         let mut api = LmsApi::new(session);
-        api.lesson_player_url(activity_id)
+        let url = api.lesson_player_url(activity_id)?;
+        crate::system::browser::ensure_openable(&url)?;
+        Ok(url)
     }
 }
 

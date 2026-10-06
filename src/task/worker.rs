@@ -416,6 +416,9 @@ impl Worker {
     fn login_site_of(&self, job: &Job) -> Option<SiteKind> {
         match job {
             Job::RetryLogin { site } | Job::RetryWithAccount { site, .. } => Some(*site),
+            // 預載本身就是一連串登入：失敗歸屬於它當時正在登入的站點
+            //（否則介面一律當成考勤）。
+            Job::Preload => self.login_site,
             Job::SubmitCaptcha(_)
             | Job::RefreshCaptcha
             | Job::SendMfaCode

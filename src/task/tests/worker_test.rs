@@ -1073,6 +1073,29 @@ fn cancelling_a_login_abandons_the_pending_preload() {
     );
 }
 
+/// 預載失敗要指出真正失敗的站點。
+///
+/// 修復前 `login_site_of` 對 `Job::Preload` 一律回 `None`，介面因此把失敗
+/// 一律當成考勤——思源學堂登入失敗也會顯示成考勤。
+#[test]
+fn preload_failure_points_at_the_site_that_failed() {
+    let mut harness = harness(|_request: &HttpRequest| panic!("本测试不应发出请求"));
+
+    harness.worker.login_site = Some(SiteKind::Lms);
+    assert_eq!(
+        harness.worker.login_site_of(&Job::Preload),
+        Some(SiteKind::Lms),
+        "预载失败应归属于当时正在登入的站点"
+    );
+
+    harness.worker.login_site = Some(SiteKind::Attendance);
+    assert_eq!(
+        harness.worker.login_site_of(&Job::Preload),
+        Some(SiteKind::Attendance),
+        "登入考勤阶段失败时应归属于考勤"
+    );
+}
+
 /// 尚未建立會話（例如會話在重建失敗後被停用）時預載直接報錯，不排入任務。
 #[test]
 fn preload_without_a_session_reports_an_error() {

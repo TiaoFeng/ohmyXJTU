@@ -288,6 +288,93 @@ fn pending_week_cleared_on_account_change_but_kept_on_mode_change() {
     assert_eq!(app.schedule_week, None);
 }
 
+/// 套用一筆考勤流水事件（`page` 用來辨識是哪一頁的資料）。
+fn apply_flow_event(app: &mut App, page: u32) {
+    apply_event(
+        app,
+        Event::Flow(Box::new(FlowData {
+            records: Vec::new(),
+            page,
+            total_pages: 5,
+            total: 0,
+        })),
+    );
+}
+
+/// 翻頁待回期間丟棄遲到的舊頁結果。
+///
+/// 流水載入是單步任務：翻頁指令要等已在執行中的舊頁載入回報後才生效，那筆
+/// 結果仍會送達介面。若照單全收，它會清掉「正在加载第 N 页…」、把「更新於」
+/// 往回寫，畫面也顯示成不是使用者要的那一頁。
+#[test]
+fn stale_flow_event_is_discarded_while_a_page_switch_is_pending() {
+    let mut app = app();
+    app.nav = NavItem::Attendance;
+    apply_flow_event(&mut app, 1);
+    assert!(app.attendance.ready().is_some());
+
+    // 使用者按 `n`：送出翻頁任務並記下目標頁。
+    let (jobs, rx) = channel();
+    controller::change_flow_page(&mut app, &jobs, 1);
+    assert_eq!(app.flow_pending_page, Some(2));
+    assert!(matches!(rx.try_recv(), Ok(Job::LoadFlow { page: 2 })));
+    assert!(app.attendance.is_loading());
+
+    // 舊頁（第 1 頁）的載入此時才回報：必須丟棄。
+    apply_flow_event(&mut app, 1);
+    assert_eq!(app.flow_pending_page, Some(2), "待回页码不应被清除");
+    assert!(app.attendance.is_loading(), "应维持在加载中");
+
+    // 目標頁的結果抵達：套用並清除待回頁碼。
+    apply_flow_event(&mut app, 2);
+    assert_eq!(app.flow_pending_page, None);
+    assert_eq!(app.attendance.ready().map(|data| data.page), Some(2));
+}
+
+/// 沒有待回頁碼時，頁碼與上次顯示不同仍必須套用。
+///
+/// 過濾只用「尚未回報的目標頁」比對，不拿畫面上的頁碼比：載入期間 `ready()`
+/// 保留的是舊資料，拿它比對會把合法結果誤丟，頁面反而停在「載入中」。
+#[test]
+fn flow_event_without_a_pending_switch_is_always_applied() {
+    let mut app = app();
+    app.attendance = Page::Ready(FlowData {
+        records: Vec::new(),
+        page: 3,
+        total_pages: 5,
+        total: 0,
+    });
+
+    apply_flow_event(&mut app, 1);
+
+    assert_eq!(app.attendance.ready().map(|data| data.page), Some(1));
+    assert_eq!(app.flow_pending_page, None);
+}
+
+/// 待回頁碼的生命週期：換帳號清除，切換訪問模式保留（與課表的待回週次一致）。
+#[test]
+fn pending_flow_page_follows_the_account_lifecycle() {
+    let mut app = app();
+    app.flow_pending_page = Some(2);
+
+    apply_event(
+        &mut app,
+        Event::SessionsCleared {
+            account_changed: false,
+        },
+    );
+    assert_eq!(app.flow_pending_page, Some(2), "切换访问模式应保留待回页码");
+
+    apply_event(
+        &mut app,
+        Event::SessionsCleared {
+            account_changed: true,
+        },
+    );
+    assert_eq!(app.flow_pending_page, None, "换账号应清除待回页码");
+    assert!(app.attendance.is_idle());
+}
+
 #[test]
 fn captcha_event_resets_input_but_keeps_error() {
     let mut app = app();
@@ -296,12 +383,12 @@ fn captcha_event_resets_input_but_keeps_error() {
         Event::LoginNeedsCaptcha(PathBuf::from("/tmp/captcha-1.png")),
     );
     assert!(
-        matches!(app.login.as_deref(), Some(LoginScreen::Captcha { .. })),
-        "应显示验证码覆盖层"
-    );
-    assert_eq!(
-        app.captcha_path.as_deref(),
-        Some(std::path::Path::new("/tmp/captcha-1.png"))
+        matches!(
+            app.login.as_deref(),
+            Some(LoginScreen::Captcha { path, .. })
+                if path == std::path::Path::new("/tmp/captcha-1.png")
+        ),
+        "应显示验证码覆盖层并带上图片路径"
     );
 
     if let Some(LoginScreen::Captcha { input, error, .. }) = app.login.as_deref_mut() {
@@ -469,8 +556,8 @@ fn homework_event_updates_groups_and_counts() {
     );
 
     let data = app.homework.ready().expect("应有作业资料");
-    assert_eq!(data.group_count(HomeworkGroup::Unfinished), 1);
-    assert_eq!(data.group_count(HomeworkGroup::Completed), 0);
+    assert_eq!(data.group_items(HomeworkGroup::Unfinished).len(), 1);
+    assert_eq!(data.group_items(HomeworkGroup::Completed).len(), 0);
     assert_eq!(
         app.message_text(),
         Some("已更新作业：未完成 1 项（用时 1.2s）")
@@ -718,6 +805,8 @@ fn account_updated_leaves_form_for_main() {
 #[test]
 fn needs_term_opens_picker_and_marks_homework() {
     let mut app = app();
+    // 作業載入只可能在使用者已進入主畫面之後發生（`VaultReady` 先切到主畫面）。
+    app.set_screen(Screen::Main);
     apply_event(
         &mut app,
         Event::HomeworkNeedsTerm {
@@ -730,6 +819,72 @@ fn needs_term_opens_picker_and_marks_homework() {
     assert!(matches!(app.screen, Screen::TermPicker(_)));
     assert!(matches!(app.homework, Page::Failed { .. }));
     assert_eq!(app.term_options.len(), 1);
+}
+
+/// 背景判定不出本學期時，不得搶走使用者正在操作的彈窗。
+///
+/// 解鎖後的四頁預載會在背景載入作業：若此時使用者正在新增任務的表單裡輸入，
+/// 直接把畫面換成學期選擇器會連帶丟掉輸入內容。選項仍要記下來，關掉彈窗後按
+/// `s` 就能選擇。
+#[test]
+fn needs_term_does_not_steal_an_open_form() {
+    let mut app = app();
+    app.set_screen(Screen::TaskForm(Box::new(TaskFormState::add())));
+    app.homework.start_loading("正在汇总作业…");
+
+    apply_event(
+        &mut app,
+        Event::HomeworkNeedsTerm {
+            options: vec![TermCode::parse("2026-2027-1").expect("学期")],
+            suggestion: None,
+            reason: "考勤系统不可用".to_owned(),
+        },
+    );
+
+    assert!(
+        matches!(app.screen, Screen::TaskForm(_)),
+        "不得换掉正在输入的表单"
+    );
+    assert!(
+        matches!(app.homework, Page::Failed { .. }),
+        "仍要标记作业页"
+    );
+    assert_eq!(app.term_options.len(), 1, "选项要记下来供 `s` 使用");
+    // 畫面上有彈窗：`s` 會被彈窗吃掉（且提示會被下一次按鍵清掉），
+    // 因此文案必須說清楚要先關掉它才可行動。
+    assert!(
+        app.message_text()
+            .is_some_and(|text| text.contains("请先关闭当前窗口")),
+        "应留下可执行的提示：{:?}",
+        app.message_text()
+    );
+}
+
+/// 選擇器已經開著時只更新內容，不會被背景事件關掉。
+#[test]
+fn needs_term_updates_an_open_picker() {
+    let mut app = app();
+    app.set_screen(Screen::TermPicker(TermPickerState::new(
+        Vec::new(),
+        None,
+        "先前的说明".to_owned(),
+    )));
+
+    apply_event(
+        &mut app,
+        Event::HomeworkNeedsTerm {
+            options: vec![TermCode::parse("2026-2027-2").expect("学期")],
+            suggestion: None,
+            reason: "考勤系统不可用".to_owned(),
+        },
+    );
+
+    match &app.screen {
+        Screen::TermPicker(state) => {
+            assert_eq!(state.options.len(), 1, "选项应被更新");
+        }
+        other => panic!("选择器应保持开启：{other:?}"),
+    }
 }
 
 #[test]
@@ -1106,8 +1261,6 @@ fn loading_cancelled_settles_page_without_losing_partial_data() {
         note: "正在汇总作业（已完成 1/2 门课程，累计 0 项）…".to_owned(),
         stale: Some(HomeworkData {
             term_label: None,
-            term_source: None,
-            courses_included: 2,
             courses_skipped: 0,
             term_options: Vec::new(),
             items: Vec::new(),
@@ -1594,7 +1747,6 @@ fn dismissed_login_overlay_ignores_late_login_events_until_cancelled() {
         Event::LoginNeedsCaptcha(PathBuf::from("/tmp/captcha-late.png")),
     );
     assert!(app.login.is_none(), "取消中的迟到验证码事件不得重开覆盖层");
-    assert!(app.captcha_path.is_none(), "被忽略的验证码不应残留路径");
 
     // 取消完成：清除等待狀態。
     apply_event(&mut app, Event::LoginCancelled);
@@ -1755,8 +1907,6 @@ fn homework_event_anchors_the_selection_by_activity_id() {
     app.nav = NavItem::Homework;
     app.homework = Page::Ready(HomeworkData {
         term_label: Some("2026-2027 学年 第 1 学期".to_owned()),
-        term_source: Some("考勤系统"),
-        courses_included: 1,
         courses_skipped: 0,
         term_options: Vec::new(),
         items: homework_items(&[("a", "甲")]),
@@ -1807,8 +1957,6 @@ fn tasks_event_anchors_the_selection_under_mixed_sort() {
     app.task_page.tasks = vec![low, high];
     app.homework = Page::Ready(HomeworkData {
         term_label: None,
-        term_source: None,
-        courses_included: 1,
         courses_skipped: 0,
         term_options: Vec::new(),
         items: homework_items(&[("a", "第一次作业")]),

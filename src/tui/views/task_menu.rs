@@ -34,50 +34,61 @@ const CONFIRM_HINT_HEIGHT: u16 = 2;
 
 /// 繪製任務設置彈窗（`^T`）。
 pub fn draw_menu(frame: &mut Frame, state: TaskMenuState) {
-    let area = centered_rect(frame.area(), MENU_WIDTH, MENU_HEIGHT);
-    let inner = popup_surface(frame, area, "任务设置");
-    let chunks = Layout::vertical([
-        Constraint::Min(MENU_BODY_MIN_HEIGHT),
-        Constraint::Length(HINT_HEIGHT),
-    ])
-    .split(inner);
-
-    let lines: Vec<Line> = TaskMenuKind::ALL
-        .iter()
-        .enumerate()
-        .map(|(index, kind)| menu_item(index == state.index, kind.label()))
-        .collect();
-    frame.render_widget(
-        Paragraph::new(lines).style(THEME.surface_style()),
-        chunks[0],
-    );
-    frame.render_widget(
-        Paragraph::new(hint_line("↑/↓ 选择 · enter 确定 · esc 关闭")).style(THEME.surface_style()),
-        chunks[1],
+    draw_choice_menu(
+        frame,
+        MENU_WIDTH,
+        MENU_HEIGHT,
+        "任务设置",
+        TaskMenuKind::ALL.iter().map(|kind| kind.label()),
+        state.index,
+        "↑/↓ 选择 · enter 确定 · esc 关闭",
     );
 }
 
 /// 繪製多選後的批量操作選單。
 pub fn draw_batch_menu(frame: &mut Frame, state: TaskBatchMenuState) {
-    let area = centered_rect(frame.area(), BATCH_WIDTH, BATCH_HEIGHT);
-    let inner = popup_surface(frame, area, "批量操作");
+    draw_choice_menu(
+        frame,
+        BATCH_WIDTH,
+        BATCH_HEIGHT,
+        "批量操作",
+        TaskBatchOp::ALL.iter().map(|op| op.label()),
+        state.index,
+        "↑/↓ 选择 · enter 确定 · esc 返回",
+    );
+}
+
+/// 繪製「單欄選項」彈窗：一列一個選項，底部一列按鍵提示。
+///
+/// 任務設置與批量操作只有選項來源與文案不同，版面完全一樣（二次確認多了提問列，
+/// 因此不共用）。標籤由呼叫端以迭代器提供，不必先配置一份切片。
+fn draw_choice_menu<'a>(
+    frame: &mut Frame,
+    width: u16,
+    height: u16,
+    title: &str,
+    labels: impl Iterator<Item = &'a str>,
+    index: usize,
+    hint: &str,
+) {
+    let area = centered_rect(frame.area(), width, height);
+    let inner = popup_surface(frame, area, title);
     let chunks = Layout::vertical([
         Constraint::Min(MENU_BODY_MIN_HEIGHT),
         Constraint::Length(HINT_HEIGHT),
     ])
     .split(inner);
 
-    let lines: Vec<Line> = TaskBatchOp::ALL
-        .iter()
+    let lines: Vec<Line> = labels
         .enumerate()
-        .map(|(index, op)| menu_item(index == state.index, op.label()))
+        .map(|(position, label)| menu_item(position == index, label))
         .collect();
     frame.render_widget(
         Paragraph::new(lines).style(THEME.surface_style()),
         chunks[0],
     );
     frame.render_widget(
-        Paragraph::new(hint_line("↑/↓ 选择 · enter 确定 · esc 返回")).style(THEME.surface_style()),
+        Paragraph::new(hint_line(hint)).style(THEME.surface_style()),
         chunks[1],
     );
 }

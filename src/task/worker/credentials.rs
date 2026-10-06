@@ -30,6 +30,8 @@ impl Worker {
         // 介面收到 [`Event::VaultReady`] 後會送出 `Job::Preload`：工作者隨即
         // 登入兩個站點並預載四個頁面（見 [`Worker::preload`]）。
         self.emit(Event::VaultReady);
+        // 設定檔重建的提示要等介面進到主畫面（底欄）才看得見。
+        self.report_config_rebuild();
         Ok(())
     }
 
@@ -43,6 +45,8 @@ impl Worker {
         // 介面收到 [`Event::VaultReady`] 後會送出 `Job::Preload`：工作者隨即
         // 登入兩個站點並預載四個頁面（見 [`Worker::preload`]）。
         self.emit(Event::VaultReady);
+        // 設定檔重建的提示要等介面進到主畫面（底欄）才看得見。
+        self.report_config_rebuild();
         self.report_vault_permissions();
         Ok(())
     }
@@ -104,6 +108,22 @@ impl Worker {
                 "凭证文件权限过宽（其他用户可读），已收紧为仅本人可读写：{}",
                 path.display()
             )));
+        }
+    }
+
+    /// 設定檔在啟動時損毀重建：解鎖後才提示。
+    ///
+    /// 重建會一併重設「已同意的協議版本」與「記住的學期」（`PRIVACY.md` 的
+    /// `config.json` 説明有這項承諾）。提示不能提早到啟動時發：那時的畫面是
+    /// 協議閱讀門或解鎖表單，兩者都不繪製底欄訊息，而且進到主畫面時
+    /// `apply_vault_ready` 還會把訊息覆寫成「凭证已就绪」。
+    ///
+    /// `rebuilt` 不是持久化欄位，`mem::take` 同時保證同一次執行只提示一次。
+    fn report_config_rebuild(&mut self) {
+        if std::mem::take(&mut self.config.rebuilt) {
+            self.emit(Event::Notice(
+                "配置文件已损坏并重建：已同意的协议与记住的学期已重置".to_owned(),
+            ));
         }
     }
 
@@ -178,6 +198,12 @@ impl Worker {
 
         if let Some(session) = self.session.as_mut() {
             session.set_access_policy(policy);
+        }
+        // 進行中的登入流程配着舊的後端與路線，續用它會在完成登入時把舊客戶端
+        // 的 cookie 與新的訪問方式湊在一起（見 `SessionManager::set_access_policy`）。
+        // 一併取消：介面會關閉登入覆蓋層，之後的登入重新走新模式的完整流程。
+        if self.flow.is_some() || self.pending_vault.is_some() {
+            self.cancel_login()?;
         }
         // 訪問方式變更：進行中的資料任務作廢，快取失效。
         // 保存設定本身不觸發登入，後續登入由各頁面按需進行。

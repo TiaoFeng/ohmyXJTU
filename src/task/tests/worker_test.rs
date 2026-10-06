@@ -642,6 +642,83 @@ fn pending_data_job_survives_failed_relogin_and_resumes_afterwards() {
     assert!(harness.worker.retry.is_none(), "任务续跑后不应继续保留");
 }
 
+/// 巢狀排空通道時吃到的結束指令同樣要停止目前任務。
+///
+/// `drain_channel` 是遞迴的（`Job::Preload` 會再排空一次）：內層吃到
+/// `Job::Shutdown` 只設定旗標並回 `false`，外層拿到的卻是「通道已排空」，
+/// 於是仍會照常送出請求——程式正在退出，那些請求與結果都沒有意義。
+#[test]
+fn a_nested_drain_still_stops_the_running_task() {
+    let requests = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&requests);
+    let mut harness = harness(move |_request: &HttpRequest| {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Ok(html(""))
+    });
+    // 兩個站點都已登入：`Preload` 會直接排入四個頁面的載入並排空通道。
+    let session = harness.worker.session.as_mut().expect("会话已建立");
+    session.mark_logged_in(SiteKind::Attendance, AccessMode::Direct, Vec::new());
+    session.mark_logged_in(SiteKind::Lms, AccessMode::Direct, Vec::new());
+
+    // 通道裡依序排著「預載」與「結束」：預載的巢狀排空會吃掉結束指令。
+    harness.send_job(Job::Preload);
+    harness.send_job(Job::Shutdown);
+
+    harness
+        .dispatch(Job::LoadSchedule { force: false })
+        .expect("数据任务不应冒泡为错误");
+
+    assert!(harness.worker.shutdown, "应记下结束指令");
+    assert_eq!(
+        requests.load(Ordering::SeqCst),
+        0,
+        "结束指令之后不得再发出请求"
+    );
+}
+
+/// 等待重登的任務只有一個槽：新的失敗不得讓前一個任務靜默消失。
+///
+/// 修復前 `report_data_failure` 直接覆寫 `retry`：被覆寫的任務收不到任何事件，
+/// 它那一頁就停在「載入中」——而 `ensure_page` 只在頁面尚未載入時才重新請求，
+/// 使用者若不回到該頁按 `r` 就再也無法恢復。
+#[test]
+fn a_data_failure_settles_the_task_already_waiting_to_relogin() {
+    // 公鑰取不到 → 自動重登連開始都做不到，本次失敗會走「回報原任務」的路徑。
+    let mut harness = harness(fake_flow(1));
+    // 上一個任務（課表）已因登入態失效排入待重試的槽。
+    harness.worker.retry = Some(Job::LoadSchedule { force: false });
+
+    // 第二個任務（思源學堂課程）也回報登入態失效：尚未登入時不用任何網路往返。
+    harness
+        .dispatch(Job::LoadCourses { force: false })
+        .expect("数据任务失败不应冒泡为任务错误");
+
+    let events = harness.drain_events();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::LoadingCancelled {
+                target: FailedTarget::Schedule
+            }
+        )),
+        "被取代的等待任务必须收敛，否则该页永远停在加载中：{events:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Failed {
+                target: FailedTarget::Courses,
+                ..
+            }
+        )),
+        "新的任务仍应照常回报失败：{events:?}"
+    );
+    assert!(
+        harness.worker.retry.is_none(),
+        "重登失败后不应保留待重试任务"
+    );
+}
+
 // ── 自動重登上限（避免「重登→重試→再失效」的無上限迴圈）──
 
 /// 「站點持續回報登入態失效」的假站點：資料端點永遠回傳統一認證頁，
@@ -1426,6 +1503,47 @@ fn cancel_login_settles_the_waiting_page() {
             }
         )),
         "取消登录应收敛等待重试的页面"
+    );
+}
+
+/// 切換訪問模式時取消進行中的登入流程。
+///
+/// 流程裡的驅動器配著舊的後端與路線；續用它完成登入會把舊客戶端的 cookie
+/// 與新的訪問方式湊在一起（`SessionManager::set_access_policy` 已作廢登入
+/// 步驟，這裡確認介面上的覆蓋層也會被收斂，而不是留在等待輸入的畫面）。
+#[test]
+fn changing_access_policy_cancels_an_in_flight_login() {
+    let client: Arc<dyn HttpClient> =
+        Arc::new(FakeClient::with_responder(|request: &HttpRequest| {
+            Ok(HttpResponse::new(200, request.url.clone(), "<html></html>"))
+        }));
+    let driver =
+        LoginDriver::new(client, attendance::LOGIN_URL, &"0".repeat(32)).expect("建立登录驱动器");
+
+    let mut harness = harness(|_request: &HttpRequest| panic!("取消登录不应触发网络请求"));
+    harness.worker.flow = Some(LoginFlow {
+        site: SiteKind::Attendance,
+        driver: Box::new(driver),
+        retry: None,
+    });
+
+    harness
+        .dispatch(Job::SetAccessPolicy(AccessPolicy::WebVpn))
+        .expect("切换访问模式应当成功");
+
+    assert!(harness.worker.flow.is_none(), "应丢弃配着旧后端的登录流程");
+    let events = harness.drain_events();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::LoginCancelled)),
+        "应回报取消完成，界面才能关闭登录覆盖层：{events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::AccessPolicyUpdated(AccessPolicy::WebVpn))),
+        "仍要回报访问方式已更新：{events:?}"
     );
 }
 
@@ -3521,6 +3639,7 @@ fn activity_detail_for_material_skips_submission_request() {
     harness
         .dispatch(Job::LoadActivityDetail {
             activity_id: "77".to_owned(),
+            force: false,
         })
         .expect("加载详情");
 
@@ -3551,6 +3670,56 @@ fn activity_detail_for_material_skips_submission_request() {
     );
 }
 
+/// 活動詳情的 `force` 要真的略過快取（介面在詳情層按 `r` 時送出）。
+///
+/// 修復前 `Job::LoadActivityDetail` 沒有 `force` 欄位、`load_activity_detail`
+/// 也硬寫 `false`，因此詳情層的 `r` 只會命中快取、畫面不會更新。
+#[test]
+fn forced_activity_detail_skips_the_cache() {
+    let site = Arc::new(FakeHomeworkSite {
+        seen: Arc::new(Mutex::new(Vec::new())),
+        courses: serde_json::json!({ "courses": [] }),
+        activities: Vec::new(),
+        details: vec![(
+            "77",
+            serde_json::json!({ "id": "77", "type": "material", "title": "课件",
+                "data": { "content": "<div>课程介绍</div>" } }),
+        )],
+        expire_first_submission: false,
+        submissions: AtomicUsize::new(0),
+        attendance_term: None,
+    });
+
+    let system = Arc::clone(&site);
+    let mut harness = harness(move |request| system.handle(request));
+    harness.login_lms_only();
+
+    let detail_requests = || {
+        site.urls()
+            .into_iter()
+            .filter(|url| url.ends_with("/api/activities/77"))
+            .count()
+    };
+    let load = |harness: &mut Harness, force: bool| {
+        harness
+            .dispatch(Job::LoadActivityDetail {
+                activity_id: "77".to_owned(),
+                force,
+            })
+            .expect("加载活动详情");
+        let _ = harness.drain_events();
+    };
+
+    load(&mut harness, false);
+    assert_eq!(detail_requests(), 1, "第一次应查询详情");
+
+    load(&mut harness, false);
+    assert_eq!(detail_requests(), 1, "非强制载入应命中详情快取");
+
+    load(&mut harness, true);
+    assert_eq!(detail_requests(), 2, "强制刷新必须重新查询详情");
+}
+
 #[test]
 fn activity_detail_for_homework_queries_submission_list() {
     let site = Arc::new(FakeHomeworkSite {
@@ -3576,6 +3745,7 @@ fn activity_detail_for_homework_queries_submission_list() {
     harness
         .dispatch(Job::LoadActivityDetail {
             activity_id: "11".to_owned(),
+            force: false,
         })
         .expect("加载详情");
 
@@ -4069,6 +4239,7 @@ fn only_open_activity_is_interactive() {
         },
         Job::LoadActivityDetail {
             activity_id: "1".to_owned(),
+            force: false,
         },
         Job::SetHomeworkTerm {
             term: "2026-2027-1".to_owned(),
@@ -6215,6 +6386,33 @@ fn set_homework_term_notifies_the_course_partition_hint() {
     );
 }
 
+/// 學期選擇寫入失敗時要還原記憶體中的「記住的學期」。
+///
+/// 否則記憶體與檔案不一致：課程分區與學期來源説明會採用一個沒有真的保存
+/// 下來的值，重啟後設定又回到舊學期，畫面上顯示的卻不是。
+#[test]
+fn set_homework_term_keeps_the_previous_term_when_saving_fails() {
+    let mut harness = harness(|_request: &HttpRequest| panic!("选学期不应触发网络请求"));
+    harness.worker.config.homework_term = Some("2025-2026-2".to_owned());
+
+    // 将存档路径指向目录，迫使写入失败。
+    harness.worker.config.save_path = Some(harness._dir.path().to_path_buf());
+    let result = harness.dispatch(Job::SetHomeworkTerm {
+        term: "2026-2027-1".to_owned(),
+    });
+
+    assert!(result.is_err(), "写入失败时应报告错误");
+    assert_eq!(
+        harness.worker.config.homework_term.as_deref(),
+        Some("2025-2026-2"),
+        "写入失败时应保留原学期"
+    );
+    assert!(
+        harness.worker.chosen_term.is_none(),
+        "写入失败时不得记住新选择的学期"
+    );
+}
+
 /// 帳號驗證成功但憑證寫入失敗：必須發出保存失敗事件（介面據此解除表單的
 /// 「處理中」），且原有憑證不得被覆蓋。
 #[cfg(unix)]
@@ -6361,6 +6559,57 @@ fn unlocking_loads_the_encrypted_task_file() {
     );
     let tasks = last_tasks(&events).expect("解锁后应回报任务快照");
     assert_eq!(tasks.len(), 2, "任务文件应在解锁时载入");
+}
+
+/// 設定檔損毀重建的提示只能在解鎖之後送出。
+///
+/// 啟動當下的畫面是協議閱讀門或解鎖表單，兩者都不繪製底欄訊息；進到主畫面
+/// 時 `apply_vault_ready` 又會把訊息覆寫成「凭证已就绪」。修復前提示是在
+/// `Worker::run` 開頭發的，等於永遠看不到（而 `PRIVACY.md` 明文承諾會提示）。
+#[test]
+fn config_rebuild_notice_is_emitted_after_unlock() {
+    let mut harness = harness(fake_flow(0));
+    harness.worker.config.rebuilt = true;
+
+    harness
+        .dispatch(Job::Unlock {
+            passphrase: "secret123".into(),
+        })
+        .expect("解锁");
+    let events = harness.wait_until_unlocked();
+
+    let ready = events
+        .iter()
+        .position(|event| matches!(event, Event::VaultReady))
+        .expect("解锁应回报凭证已就绪");
+    let notice = events
+        .iter()
+        .position(|event| {
+            matches!(event, Event::Notice(message) if message.contains("配置文件已损坏并重建"))
+        })
+        .expect("重建提示应在解锁后送达");
+    assert!(notice > ready, "提示必须晚于 VaultReady 才有底栏可显示");
+    assert!(!harness.worker.config.rebuilt, "提示只发一次");
+}
+
+/// 沒有損毀重建時不應出現提示。
+#[test]
+fn config_rebuild_notice_is_absent_without_a_rebuild() {
+    let mut harness = harness(fake_flow(0));
+
+    harness
+        .dispatch(Job::Unlock {
+            passphrase: "secret123".into(),
+        })
+        .expect("解锁");
+    let events = harness.wait_until_unlocked();
+
+    assert!(
+        !events.iter().any(|event| {
+            matches!(event, Event::Notice(message) if message.contains("配置文件已损坏并重建"))
+        }),
+        "未发生重建时不应出现提示"
+    );
 }
 
 #[test]

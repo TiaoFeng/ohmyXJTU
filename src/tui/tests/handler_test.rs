@@ -8,13 +8,14 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::config::AccessPolicy;
 use crate::domain::activity::ActivityGroup;
 use crate::domain::homework::{HomeworkInput, aggregate};
+use crate::domain::semester::TermCode;
 use crate::domain::todo::{Priority, SortMode, Task};
 use crate::model::{ActivityDetailView, ScheduleData};
 use crate::sites::lms::{ActivityKind, LmsActivity, LmsCourse};
 use crate::task::Job;
 use crate::tui::app::{
     AgreementState, App, FormKind, FormState, HomeworkData, LmsLevel, LoginScreen, NavItem, Page,
-    Screen, SettingsState, TaskConfirmState, TaskEntry, TaskField, TaskFormMode,
+    Screen, SettingsState, TaskConfirmState, TaskEntry, TaskField, TaskFormMode, TermPickerState,
 };
 use crate::tui::controller::FormValues;
 
@@ -287,6 +288,37 @@ fn refresh_keeps_flow_page() {
     assert!(matches!(rx.try_recv(), Ok(Job::LoadFlow { page: 3 })));
 }
 
+/// 連續翻頁：目標頁以「使用者最後選定的頁碼」計算，而不是畫面上的舊頁。
+///
+/// `Page::start_loading` 會保留舊資料，所以載入期間 `ready()` 仍是上一頁；
+/// 拿它計算會讓連按兩次 `n` 都算成同一頁，只前進一頁。
+#[test]
+fn flow_paging_counts_from_the_pending_page() {
+    let (jobs, rx) = channel();
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Attendance;
+    app.attendance = Page::Ready(crate::model::FlowData {
+        records: Vec::new(),
+        page: 1,
+        total_pages: 5,
+        total: 0,
+    });
+
+    press(&mut app, &jobs, KeyCode::Char('n'));
+    assert!(matches!(rx.try_recv(), Ok(Job::LoadFlow { page: 2 })));
+    assert_eq!(app.flow_pending_page, Some(2), "应记下待回的目标页码");
+
+    // 第 2 頁還沒回來就再按一次：應以第 2 頁為基準前進到第 3 頁。
+    press(&mut app, &jobs, KeyCode::Char('n'));
+    assert!(matches!(rx.try_recv(), Ok(Job::LoadFlow { page: 3 })));
+    assert_eq!(app.flow_pending_page, Some(3));
+
+    // 往回一頁同樣以最後選定的頁碼為基準。
+    press(&mut app, &jobs, KeyCode::Char('p'));
+    assert!(matches!(rx.try_recv(), Ok(Job::LoadFlow { page: 2 })));
+}
+
 #[test]
 fn flow_paging_respects_bounds() {
     let (jobs, rx) = channel();
@@ -341,6 +373,32 @@ fn control_p_opens_and_closes_settings() {
         &jobs,
     );
     assert!(matches!(app.screen, Screen::Main));
+}
+
+/// 學期選擇器上的 `^P` 同樣是「開啟帳戶設定」，不是只把彈窗關掉。
+///
+/// 底欄（彈窗開啟時只留登入狀態）不再列出 `^P`，因此按鍵本身的意義必須
+/// 與其他畫面一致；選擇器被設定畫面取代後可用 `s` 重新開啟。
+#[test]
+fn control_p_on_the_term_picker_opens_settings() {
+    let (jobs, _rx) = channel();
+    let mut app = App::new(AccessPolicy::Auto);
+    let options = vec![TermCode::parse("2026-2027-1").expect("学期")];
+    app.term_options = options.clone();
+    app.set_screen(Screen::TermPicker(TermPickerState::new(
+        options,
+        None,
+        "考勤系统不可用".to_owned(),
+    )));
+
+    press_ctrl(&mut app, &jobs, 'p');
+
+    assert!(
+        matches!(app.screen, Screen::Settings(_)),
+        "^P 应开启账户设置：{:?}",
+        app.screen
+    );
+    assert_eq!(app.term_options.len(), 1, "选项应保留以供重新开启");
 }
 
 #[test]
@@ -884,8 +942,6 @@ fn homework_page(course_id: &str, activity_id: &str, submitted: usize) -> Homewo
     };
     HomeworkData {
         term_label: Some("2026-2027 学年 第 1 学期".to_owned()),
-        term_source: Some("考勤系统"),
-        courses_included: 1,
         courses_skipped: 0,
         term_options: Vec::new(),
         items: aggregate(&[input], now),
@@ -944,7 +1000,7 @@ fn enter_on_lms_activities_uses_filtered_selection() {
     press(&mut app, &jobs, KeyCode::Enter);
     assert!(matches!(
         rx.try_recv(),
-        Ok(Job::LoadActivityDetail { activity_id }) if activity_id == "2"
+        Ok(Job::LoadActivityDetail { activity_id, .. }) if activity_id == "2"
     ));
     assert_eq!(app.lms.level, LmsLevel::Detail);
     assert!(app.lms.detail.is_loading(), "应切换到详情加载中");
@@ -1060,7 +1116,7 @@ fn switching_activities_drops_the_previous_detail() {
     press(&mut app, &jobs, KeyCode::Enter);
     assert!(matches!(
         rx.try_recv(),
-        Ok(Job::LoadActivityDetail { activity_id }) if activity_id == "2"
+        Ok(Job::LoadActivityDetail { activity_id, .. }) if activity_id == "2"
     ));
     assert_eq!(app.lms.detail_activity.as_deref(), Some("2"));
     assert!(app.lms.detail.is_loading());
@@ -2238,4 +2294,122 @@ fn tag_suggestions_do_nothing_without_any_tag() {
     );
     assert_eq!(app.task_page.tag_cursor, None);
     assert_eq!(app.message_text(), None, "不应出现任何提示");
+}
+
+/// 主畫面的單鍵操作不接受 Ctrl／Alt 修飾鍵。
+///
+/// 這些按鍵若一併吃組合鍵會造成意外副作用：`Ctrl+O` 會開啟瀏覽器、`Ctrl+R`
+/// 會強制重新查詢、`Ctrl+S` 會開啟學期選擇器、`Ctrl+Q` 會直接結束程式。
+/// 修復前（選取停在作業上）`Ctrl+O` 與 `Ctrl+R` 都會真的送出任務。
+#[test]
+fn control_modified_keys_do_not_trigger_main_screen_shortcuts() {
+    let (jobs, rx) = channel();
+    let mut app = task_page_app();
+    app.term_options = vec![TermCode::parse("2026-2027-1").expect("学期")];
+    // 選取移到作業（索引 1）：修復前 `Ctrl+O` 會為它送出 `OpenActivity`。
+    app.select_next();
+
+    press_ctrl(&mut app, &jobs, 'o');
+    press_ctrl(&mut app, &jobs, 'r');
+    press_ctrl(&mut app, &jobs, 's');
+    press_ctrl(&mut app, &jobs, 'h');
+    press_ctrl(&mut app, &jobs, 'q');
+
+    assert!(rx.try_recv().is_err(), "组合键不应送出任何任务");
+    assert!(!app.quit, "Ctrl+Q 不应退出");
+    assert!(
+        matches!(app.screen, Screen::Main),
+        "Ctrl+S 不应打开学期选择器"
+    );
+    assert_eq!(app.nav, NavItem::Homework, "Ctrl+H 不应切换页面");
+}
+
+/// 設定選單與學期選擇器同樣不接受 Ctrl／Alt 修飾鍵。
+///
+/// 兩者的 `h`／`l`／`j`／`k` 都只綁定單鍵；帶修飾鍵時不該改動訪問模式草稿
+/// （修復前 `Ctrl+L` 會真的把草稿切到下一個模式）或移動學期選取。
+#[test]
+fn control_modified_keys_do_not_adjust_settings_or_the_term_picker() {
+    let (jobs, _rx) = channel();
+
+    // 設定選單：移到「訪問模式」後 `Ctrl+L` 不應改動草稿。
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Settings(SettingsState::open(AccessPolicy::Auto)));
+    press(&mut app, &jobs, KeyCode::Down);
+    press(&mut app, &jobs, KeyCode::Down);
+    press_ctrl(&mut app, &jobs, 'l');
+    let Screen::Settings(state) = app.screen else {
+        panic!("应仍在设定选单");
+    };
+    assert!(
+        !state.policy_dirty(app.access_policy),
+        "Ctrl+L 不应改动访问模式草稿"
+    );
+
+    // 學期選擇器：`Ctrl+J` 不應移動選取。
+    let first = TermCode::parse("2026-2027-1").expect("学期");
+    let second = TermCode::parse("2025-2026-2").expect("学期");
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::TermPicker(TermPickerState::new(
+        vec![first, second],
+        None,
+        "选择要查看的学期".to_owned(),
+    )));
+    press_ctrl(&mut app, &jobs, 'j');
+    let Screen::TermPicker(state) = app.screen else {
+        panic!("应仍在学期选择器");
+    };
+    assert_eq!(state.selected(), Some(first), "Ctrl+J 不应移动学期选择");
+}
+
+/// `r` 在思源學堂依目前層級刷新，不把人彈回課程清單。
+///
+/// 修復前 `request` 無條件 `level = Courses`：在活動層或詳情層按 `r` 會被丟回
+/// 課程清單，`apply_courses` 也因為層級已變成 `Courses` 而走了「目前課程不存在」
+/// 的分支，連選取的課程都重設為第一門。
+#[test]
+fn refresh_on_the_lms_page_keeps_the_current_level() {
+    let (jobs, rx) = channel();
+
+    // 課程層：重新載入課程清單。
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Lms;
+    app.lms.level = LmsLevel::Courses;
+    press(&mut app, &jobs, KeyCode::Char('r'));
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(Job::LoadCourses { force: true })
+    ));
+
+    // 活動層：重載活動，層級與目前課程都不變。
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Lms;
+    app.lms.level = LmsLevel::Activities;
+    app.lms.activities_course = Some("1".to_owned());
+    press(&mut app, &jobs, KeyCode::Char('r'));
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(Job::LoadActivities { course_id, force: true }) if course_id == "1"
+    ));
+    assert_eq!(
+        app.lms.level,
+        LmsLevel::Activities,
+        "活动层刷新应留在活动层"
+    );
+    assert_eq!(app.lms.activities_course.as_deref(), Some("1"));
+
+    // 詳情層：重載詳情，層級不變。
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Lms;
+    app.lms.level = LmsLevel::Detail;
+    app.lms.detail_activity = Some("2".to_owned());
+    press(&mut app, &jobs, KeyCode::Char('r'));
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(Job::LoadActivityDetail { activity_id, force: true }) if activity_id == "2"
+    ));
+    assert_eq!(app.lms.level, LmsLevel::Detail, "详情层刷新应留在详情层");
 }

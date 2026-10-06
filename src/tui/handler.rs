@@ -209,8 +209,14 @@ fn toggle_settings(app: &mut App) {
         return;
     }
     match app.screen {
-        Screen::Settings(_) | Screen::TermPicker(_) => app.set_screen(Screen::Main),
-        Screen::Main => app.set_screen(Screen::Settings(SettingsState::open(app.access_policy))),
+        // 設定彈窗已開啟：`^P` 關閉它（相當於 esc）。
+        Screen::Settings(_) => app.set_screen(Screen::Main),
+        // 學期選擇器上的 `^P` 是「開啟帳戶設定」，與其他畫面一致；選擇器是
+        // 彈窗，被設定畫面取代後可用 `s` 重新開啟（選項記在 `term_options`）。
+        // 設定表單與其他彈窗不動：不丟掉進行中的輸入。
+        Screen::Main | Screen::TermPicker(_) => {
+            app.set_screen(Screen::Settings(SettingsState::open(app.access_policy)));
+        }
         _ => {}
     }
 }
@@ -447,6 +453,10 @@ fn open_credentials_form(app: &mut App, site: SiteKind) {
 // ── 帳戶設定 ─────────────────────────────────────────
 
 fn handle_settings(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
+    // 選單只綁定未修飾的按鍵：`Ctrl+H`／`Ctrl+L` 之類不該調整訪問模式草稿。
+    if has_command_modifier(&key) {
+        return;
+    }
     let Screen::Settings(mut state) = app.screen else {
         return;
     };
@@ -501,6 +511,10 @@ fn handle_settings(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
 
 /// 學期選擇器（作業頁）：上下選擇、enter 確認、esc 取消。
 fn handle_term_picker(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
+    // 同上：`Ctrl+K`／`Ctrl+J` 不該移動選取。
+    if has_command_modifier(&key) {
+        return;
+    }
     let Screen::TermPicker(state) = &mut app.screen else {
         return;
     };
@@ -520,6 +534,17 @@ fn handle_term_picker(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
         }
         _ => {}
     }
+}
+
+/// 是否帶 Ctrl／Alt 修飾鍵。
+///
+/// 各畫面綁定的單鍵操作（`o` 開網頁、`r` 刷新、`h`／`l` 換頁、`j`／`k` 移動…）
+/// 都是未修飾的按鍵；組合鍵若一併觸發會造成意外副作用（`Ctrl+O` 會開啟瀏覽器，
+/// `Ctrl+R` 會強制重新查詢）。需要組合鍵的畫面（任務頁的 `^A` 等與任務表單的
+/// `^S`）在各自的處理函式裡先行攔截，不經過這道守衛。
+fn has_command_modifier(key: &KeyEvent) -> bool {
+    key.modifiers
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
 }
 
 /// 是否為帶 Ctrl 的指定字元（`^D` 之類的組合鍵）。
@@ -556,6 +581,9 @@ fn move_menu_index(app: &mut App, delta: i32, len: usize) {
 
 /// 任務設置彈窗（`^T`）：多選與刪除已完成。
 fn handle_task_menu(app: &mut App, key: KeyEvent) {
+    if has_command_modifier(&key) {
+        return;
+    }
     match key.code {
         KeyCode::Up | KeyCode::Char('k') => move_menu_index(app, -1, TaskMenuKind::ALL.len()),
         KeyCode::Down | KeyCode::Char('j') => move_menu_index(app, 1, TaskMenuKind::ALL.len()),
@@ -594,6 +622,9 @@ fn handle_task_menu(app: &mut App, key: KeyEvent) {
 
 /// 多選後的批量操作選單。
 fn handle_task_batch_menu(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
+    if has_command_modifier(&key) {
+        return;
+    }
     match key.code {
         KeyCode::Up | KeyCode::Char('k') => move_menu_index(app, -1, TaskBatchOp::ALL.len()),
         KeyCode::Down | KeyCode::Char('j') => move_menu_index(app, 1, TaskBatchOp::ALL.len()),
@@ -804,6 +835,12 @@ fn handle_main(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
             }
             _ => {}
         }
+    }
+    // 其餘組合鍵一律忽略：以下都是主畫面的單鍵操作（`o` 開網頁、`r` 刷新、
+    // `s` 選學期、`n`／`p` 翻頁、`h`／`l`／`j`／`k` 移動…），帶 Ctrl／Alt 的
+    // 誤觸會造成意外副作用（`Ctrl+O` 會開啟瀏覽器）。
+    if has_command_modifier(&key) {
+        return;
     }
     match key.code {
         KeyCode::Char('q') => app.quit = true,

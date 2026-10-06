@@ -48,6 +48,29 @@ fn parses_week_ranges() {
     );
 }
 
+/// 單值週次與 0 同樣受範圍限制。
+///
+/// 上限決定 `max_week`（使用者能翻到第幾週）；原本只有區間分支受限，異常的
+/// 單值會把可翻週次撐到任意大，每次翻頁還會對荒謬的日期範圍查考勤。
+#[test]
+fn single_weeks_respect_the_same_bounds() {
+    assert_eq!(
+        parse_weeks("5,99999").iter().copied().collect::<Vec<_>>(),
+        vec![5]
+    );
+    assert!(parse_weeks("99999").is_empty());
+    assert_eq!(
+        parse_weeks("60,61").iter().copied().collect::<Vec<_>>(),
+        vec![60]
+    );
+    // 週次從 1 起算：0 不是有效週次（課表反而永遠不會顯示這門課）。
+    assert!(parse_weeks("0").is_empty());
+    assert_eq!(
+        parse_weeks("0-2").iter().copied().collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+}
+
 #[test]
 fn merges_multi_segment_weeks_for_same_slot() {
     let slots = merge_courses(&[

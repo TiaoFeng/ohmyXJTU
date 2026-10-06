@@ -179,6 +179,46 @@ fn reset_session_rebuilds_both_backends_and_clears_state() {
     );
 }
 
+/// 切換訪問模式必須作廢進行中的登入步驟。
+///
+/// 登入步驟是配着當時解析出來的訪問方式與後端建立的；切換策略後路線與後端
+/// 都可能不同，續用舊驅動器完成登入會把「舊後端的 cookie」與「新的訪問方式」
+/// 湊在一起（比對 `reset_state` 有清 `pending`、而這裡原本沒清）。
+#[test]
+fn changing_access_policy_drops_the_in_flight_login_step() {
+    let (mut manager, _, _) = manager_with(AccessPolicy::Direct, |_| {
+        Ok(HttpResponse::new(
+            200,
+            "https://lms.xjtu.edu.cn/user/index",
+            LOGIN_PAGE.as_bytes(),
+        ))
+    });
+
+    let LoginStage::Drive(driver) = manager
+        .next_login_step(SiteKind::Lms)
+        .expect("取得登录步骤")
+    else {
+        panic!("尚未登录时应有下一步");
+    };
+
+    manager.set_access_policy(AccessPolicy::WebVpn);
+
+    assert!(
+        manager.complete_login_step(SiteKind::Lms, &driver).is_err(),
+        "切换访问模式后不得沿用旧的登录步骤"
+    );
+    assert!(!manager.is_logged_in(SiteKind::Lms));
+    assert!(
+        matches!(
+            manager
+                .next_login_step(SiteKind::Lms)
+                .expect("重新取得登录步骤"),
+            LoginStage::Drive(_)
+        ),
+        "重新登入必须重新驱动流程"
+    );
+}
+
 #[test]
 fn direct_policy_never_probes_campus_network() {
     let (mut manager, direct, _) = manager_with(AccessPolicy::Direct, |_| {

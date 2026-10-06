@@ -210,8 +210,15 @@ impl Worker {
     pub(super) fn set_homework_term(&mut self, term: &str) -> AppResult<()> {
         let term = TermCode::parse(term)
             .ok_or_else(|| AppError::protocol(format!("学期格式无法识别：{term}")))?;
+        // 寫入失敗時保留原設定：否則記憶體中的「記住的學期」會與檔案不一致，
+        // 課程分區與學期來源説明都會採用一個沒有真的保存下來的值（作法與
+        // `set_access_policy`／`accept_agreement` 的 `previous` 回滾一致）。
+        let previous = self.config.homework_term.clone();
         self.config.homework_term = Some(term.to_string());
-        self.config.save()?;
+        if let Err(err) = self.config.save() {
+            self.config.homework_term = previous;
+            return Err(err);
+        }
         // 本次明確選擇：接下來的載入以它為準，不再被考勤的當前學期蓋過。
         self.chosen_term = Some(term);
         // 課程清單的分區以「當前學期」為準：學期改了要同步給介面，否則作業

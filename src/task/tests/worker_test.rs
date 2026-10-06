@@ -6386,6 +6386,33 @@ fn set_homework_term_notifies_the_course_partition_hint() {
     );
 }
 
+/// 學期選擇寫入失敗時要還原記憶體中的「記住的學期」。
+///
+/// 否則記憶體與檔案不一致：課程分區與學期來源説明會採用一個沒有真的保存
+/// 下來的值，重啟後設定又回到舊學期，畫面上顯示的卻不是。
+#[test]
+fn set_homework_term_keeps_the_previous_term_when_saving_fails() {
+    let mut harness = harness(|_request: &HttpRequest| panic!("选学期不应触发网络请求"));
+    harness.worker.config.homework_term = Some("2025-2026-2".to_owned());
+
+    // 将存档路径指向目录，迫使写入失败。
+    harness.worker.config.save_path = Some(harness._dir.path().to_path_buf());
+    let result = harness.dispatch(Job::SetHomeworkTerm {
+        term: "2026-2027-1".to_owned(),
+    });
+
+    assert!(result.is_err(), "写入失败时应报告错误");
+    assert_eq!(
+        harness.worker.config.homework_term.as_deref(),
+        Some("2025-2026-2"),
+        "写入失败时应保留原学期"
+    );
+    assert!(
+        harness.worker.chosen_term.is_none(),
+        "写入失败时不得记住新选择的学期"
+    );
+}
+
 /// 帳號驗證成功但憑證寫入失敗：必須發出保存失敗事件（介面據此解除表單的
 /// 「處理中」），且原有憑證不得被覆蓋。
 #[cfg(unix)]

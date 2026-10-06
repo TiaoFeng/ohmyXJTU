@@ -2481,6 +2481,45 @@ fn footer_keeps_page_hints_on_narrow_terminals() {
     assert!(!footer.contains('…'), "全部显示时不应有省略号：{footer:?}");
 }
 
+/// 彈窗接管按鍵時，底欄只留登入狀態。
+///
+/// 各彈窗自己畫按鍵提示（見 `views::settings`／`term_picker`／`task_form`／
+/// `task_menu` 的 `hint_line`）；底欄再列一次主畫面的操作，只會顯示當下按不到
+/// 的鍵（例如任務表單開啟時的「^P 账户设置」）。
+#[test]
+fn footer_lists_only_the_session_label_while_a_popup_is_open() {
+    let popups = [
+        Screen::TaskForm(Box::new(TaskFormState::add())),
+        Screen::Settings(SettingsState::open(AccessPolicy::Auto)),
+        Screen::TermPicker(TermPickerState::new(
+            vec![TermCode::parse("2026-2027-1").expect("学期")],
+            None,
+            "考勤系统不可用".to_owned(),
+        )),
+    ];
+
+    for screen in popups {
+        let mut app = App::new(AccessPolicy::Auto);
+        app.set_screen(screen);
+        let terminal = draw(200, HEIGHT, |frame| {
+            crate::tui::views::draw(frame, &mut app)
+        });
+        let footer = row_text(terminal.backend(), HEIGHT - 1);
+        assert!(
+            footer.contains("[未登录 自动]"),
+            "应保留登录状态：{footer:?}"
+        );
+        assert!(
+            !footer.contains("^P 账户设置"),
+            "弹窗开启时不得列出主画面按键：{footer:?}"
+        );
+        assert!(
+            !footer.contains("q 退出"),
+            "弹窗开启时不得列出主画面操作：{footer:?}"
+        );
+    }
+}
+
 /// 思源學堂活動詳情顯示說明，且長說明可捲動。
 #[test]
 fn activity_detail_shows_description_and_scrolls() {

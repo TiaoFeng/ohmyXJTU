@@ -209,8 +209,14 @@ fn toggle_settings(app: &mut App) {
         return;
     }
     match app.screen {
-        Screen::Settings(_) | Screen::TermPicker(_) => app.set_screen(Screen::Main),
-        Screen::Main => app.set_screen(Screen::Settings(SettingsState::open(app.access_policy))),
+        // 設定彈窗已開啟：`^P` 關閉它（相當於 esc）。
+        Screen::Settings(_) => app.set_screen(Screen::Main),
+        // 學期選擇器上的 `^P` 是「開啟帳戶設定」，與其他畫面一致；選擇器是
+        // 彈窗，被設定畫面取代後可用 `s` 重新開啟（選項記在 `term_options`）。
+        // 設定表單與其他彈窗不動：不丟掉進行中的輸入。
+        Screen::Main | Screen::TermPicker(_) => {
+            app.set_screen(Screen::Settings(SettingsState::open(app.access_policy)));
+        }
         _ => {}
     }
 }

@@ -8,13 +8,14 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::config::AccessPolicy;
 use crate::domain::activity::ActivityGroup;
 use crate::domain::homework::{HomeworkInput, aggregate};
+use crate::domain::semester::TermCode;
 use crate::domain::todo::{Priority, SortMode, Task};
 use crate::model::{ActivityDetailView, ScheduleData};
 use crate::sites::lms::{ActivityKind, LmsActivity, LmsCourse};
 use crate::task::Job;
 use crate::tui::app::{
     AgreementState, App, FormKind, FormState, HomeworkData, LmsLevel, LoginScreen, NavItem, Page,
-    Screen, SettingsState, TaskConfirmState, TaskEntry, TaskField, TaskFormMode,
+    Screen, SettingsState, TaskConfirmState, TaskEntry, TaskField, TaskFormMode, TermPickerState,
 };
 use crate::tui::controller::FormValues;
 
@@ -372,6 +373,32 @@ fn control_p_opens_and_closes_settings() {
         &jobs,
     );
     assert!(matches!(app.screen, Screen::Main));
+}
+
+/// 學期選擇器上的 `^P` 同樣是「開啟帳戶設定」，不是只把彈窗關掉。
+///
+/// 底欄（彈窗開啟時只留登入狀態）不再列出 `^P`，因此按鍵本身的意義必須
+/// 與其他畫面一致；選擇器被設定畫面取代後可用 `s` 重新開啟。
+#[test]
+fn control_p_on_the_term_picker_opens_settings() {
+    let (jobs, _rx) = channel();
+    let mut app = App::new(AccessPolicy::Auto);
+    let options = vec![TermCode::parse("2026-2027-1").expect("学期")];
+    app.term_options = options.clone();
+    app.set_screen(Screen::TermPicker(TermPickerState::new(
+        options,
+        None,
+        "考勤系统不可用".to_owned(),
+    )));
+
+    press_ctrl(&mut app, &jobs, 'p');
+
+    assert!(
+        matches!(app.screen, Screen::Settings(_)),
+        "^P 应开启账户设置：{:?}",
+        app.screen
+    );
+    assert_eq!(app.term_options.len(), 1, "选项应保留以供重新开启");
 }
 
 #[test]

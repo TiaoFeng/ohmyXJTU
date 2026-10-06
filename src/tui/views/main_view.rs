@@ -150,6 +150,12 @@ fn hints(app: &App, width: u16) -> String {
         segments.push(SORT_HINT.to_owned());
         return fit_hints(&segments, width);
     }
+    // 彈窗接管按鍵時只留登入狀態：各彈窗自己畫按鍵提示（見 `settings`／
+    // `term_picker`／`task_form`／`task_menu` 的 `hint_line`），底欄再列一次
+    // 主畫面的操作只會顯示當下按不到的鍵（例如表單開啟時的「^P 账户设置」）。
+    if popup_owns_keys(&app.screen) {
+        return fit_hints(&segments, width);
+    }
     if scrollable_panel(app) {
         segments.push(SCROLL_HINT.to_owned());
     }
@@ -165,6 +171,23 @@ fn hints(app: &App, width: u16) -> String {
         .map(str::to_owned),
     );
     fit_hints(&segments, width)
+}
+
+/// 彈窗是否接管按鍵（此時底欄不再列出主畫面的操作）。
+///
+/// 這些畫面的按鍵提示由彈窗自己繪製；設定表單、登入表單等「非主畫面」也
+/// 同樣不屬於主畫面。
+fn popup_owns_keys(screen: &Screen) -> bool {
+    matches!(
+        screen,
+        Screen::Settings(_)
+            | Screen::SettingsForm(_)
+            | Screen::TermPicker(_)
+            | Screen::TaskMenu(_)
+            | Screen::TaskBatchMenu(_)
+            | Screen::TaskConfirm(_)
+            | Screen::TaskForm(_)
+    )
 }
 
 /// 目前畫面上的詳情面板是否可捲動（決定是否提示 `PgUp/PgDn`）。

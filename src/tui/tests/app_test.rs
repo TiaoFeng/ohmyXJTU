@@ -603,3 +603,16 @@ fn sorted_entries_follow_the_selection_and_keep_filtering() {
         "清單變短後越界的索引不應指向別的項目"
     );
 }
+
+/// 暫時訊息一律清理：控制字元移除、連續空白折疊、過長截斷。
+#[test]
+fn set_message_cleans_and_bounds_the_text() {
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_message("查询失败\u{1b}[31m \n\n 请重试 ");
+    assert_eq!(app.message_text(), Some("查询失败[31m 请重试"));
+
+    app.set_message("x".repeat(500));
+    let text = app.message_text().expect("应有訊息");
+    assert_eq!(text.chars().count(), crate::text::MAX_INLINE_CHARS);
+    assert!(text.ends_with('…'), "截断应加省略号：{text}");
+}

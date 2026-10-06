@@ -8,6 +8,7 @@
 
 use crate::error::{AppError, AppResult};
 use crate::http::HttpResponse;
+use crate::text::{MAX_INLINE_CHARS, sanitize_inline};
 
 /// 解開 `{code, message, data}` 外殼，回傳 `data` 的值。
 ///
@@ -29,9 +30,11 @@ pub fn split_envelope(response: &HttpResponse, context: &str) -> AppResult<serde
                 .get("message")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("未知错误");
+            // 伺服器訊息直接進入介面（通知列、作業狀態文字）：先清理控制字元
+            // 並限制長度，不讓異常回應污染畫面。
             Err(AppError::Server {
                 code,
-                message: format!("{context}：{message}"),
+                message: format!("{context}：{}", sanitize_inline(message, MAX_INLINE_CHARS)),
             })
         }
     }

@@ -187,6 +187,56 @@ fn trim_ascii_start(text: &str) -> &str {
     text.trim_start_matches(|character: char| character.is_ascii_whitespace())
 }
 
+/// 使用者可見的單行訊息長度上限（以字元數計）。
+///
+/// 底部提示列只顯示一行，過長的訊息沒有意義（還會被終端裁掉），而伺服器可以
+/// 回傳任意長度的錯誤文字。
+pub const MAX_INLINE_CHARS: usize = 160;
+
+/// 清理要顯示在單行的文字：移除控制字元、折疊連續空白、去頭尾空白，
+/// 超過 `max_chars` 時截斷並以「…」結尾。
+///
+/// 控制字元在終端上不會顯示成排版，卻可能被終端解讀為控制序列。本專案的畫面
+/// 文字一律經 ratatui 寫入，框架本身已丟棄含控制字元的字素（`styled_graphemes`
+/// 與 `Buffer::set_stringn` 都有過濾）；這裡仍主動清理，讓同一段文字在離開
+/// 繪製層（例如寫到 stderr、寫進紀錄）時也安全，並一併限制長度。
+///
+/// 與 [`wrap_display`] 相同，只有 ASCII 空白會被折疊：全形空格等非 ASCII 空白
+/// 是排版內容，原樣保留。
+pub fn sanitize_inline(text: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+
+    let mut cleaned = String::with_capacity(text.len().min(max_chars));
+    let mut pending_space = false;
+    for character in text.chars() {
+        if character.is_ascii_whitespace() {
+            pending_space = !cleaned.is_empty();
+            continue;
+        }
+        if character.is_control() {
+            continue;
+        }
+        if pending_space {
+            cleaned.push(' ');
+            pending_space = false;
+        }
+        cleaned.push(character);
+    }
+
+    if cleaned.chars().count() > max_chars {
+        let keep = max_chars - 1;
+        let end = cleaned
+            .char_indices()
+            .nth(keep)
+            .map_or(cleaned.len(), |(index, _)| index);
+        cleaned.truncate(end);
+        cleaned.push('…');
+    }
+    cleaned
+}
+
 #[cfg(test)]
 #[path = "tests/text_test.rs"]
 mod text_test;

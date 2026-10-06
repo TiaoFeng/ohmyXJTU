@@ -2,6 +2,50 @@
 
 use super::*;
 
+/// 清理單行文字：控制字元移除、空白折疊、長度受限。
+#[test]
+fn sanitizes_inline_text() {
+    // 控制字元（含 ESC 逃脫序列）一律移除。
+    assert_eq!(
+        sanitize_inline("\u{1b}[31m错误\u{1b}[0m\u{7}", MAX_INLINE_CHARS),
+        "[31m错误[0m"
+    );
+    // ASCII 空白折疊成單一空格，並去掉頭尾。
+    assert_eq!(
+        sanitize_inline("  查询  失败 \t\n 请重试 ", MAX_INLINE_CHARS),
+        "查询 失败 请重试"
+    );
+    // 非 ASCII 空白（全形空格）是排版內容，原樣保留。
+    assert_eq!(
+        sanitize_inline("标题\u{3000}\u{3000}值", MAX_INLINE_CHARS),
+        "标题\u{3000}\u{3000}值"
+    );
+    // 一般中文字串不變。
+    assert_eq!(
+        sanitize_inline("验证码错误", MAX_INLINE_CHARS),
+        "验证码错误"
+    );
+    // 空字串與全空白。
+    assert_eq!(sanitize_inline("", MAX_INLINE_CHARS), "");
+    assert_eq!(sanitize_inline("   \t\n ", MAX_INLINE_CHARS), "");
+}
+
+/// 超過上限時以「…」結尾，且不切出半個字元。
+#[test]
+fn sanitize_truncates_with_ellipsis() {
+    let long = "说明".repeat(100);
+    let cleaned = sanitize_inline(&long, 10);
+    assert_eq!(cleaned, "说明说明说明说明说…");
+    assert_eq!(cleaned.chars().count(), 10);
+    assert_eq!(sanitize_inline("abc", 3), "abc", "剛好等於上限不截斷");
+    assert_eq!(sanitize_inline("abcd", 3), "ab…");
+    assert_eq!(sanitize_inline("abcd", 0), "", "上限 0 回空字串");
+
+    // 截斷長度以**清理後**的文字計算：控制字元不佔額度。
+    let noisy = format!("{}\u{1b}", "a".repeat(20));
+    assert_eq!(sanitize_inline(&noisy, 5), "aaaa…");
+}
+
 #[test]
 fn measures_display_width() {
     assert_eq!(display_width("abc"), 3);

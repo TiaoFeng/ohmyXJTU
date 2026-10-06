@@ -6481,6 +6481,57 @@ fn unlocking_loads_the_encrypted_task_file() {
     assert_eq!(tasks.len(), 2, "任务文件应在解锁时载入");
 }
 
+/// 設定檔損毀重建的提示只能在解鎖之後送出。
+///
+/// 啟動當下的畫面是協議閱讀門或解鎖表單，兩者都不繪製底欄訊息；進到主畫面
+/// 時 `apply_vault_ready` 又會把訊息覆寫成「凭证已就绪」。修復前提示是在
+/// `Worker::run` 開頭發的，等於永遠看不到（而 `PRIVACY.md` 明文承諾會提示）。
+#[test]
+fn config_rebuild_notice_is_emitted_after_unlock() {
+    let mut harness = harness(fake_flow(0));
+    harness.worker.config.rebuilt = true;
+
+    harness
+        .dispatch(Job::Unlock {
+            passphrase: "secret123".into(),
+        })
+        .expect("解锁");
+    let events = harness.wait_until_unlocked();
+
+    let ready = events
+        .iter()
+        .position(|event| matches!(event, Event::VaultReady))
+        .expect("解锁应回报凭证已就绪");
+    let notice = events
+        .iter()
+        .position(|event| {
+            matches!(event, Event::Notice(message) if message.contains("配置文件已损坏并重建"))
+        })
+        .expect("重建提示应在解锁后送达");
+    assert!(notice > ready, "提示必须晚于 VaultReady 才有底栏可显示");
+    assert!(!harness.worker.config.rebuilt, "提示只发一次");
+}
+
+/// 沒有損毀重建時不應出現提示。
+#[test]
+fn config_rebuild_notice_is_absent_without_a_rebuild() {
+    let mut harness = harness(fake_flow(0));
+
+    harness
+        .dispatch(Job::Unlock {
+            passphrase: "secret123".into(),
+        })
+        .expect("解锁");
+    let events = harness.wait_until_unlocked();
+
+    assert!(
+        !events.iter().any(|event| {
+            matches!(event, Event::Notice(message) if message.contains("配置文件已损坏并重建"))
+        }),
+        "未发生重建时不应出现提示"
+    );
+}
+
 #[test]
 fn task_operations_report_snapshots_and_notices() {
     let mut harness = harness(fake_flow(0));

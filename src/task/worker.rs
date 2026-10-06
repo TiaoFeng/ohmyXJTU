@@ -317,12 +317,6 @@ pub(crate) fn spawn_with_tasks(
 
 impl Worker {
     fn run(&mut self) {
-        // 設定檔在啟動時損毁重建：提醒使用者協議同意與記住的學期已重設。
-        if self.config.rebuilt {
-            self.emit(Event::Notice(
-                "配置文件已损坏并重建：已同意的协议与记住的学期已重置".to_owned(),
-            ));
-        }
         loop {
             // 資料載入中途收到結束指令：立即停止（排隊中的任務一併丟棄）。
             if self.shutdown {

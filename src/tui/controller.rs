@@ -156,7 +156,6 @@ pub(super) fn activate(app: &mut App, jobs: &Sender<Job>) {
                     };
                     (activity.id.clone(), activity.kind())
                 };
-                app.lms.activity_index = selected;
                 // 同理：換活動時不得沿用上一個活動的詳情。
                 let note = detail_loading_note(Some(kind));
                 if app.lms.detail_activity.as_deref() == Some(activity_id.as_str()) {

@@ -210,8 +210,6 @@ pub struct LmsState {
     pub detail_scroll: ScrollState,
     /// 選取的課程索引。
     pub course_index: usize,
-    /// 選取的活動索引（相對於目前分組過濾後的清單）。
-    pub activity_index: usize,
     /// 活動列表目前顯示的分組。
     pub activity_group: ActivityGroup,
     /// 課程列表的當前學期（供分區顯示；`None` 表示無法判定）。
@@ -225,10 +223,6 @@ pub struct LmsState {
 pub struct HomeworkData {
     /// 學期標籤。
     pub term_label: Option<String>,
-    /// 學期判定來源標籤。
-    pub term_source: Option<&'static str>,
-    /// 納入查詢的課程數。
-    pub courses_included: usize,
     /// 缺少學期資訊而未納入的課程數。
     pub courses_skipped: usize,
     /// 可選學期（供選擇器使用）。
@@ -1203,8 +1197,6 @@ pub struct App {
     pub access_policy: AccessPolicy,
     /// 各站點目前的登入狀態（站點 → 實際訪問方式）。
     pub site_modes: HashMap<SiteKind, AccessMode>,
-    /// 驗證碼圖片路徑（顯示於狀態列）。
-    pub captcha_path: Option<PathBuf>,
     /// 等待主迴圈以系統瀏覽器開啟的網址。
     pub pending_open: Option<String>,
     /// 暫時訊息（自動過期）。
@@ -1259,7 +1251,6 @@ impl App {
             lms: LmsState::default(),
             access_policy,
             site_modes: HashMap::new(),
-            captcha_path: None,
             pending_open: None,
             message: None,
             quit: false,

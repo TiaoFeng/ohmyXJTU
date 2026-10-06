@@ -214,6 +214,9 @@ impl TextArea {
     }
 
     /// 內容是否為空（所有行皆空）。
+    ///
+    /// 僅供測試斷言：儲存前由呼叫端 `trim()` 後自行判斷，不走這裡。
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.lines.iter().all(InputLine::is_empty)
     }

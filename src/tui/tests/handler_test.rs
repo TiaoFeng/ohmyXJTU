@@ -942,8 +942,6 @@ fn homework_page(course_id: &str, activity_id: &str, submitted: usize) -> Homewo
     };
     HomeworkData {
         term_label: Some("2026-2027 学年 第 1 学期".to_owned()),
-        term_source: Some("考勤系统"),
-        courses_included: 1,
         courses_skipped: 0,
         term_options: Vec::new(),
         items: aggregate(&[input], now),

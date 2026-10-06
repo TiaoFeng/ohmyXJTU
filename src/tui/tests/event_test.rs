@@ -383,12 +383,12 @@ fn captcha_event_resets_input_but_keeps_error() {
         Event::LoginNeedsCaptcha(PathBuf::from("/tmp/captcha-1.png")),
     );
     assert!(
-        matches!(app.login.as_deref(), Some(LoginScreen::Captcha { .. })),
-        "应显示验证码覆盖层"
-    );
-    assert_eq!(
-        app.captcha_path.as_deref(),
-        Some(std::path::Path::new("/tmp/captcha-1.png"))
+        matches!(
+            app.login.as_deref(),
+            Some(LoginScreen::Captcha { path, .. })
+                if path == std::path::Path::new("/tmp/captcha-1.png")
+        ),
+        "应显示验证码覆盖层并带上图片路径"
     );
 
     if let Some(LoginScreen::Captcha { input, error, .. }) = app.login.as_deref_mut() {
@@ -1261,8 +1261,6 @@ fn loading_cancelled_settles_page_without_losing_partial_data() {
         note: "正在汇总作业（已完成 1/2 门课程，累计 0 项）…".to_owned(),
         stale: Some(HomeworkData {
             term_label: None,
-            term_source: None,
-            courses_included: 2,
             courses_skipped: 0,
             term_options: Vec::new(),
             items: Vec::new(),
@@ -1749,7 +1747,6 @@ fn dismissed_login_overlay_ignores_late_login_events_until_cancelled() {
         Event::LoginNeedsCaptcha(PathBuf::from("/tmp/captcha-late.png")),
     );
     assert!(app.login.is_none(), "取消中的迟到验证码事件不得重开覆盖层");
-    assert!(app.captcha_path.is_none(), "被忽略的验证码不应残留路径");
 
     // 取消完成：清除等待狀態。
     apply_event(&mut app, Event::LoginCancelled);
@@ -1910,8 +1907,6 @@ fn homework_event_anchors_the_selection_by_activity_id() {
     app.nav = NavItem::Homework;
     app.homework = Page::Ready(HomeworkData {
         term_label: Some("2026-2027 学年 第 1 学期".to_owned()),
-        term_source: Some("考勤系统"),
-        courses_included: 1,
         courses_skipped: 0,
         term_options: Vec::new(),
         items: homework_items(&[("a", "甲")]),
@@ -1962,8 +1957,6 @@ fn tasks_event_anchors_the_selection_under_mixed_sort() {
     app.task_page.tasks = vec![low, high];
     app.homework = Page::Ready(HomeworkData {
         term_label: None,
-        term_source: None,
-        courses_included: 1,
         courses_skipped: 0,
         term_options: Vec::new(),
         items: homework_items(&[("a", "第一次作业")]),

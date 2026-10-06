@@ -130,7 +130,6 @@ fn apply_needs_captcha(app: &mut App, path: PathBuf) {
     if app.login_cancel_pending {
         return;
     }
-    app.captcha_path = Some(path.clone());
     let previous_error = match app.login.as_deref() {
         Some(LoginScreen::Captcha { error, .. }) => error.clone(),
         _ => None,
@@ -302,8 +301,6 @@ fn apply_homework(app: &mut App, update: HomeworkUpdate) {
         .count();
     let data = HomeworkData {
         term_label: update.term_label,
-        term_source: update.term_source.map(|source| source.label()),
-        courses_included: update.courses_included,
         courses_skipped: update.courses_skipped,
         term_options: update.term_options,
         items: update.items,

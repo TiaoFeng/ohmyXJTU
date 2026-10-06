@@ -329,8 +329,6 @@ fn draws_homework_groups_and_switches_them() {
     app.nav = NavItem::Homework;
     app.homework = Page::Ready(HomeworkData {
         term_label: Some("2026-2027 学年 第 1 学期".to_owned()),
-        term_source: Some("考勤系统"),
-        courses_included: 2,
         courses_skipped: 1,
         term_options: Vec::new(),
         items,
@@ -435,8 +433,6 @@ fn draws_homework_unknown_warning_with_reason() {
     app.nav = NavItem::Homework;
     app.homework = Page::Ready(HomeworkData {
         term_label: Some("2026-2027 学年 第 1 学期".to_owned()),
-        term_source: Some("考勤系统"),
-        courses_included: 1,
         courses_skipped: 0,
         term_options: Vec::new(),
         items,
@@ -781,8 +777,6 @@ fn flow_rows_degrade_on_narrow_terminal() {
 fn homework_data(items: Vec<HomeworkItem>, progress: Option<(usize, usize)>) -> HomeworkData {
     HomeworkData {
         term_label: Some("2026-2027 学年 第 1 学期".to_owned()),
-        term_source: Some("考勤系统"),
-        courses_included: 2,
         courses_skipped: 0,
         term_options: Vec::new(),
         items,

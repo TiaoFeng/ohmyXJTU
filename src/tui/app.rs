@@ -16,6 +16,7 @@ use crate::model::{ActivityDetailView, FlowData, ScheduleData};
 use crate::session::{AccessMode, SiteKind};
 use crate::sites::lms::{LmsActivity, LmsCourse};
 use crate::task::{FailedTarget, HomeworkIssue};
+use crate::text::{MAX_INLINE_CHARS, sanitize_inline};
 use crate::tui::text::{InputLine, TextArea};
 
 /// 訊息保留時間。
@@ -1708,8 +1709,13 @@ impl App {
     }
 
     /// 顯示暫時訊息。
+    ///
+    /// 訊息可能內插伺服器回傳的文字（例如「…：{err}」）：一律經
+    /// [`sanitize_inline`] 清理並限制長度，避免控制字元或超長文字進入畫面。
     pub fn set_message(&mut self, message: impl Into<String>) {
-        self.message = Some((message.into(), Instant::now()));
+        let message: String = message.into();
+        let message = sanitize_inline(&message, MAX_INLINE_CHARS);
+        self.message = Some((message, Instant::now()));
     }
 
     /// 清除暫時訊息。

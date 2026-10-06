@@ -100,6 +100,18 @@ pub enum AppError {
         host: String,
     },
 
+    /// 準備以系統瀏覽器開啟的網址不在允許範圍（非校內主機，或未使用 https）。
+    ///
+    /// 訊息只含主機名：網址本身可能帶有存取 token（例如思源學堂的播放地址），
+    /// 不得寫進任何使用者可見的文字或紀錄。
+    #[error("已阻止打开该网址（{reason}）：{host}")]
+    UntrustedUrl {
+        /// 目標主機名（不含路徑與查詢參數）。
+        host: String,
+        /// 拒絕原因（不含網址本身）。
+        reason: &'static str,
+    },
+
     /// 登入態已失效，需要重新登入。
     #[error("登录状态已失效，请重新登录")]
     SessionExpired,
@@ -173,6 +185,19 @@ impl AppError {
     /// 建立設定錯誤。
     pub fn config(message: impl Into<String>) -> Self {
         Self::Config(message.into())
+    }
+
+    /// 建立「網址被拒絕開啟」錯誤（主機名為空時以佔位字串呈現）。
+    ///
+    /// 只接受主機名與原因，不接受完整網址——避免呼叫端失手把帶 token 的
+    /// 網址寫進使用者可見的訊息。
+    pub fn untrusted_url(host: &str, reason: &'static str) -> Self {
+        let host = if host.is_empty() {
+            "（无主机名）".to_owned()
+        } else {
+            host.to_owned()
+        };
+        Self::UntrustedUrl { host, reason }
     }
 
     /// 是否屬於「需要重新登入」類錯誤。

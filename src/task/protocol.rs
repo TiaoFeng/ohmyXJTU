@@ -84,6 +84,16 @@ pub enum Job {
         /// 加密口令。
         passphrase: Secret,
     },
+    /// 解鎖後在背景預熱：登入兩個站點，再預載四個頁面的資料。
+    ///
+    /// 由介面在收到 [`Event::VaultReady`] 後立即送出（先於目前頁面的載入
+    /// 任務）。工作者會依序登入尚未登入的站點——需要驗證碼或簡訊驗證時
+    /// 走既有的互動覆蓋層——全部就緒後才把四個載入任務排入佇列，因此
+    /// 使用者切換頁面時不必再等登入與首次載入。
+    ///
+    /// 預載只是「提前做」，失敗不影響解鎖：錯誤以 [`FailedTarget::Preload`]
+    /// 回報，介面只顯示提示，四個頁面維持未載入，進入該頁時仍會正常重載。
+    Preload,
     /// 提交圖片驗證碼（自動零化，避免明碼進入 `Debug`）。
     SubmitCaptcha(Secret),
     /// 重新取得驗證碼圖片。
@@ -249,6 +259,7 @@ impl Job {
         match self {
             Self::CreateVault { .. } => "创建凭证".to_owned(),
             Self::Unlock { .. } => "解锁凭证".to_owned(),
+            Self::Preload => "预载".to_owned(),
             Self::SubmitCaptcha(_) | Self::RefreshCaptcha => "验证码".to_owned(),
             Self::SendMfaCode | Self::VerifyMfaCode(_) => "短信验证".to_owned(),
             Self::RetryLogin { .. } => "登录".to_owned(),
@@ -313,6 +324,16 @@ impl Job {
     /// 載入之後。它仍屬於資料任務——去重與統一重新登入重試等語意不變。
     pub fn is_interactive(&self) -> bool {
         matches!(self, Self::OpenActivity { .. })
+    }
+
+    /// 連線層失敗時，是否可以原樣重送這個任務。
+    ///
+    /// 絕大多數任務重送一次就只是「再送同一個請求」，但發送簡訊驗證碼
+    /// **有可見的副作用**：逾時可能代表請求已經送達、只是回應沒收到，重送
+    /// 會讓使用者收到兩條簡訊。這類任務不自動重試，失敗直接回報，由使用者
+    /// 自行決定要不要再按一次。
+    pub fn is_replayable(&self) -> bool {
+        !matches!(self, Self::SendMfaCode)
     }
 
     /// 資料任務的合併鍵；同鍵的排隊請求視為重複而合併。
@@ -508,6 +529,8 @@ pub enum FailedTarget {
     ActivityDetail,
     /// 開啟活動網頁（不動任何頁面）。
     ActivityOpen,
+    /// 解鎖後的背景預載（不動任何頁面，只留提示）。
+    Preload,
     /// 登入流程（驗證碼、簡訊、重試）。
     Login,
     /// 憑證操作（建立保險庫、解鎖、修改帳號或口令）。
@@ -601,6 +624,7 @@ pub(super) fn failed_target_of(job: &Job) -> FailedTarget {
         Job::LoadActivities { .. } => FailedTarget::Activities,
         Job::LoadActivityDetail { .. } => FailedTarget::ActivityDetail,
         Job::OpenActivity { .. } => FailedTarget::ActivityOpen,
+        Job::Preload => FailedTarget::Preload,
         Job::AcceptAgreement => FailedTarget::Agreement,
         Job::SubmitCaptcha(_)
         | Job::RefreshCaptcha

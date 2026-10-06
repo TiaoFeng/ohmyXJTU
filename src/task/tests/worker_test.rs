@@ -197,7 +197,9 @@ impl Harness {
                 pending_data: VecDeque::new(),
                 generation: 0,
                 homework_epoch: 0,
-                relogin: ReloginBudgets::default(),
+                relogin: AttemptBudgets::new(MAX_LOGIN_ATTEMPTS),
+                retries: AttemptBudgets::new(MAX_ATTEMPTS),
+                preload_pending: false,
                 cache: LmsCache::default(),
                 schedule_cache: None,
                 schedule_week: None,
@@ -244,6 +246,11 @@ impl Harness {
     fn login_lms_only(&mut self) {
         let session = self.worker.session.as_mut().expect("会话已建立");
         session.mark_logged_in(SiteKind::Lms, AccessMode::Direct, Vec::new());
+    }
+
+    /// 模擬介面送出任務（進通道，尚未被工作者取出）。
+    fn send_job(&self, job: Job) {
+        self._jobs.send(job).expect("发送任务");
     }
 
     /// 執行任務（錯誤處理比照 [`Worker::run`]）。
@@ -742,6 +749,476 @@ fn new_load_resets_the_relogin_budget() {
         login_posts.load(Ordering::SeqCst),
         2,
         "新的请求应重新获得一次自动重登额度"
+    );
+}
+
+/// 連線層錯誤（逾時、連不上）會自動重送同一個請求，額度用完才回報失敗。
+///
+/// 校內服務偶發逾時是常態；沒有自動重試時，一次抖動就要使用者手動按 `r`。
+#[test]
+fn connection_errors_are_retried_before_reporting_failure() {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&attempts);
+    let mut harness = harness(move |request: &HttpRequest| {
+        if request.url.as_str() == LMS_COURSES {
+            counter.fetch_add(1, Ordering::SeqCst);
+            return Err(AppError::network_kind(
+                NetworkKind::Timeout,
+                "请求超时".to_owned(),
+            ));
+        }
+        Ok(html(""))
+    });
+    harness.login_lms_only();
+
+    harness
+        .dispatch(Job::LoadCourses { force: false })
+        .expect("放弃重试后不属于任务错误");
+
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        MAX_ATTEMPTS as usize,
+        "应以总共 {MAX_ATTEMPTS} 次尝试为上限"
+    );
+    let events = harness.drain_events();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, Event::Notice(message) if message.contains("正在重试")))
+            .count(),
+        MAX_ATTEMPTS as usize - 1,
+        "每次重试都应有提示"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Failed {
+                target: FailedTarget::Courses,
+                message,
+                ..
+            } if message.contains("请求超时")
+        )),
+        "额度用完才回报失败"
+    );
+}
+
+/// 短暫的連線抖動：第二次嘗試成功就當作成功，不留任何失敗訊息。
+#[test]
+fn a_transient_connection_error_recovers_on_retry() {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&attempts);
+    let mut harness = harness(move |request: &HttpRequest| {
+        if request.url.as_str() == LMS_COURSES {
+            return if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                Err(AppError::network_kind(
+                    NetworkKind::Connect,
+                    "连接失败".to_owned(),
+                ))
+            } else {
+                Ok(json(serde_json::json!({ "courses": [] })))
+            };
+        }
+        Ok(html(""))
+    });
+    harness.login_lms_only();
+
+    harness
+        .dispatch(Job::LoadCourses { force: false })
+        .expect("短暂失败应自动恢复");
+
+    assert_eq!(attempts.load(Ordering::SeqCst), 2, "第二次尝试即成功");
+    let events = harness.drain_events();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::Courses(_))),
+        "恢复后应回报课程"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::Failed { .. })),
+        "恢复后不应回报失败"
+    );
+}
+
+/// 新的使用者请求重新取得完整重试额度（相当于按 `r` 之后又遇到一次抖动）。
+#[test]
+fn a_new_request_resets_the_connection_retry_budget() {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&attempts);
+    let mut harness = harness(move |request: &HttpRequest| {
+        if request.url.as_str() == LMS_COURSES {
+            counter.fetch_add(1, Ordering::SeqCst);
+            return Err(AppError::network_kind(
+                NetworkKind::Dns,
+                "域名解析失败".to_owned(),
+            ));
+        }
+        Ok(html(""))
+    });
+    harness.login_lms_only();
+
+    harness
+        .dispatch(Job::LoadCourses { force: false })
+        .expect("第一次加载在有界重试后结束");
+    assert_eq!(attempts.load(Ordering::SeqCst), MAX_ATTEMPTS as usize);
+
+    harness
+        .dispatch(Job::LoadCourses { force: false })
+        .expect("第二次加载同样有界");
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        MAX_ATTEMPTS as usize * 2,
+        "新的请求应重新取得完整重试额度"
+    );
+}
+
+/// 解鎖後預載：四個頁面依「由便宜到貴」的順序排入，作業放最後。
+///
+/// 工作者同一時間只跑一個資料任務；作業彙總要逐門課程查活動與提交狀態，
+/// 可能花上十秒，排在前面會讓使用者切到其他頁面時乾等。
+#[test]
+fn preload_queues_the_four_pages_cheapest_first() {
+    let mut harness = harness(|_request: &HttpRequest| panic!("已登录时预载不应发出任何请求"));
+    harness.login_both_sites();
+
+    harness.dispatch(Job::Preload).expect("预载应成功");
+
+    let queued: Vec<String> = harness.worker.pending_data.iter().map(Job::label).collect();
+    assert_eq!(
+        queued,
+        vec!["课表", "考勤流水", "思源学堂", "作业"],
+        "应由便宜到贵依序排入"
+    );
+}
+
+/// 預載只登入尚未登入的站點，已登入的不重複登入。
+#[test]
+fn preload_logs_in_the_site_that_is_not_logged_in_yet() {
+    let mut harness = harness(fake_flow(0));
+    harness.login_lms_only();
+
+    harness.dispatch(Job::Preload).expect("预载应成功");
+
+    let session = harness.worker.session.as_ref().expect("会话");
+    assert!(
+        session.is_logged_in(SiteKind::Attendance),
+        "应登录尚未登录的考勤"
+    );
+    assert!(
+        session.is_logged_in(SiteKind::Lms),
+        "已登录的思源学堂应保持"
+    );
+    assert_eq!(
+        harness.worker.pending_data.len(),
+        4,
+        "两站就绪后排入四个页面"
+    );
+}
+
+/// 預載的登入失敗：以 `FailedTarget::Preload` 回報（介面只留提示、不動頁面），
+/// 且不排入任何載入任務——登入都沒成功，排了也只是徒勞。
+#[test]
+fn preload_login_failure_reports_without_queueing_any_load() {
+    let mut harness = harness(|_request: &HttpRequest| {
+        Err(AppError::network_kind(
+            NetworkKind::Dns,
+            "域名解析失败".to_owned(),
+        ))
+    });
+
+    harness
+        .dispatch(Job::Preload)
+        .expect_err("离线时预载应失败");
+
+    assert!(
+        harness.worker.pending_data.is_empty(),
+        "登录失败不应排入任何载入任务"
+    );
+    let events = harness.drain_events();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, Event::Notice(message) if message.contains("正在重试")))
+            .count(),
+        MAX_ATTEMPTS as usize - 1,
+        "登入失败也应有自动重试提示"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Failed {
+                what,
+                target: FailedTarget::Preload,
+                ..
+            } if what == "预载"
+        )),
+        "应以预载为目标回报失败"
+    );
+}
+
+/// 已經有登入在進行時，預載靜默等待，不重啟它，並記下待補做。
+///
+/// 重啟會覆寫 `flow`，把使用者正在輸入的驗證流程丟掉。預載只能等這次登入
+/// 收尾：由預載自己發起的登入會帶著 `Job::Preload` 續跑，其他任務發起的
+/// 登入則靠 `preload_pending` 補做（見下一個測試）。
+#[test]
+fn preload_waits_for_a_login_that_is_already_running() {
+    let logins = Arc::new(AtomicUsize::new(0));
+    let mut harness = harness(mfa_login_responses(Arc::clone(&logins)));
+    harness
+        .dispatch(Job::RetryLogin {
+            site: SiteKind::Attendance,
+        })
+        .expect("登录应停在短信验证");
+    assert_eq!(logins.load(Ordering::SeqCst), 1, "测试前提：登入已开始");
+
+    harness.dispatch(Job::Preload).expect("预载应静默等待");
+
+    assert_eq!(logins.load(Ordering::SeqCst), 1, "不应重启进行中的登入");
+    assert!(
+        harness.worker.pending_data.is_empty(),
+        "登入完成前不应排入任何载入任务"
+    );
+    assert!(harness.worker.preload_pending, "应记下待补做的预载");
+}
+
+/// 由其他任務發起的登入結束後，被擋下的預載會補做。
+///
+/// 回歸：修復前 `preload` 在 `flow` 存在時只回報成功就結束，而收尾的
+/// `finish_login` 只續跑 `flow.retry`／`retry` 兩者（此時皆為 `None`），
+/// 四頁預載從此不再發生。
+#[test]
+fn preload_blocked_by_another_login_is_resumed_when_it_finishes() {
+    let mut harness = harness(|_request: &HttpRequest| panic!("两站已登录时预载不应发出请求"));
+    harness.login_both_sites();
+    // 模擬「先前被進行中的登入擋下」。
+    harness.worker.preload_pending = true;
+
+    harness
+        .worker
+        .finish_login(SiteKind::Attendance, None)
+        .expect("收尾应成功");
+
+    let queued: Vec<String> = harness.worker.pending_data.iter().map(Job::label).collect();
+    assert_eq!(
+        queued,
+        vec!["课表", "考勤流水", "思源学堂", "作业"],
+        "登入结束后应补做预载：{queued:?}"
+    );
+    assert!(!harness.worker.preload_pending, "补做后应清除待办");
+}
+
+/// 介面已經送出的同頁請求與預載合併，不會各查一次。
+///
+/// 解鎖時介面會送出一份當前頁面的載入，而預載又會排入四個頁面；兩者若各自
+/// 成隊，同一個頁面會被查詢兩次，第二次的結果會把使用者已經移動過的選取
+/// 重設回第一項。
+#[test]
+fn preload_merges_the_request_the_interface_already_queued() {
+    let mut harness = harness(|_request: &HttpRequest| panic!("两站已登录时预载不应发出请求"));
+    harness.login_both_sites();
+    // 模擬介面在預載之前送出的當前頁面載入（還在通道裡）。
+    harness.send_job(Job::LoadSchedule { force: false });
+
+    harness.dispatch(Job::Preload).expect("预载应成功");
+
+    let queued: Vec<String> = harness.worker.pending_data.iter().map(Job::label).collect();
+    assert_eq!(
+        queued,
+        vec!["课表", "考勤流水", "思源学堂", "作业"],
+        "同一个页面不得排入两笔：{queued:?}"
+    );
+    // 那一筆必須已經收進同一份佇列：留在通道裡就會在預載之後再執行一次。
+    assert!(
+        harness.worker.jobs.try_recv().is_err(),
+        "通道不应残留同一个页面的请求"
+    );
+}
+
+/// 介面送出的強制刷新不會被預載降級為非強制。
+#[test]
+fn preload_does_not_downgrade_a_forced_refresh() {
+    let mut harness = harness(|_request: &HttpRequest| panic!("两站已登录时预载不应发出请求"));
+    harness.login_both_sites();
+    harness.send_job(Job::LoadCourses { force: true });
+
+    harness.dispatch(Job::Preload).expect("预载应成功");
+
+    let forced = harness
+        .worker
+        .pending_data
+        .iter()
+        .filter(|job| matches!(job, Job::LoadCourses { force: true }))
+        .count();
+    assert_eq!(forced, 1, "强制刷新应原样保留");
+}
+
+/// 使用者取消登入時，待補做的預載一併放棄：不該由背景擅自重新登入。
+#[test]
+fn cancelling_a_login_abandons_the_pending_preload() {
+    let mut harness = harness(|_request: &HttpRequest| panic!("本测试不应发出请求"));
+    harness.worker.preload_pending = true;
+
+    harness.dispatch(Job::CancelLogin).expect("取消应成功");
+
+    assert!(
+        !harness.worker.preload_pending,
+        "使用者取消后不得由背景重新发起预载"
+    );
+    assert!(
+        harness.worker.pending_data.is_empty(),
+        "取消后不应排入任何载入任务"
+    );
+}
+
+/// 預載失敗要指出真正失敗的站點。
+///
+/// 修復前 `login_site_of` 對 `Job::Preload` 一律回 `None`，介面因此把失敗
+/// 一律當成考勤——思源學堂登入失敗也會顯示成考勤。
+#[test]
+fn preload_failure_points_at_the_site_that_failed() {
+    let mut harness = harness(|_request: &HttpRequest| panic!("本测试不应发出请求"));
+
+    harness.worker.login_site = Some(SiteKind::Lms);
+    assert_eq!(
+        harness.worker.login_site_of(&Job::Preload),
+        Some(SiteKind::Lms),
+        "预载失败应归属于当时正在登入的站点"
+    );
+
+    harness.worker.login_site = Some(SiteKind::Attendance);
+    assert_eq!(
+        harness.worker.login_site_of(&Job::Preload),
+        Some(SiteKind::Attendance),
+        "登入考勤阶段失败时应归属于考勤"
+    );
+}
+
+/// 登入收尾要續跑「兩個來源」的等待任務，不能只跑其中一個。
+///
+/// 修復前寫成 `retry.or(self.retry.take())`：`Option::or` 的參數是值傳遞，
+/// `take()` 一定會執行，但當 `retry` 已是 `Some` 時，取出的那個任務就被
+/// 靜默丟棄（頁面停在「載入中」，也沒有任何失敗事件）。
+#[test]
+fn finishing_a_login_resumes_tasks_from_both_sources() {
+    let mut harness = harness(|_request: &HttpRequest| panic!("本测试不应发出请求"));
+    harness.login_both_sites();
+    // `self.retry`：等待重登的資料任務（此處以會排入載入的控制任務代替，
+    // 以免測試真的發出請求）。
+    harness.worker.retry = Some(Job::SetScheduleWeek { week: 3 });
+
+    harness
+        .worker
+        .finish_login(
+            SiteKind::Attendance,
+            Some(Job::SetHomeworkTerm {
+                term: "2026-2027-1".to_owned(),
+            }),
+        )
+        .expect("收尾应成功");
+
+    assert!(harness.worker.retry.is_none(), "等待中的任務不应被遗留");
+    let mut queued: Vec<String> = harness.worker.pending_data.iter().map(Job::label).collect();
+    queued.sort();
+    assert_eq!(
+        queued,
+        vec!["作业", "课表"],
+        "兩邊的等待任務都應續跑：{queued:?}"
+    );
+}
+
+/// 尚未建立會話（例如會話在重建失敗後被停用）時預載直接報錯，不排入任務。
+#[test]
+fn preload_without_a_session_reports_an_error() {
+    let mut harness = harness(|_request: &HttpRequest| panic!("会话未建立时不应发出请求"));
+    harness.worker.session = None;
+
+    harness.dispatch(Job::Preload).expect_err("未解锁时应报错");
+
+    assert!(
+        harness.worker.pending_data.is_empty(),
+        "没有会话时不应排入任何载入任务"
+    );
+}
+
+/// 考勤登入需要簡訊驗證的假站點：用來製造「登入正在進行」的狀態。
+///
+/// `logins` 累計登入入口被請求的次數，用來觀察登入是否被重新啟動。
+fn mfa_login_responses(
+    logins: Arc<AtomicUsize>,
+) -> impl Fn(&HttpRequest) -> AppResult<HttpResponse> + Send + Sync + 'static {
+    move |request: &HttpRequest| {
+        let url = request.url.as_str();
+        if url == rsa::PUBLIC_KEY_URL {
+            return Ok(HttpResponse::new(
+                200,
+                rsa::PUBLIC_KEY_URL,
+                public_key_pem(),
+            ));
+        }
+        if url == attendance::LOGIN_URL {
+            logins.fetch_add(1, Ordering::SeqCst);
+            return Ok(HttpResponse::new(
+                200,
+                ATTENDANCE_POST,
+                login_page_with_mfa(),
+            ));
+        }
+        if url == ATTENDANCE_POST {
+            return Ok(HttpResponse::new(200, ATTENDANCE_TARGET, TARGET_BODY));
+        }
+        if url.contains("/mfa/detect") {
+            return Ok(json(serde_json::json!({
+                "code": 0,
+                "data": { "state": "s-1", "need": true }
+            })));
+        }
+        if url.contains("/initByType/securephone") {
+            return Ok(json(serde_json::json!({
+                "code": 0,
+                "data": { "securePhone": "138****1234", "gid": "g-1" }
+            })));
+        }
+        panic!("未预期的请求：{url}");
+    }
+}
+
+/// 登入進行中收到資料任務失敗：把任務排回待執行，不重啟登入。
+///
+/// 重啟登入會覆寫 `flow`，丟掉目前流程等待續跑的任務（例如使用者正在輸入的
+/// 簡訊驗證碼），也會讓 `retry` 槽被佔用；正確做法是等這次登入結束後再重跑
+/// 該任務——排入待執行的任務在登入完成前不會被取出。
+#[test]
+fn a_data_failure_during_a_login_is_parked_instead_of_restarting_it() {
+    let logins = Arc::new(AtomicUsize::new(0));
+    let mut harness = harness(mfa_login_responses(Arc::clone(&logins)));
+    harness
+        .dispatch(Job::RetryLogin {
+            site: SiteKind::Attendance,
+        })
+        .expect("登录应停在短信验证");
+    assert!(harness.worker.flow.is_some(), "测试前提：登入正在进行");
+
+    let generation = harness.worker.generation;
+    harness.worker.report_data_failure(
+        SiteKind::Attendance,
+        Job::LoadFlow { page: 1 },
+        generation,
+        AppError::SessionExpired,
+    );
+
+    assert_eq!(
+        logins.load(Ordering::SeqCst),
+        1,
+        "不得重新启动（覆盖）进行中的登入"
+    );
+    assert!(harness.worker.retry.is_none(), "不得占用待重试槽");
+    assert_eq!(
+        harness.worker.pending_data.len(),
+        1,
+        "任务应排回待执行，等登入结束后重跑"
     );
 }
 
@@ -3603,6 +4080,105 @@ fn only_open_activity_is_interactive() {
     }
 }
 
+/// 只有發送簡訊驗證碼不適合自動重送：重送可能讓使用者收到兩條簡訊。
+#[test]
+fn only_the_sms_send_is_not_replayable() {
+    assert!(!Job::SendMfaCode.is_replayable(), "发送短信有可见副作用");
+
+    for job in [
+        Job::RefreshCaptcha,
+        Job::SubmitCaptcha("1234".into()),
+        Job::VerifyMfaCode("123456".into()),
+        Job::RetryLogin {
+            site: SiteKind::Attendance,
+        },
+        Job::LoadSchedule { force: false },
+        Job::OpenActivity {
+            activity_id: "1".to_owned(),
+            course_id: None,
+            kind: lms::ActivityKind::Homework,
+        },
+    ] {
+        assert!(job.is_replayable(), "{job:?} 可以原樣重送");
+    }
+}
+
+/// 送碼端點連線失敗時直接回報，不自動重送（免得發出兩條簡訊）。
+#[test]
+fn connection_errors_do_not_replay_the_sms_send() {
+    let sends = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&sends);
+    let mut harness = harness(move |request: &HttpRequest| {
+        let url = request.url.as_str();
+        if url == rsa::PUBLIC_KEY_URL {
+            return Ok(HttpResponse::new(
+                200,
+                rsa::PUBLIC_KEY_URL,
+                public_key_pem(),
+            ));
+        }
+        if url == attendance::LOGIN_URL {
+            return Ok(HttpResponse::new(
+                200,
+                ATTENDANCE_POST,
+                login_page_with_mfa(),
+            ));
+        }
+        if url.contains("/mfa/detect") {
+            return Ok(json(serde_json::json!({
+                "code": 0,
+                "data": { "state": "s-1", "need": true }
+            })));
+        }
+        if url.contains("/initByType/securephone") {
+            return Ok(json(serde_json::json!({
+                "code": 0,
+                "data": { "securePhone": "138****1234", "gid": "g-1" }
+            })));
+        }
+        if url.contains("/securephone/send") {
+            counter.fetch_add(1, Ordering::SeqCst);
+            return Err(AppError::network_kind(
+                NetworkKind::Timeout,
+                "请求超时".to_owned(),
+            ));
+        }
+        panic!("未预期的请求：{url}");
+    });
+    harness
+        .dispatch(Job::RetryLogin {
+            site: SiteKind::Attendance,
+        })
+        .expect("登录应停在短信验证");
+
+    harness
+        .dispatch(Job::SendMfaCode)
+        .expect_err("发送失败应直接回报");
+
+    assert_eq!(
+        sends.load(Ordering::SeqCst),
+        1,
+        "不得自动重送（使用者可能因此收到两条短信）"
+    );
+    let events = harness.drain_events();
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::Notice(message) if message.contains("正在重试"))),
+        "不应有自动重试提示：{events:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Failed {
+                target: FailedTarget::Login,
+                ..
+            }
+        )),
+        "应直接回报失败：{events:?}"
+    );
+}
+
 #[test]
 fn flush_interactive_runs_the_queued_open_and_keeps_other_jobs() {
     let mut harness = harness(|request: &HttpRequest| -> AppResult<HttpResponse> {
@@ -3839,14 +4415,19 @@ fn interactive_open_gets_its_own_relogin_budget() {
     // 模擬作業載入與此開啟任務先前各用掉一次自動重登額度：額度按任務鍵
     // 獨立保存，新的開啟操作應重新取得自己的額度。
     assert!(
-        harness.worker.relogin.try_consume(&DataKey::Homework),
+        harness
+            .worker
+            .relogin
+            .try_consume(&DataKey::Homework)
+            .is_some(),
         "前置：额度应可用"
     );
     assert!(
         harness
             .worker
             .relogin
-            .try_consume(&DataKey::OpenActivity("7".to_owned())),
+            .try_consume(&DataKey::OpenActivity("7".to_owned()))
+            .is_some(),
         "前置：额度应可用"
     );
     harness.worker.pending_data.push_back(Job::OpenActivity {
@@ -5688,24 +6269,46 @@ fn credential_save_failure_reports_and_keeps_the_old_vault() {
     assert_eq!(stored.password, "old-password");
 }
 
-/// 自動重登額度：按任務鍵各自計算——同一任務耗盡後不得再消耗，重置只
-/// 影響該任務；其他任務的額度互不影響。
+/// 重試額度：按任務鍵各自計算——同一任務耗盡後不得再消耗，重置只影響該
+/// 任務；其他任務的額度互不影響。
 #[test]
-fn relogin_budget_is_kept_per_task() {
-    let mut budget = ReloginBudgets::default();
+fn attempt_budget_is_kept_per_task() {
+    let mut budget = AttemptBudgets::new(MAX_LOGIN_ATTEMPTS);
     let open = DataKey::OpenActivity("7".to_owned());
     let homework = DataKey::Homework;
 
-    assert!(budget.try_consume(&open), "首次应可消耗额度");
-    assert!(!budget.try_consume(&open), "同一任务的额度用尽后不得再消耗");
+    assert_eq!(
+        budget.try_consume(&open),
+        Some(2),
+        "首次消耗回報即將進行的嘗試序號"
+    );
+    assert_eq!(
+        budget.try_consume(&open),
+        None,
+        "同一任务的额度用尽后不得再消耗"
+    );
     assert!(
-        budget.try_consume(&homework),
+        budget.try_consume(&homework).is_some(),
         "其他任务的额度互不影响（不得被对方的消耗拖累）"
     );
     budget.reset(&open);
-    assert!(budget.try_consume(&open), "重置后应重新取得额度");
+    assert!(budget.try_consume(&open).is_some(), "重置后应重新取得额度");
     budget.clear();
-    assert!(budget.try_consume(&homework), "清空后所有任务重新取得额度");
+    assert!(
+        budget.try_consume(&homework).is_some(),
+        "清空后所有任务重新取得额度"
+    );
+}
+
+/// 連線重試的額度上限與自動重登不同（3 次嘗試），序號遞增到上限為止。
+#[test]
+fn connection_retry_budget_counts_up_to_its_own_limit() {
+    let mut budget = AttemptBudgets::new(MAX_ATTEMPTS);
+    let key = DataKey::Courses;
+
+    assert_eq!(budget.try_consume(&key), Some(2), "首次重試是第 2 次嘗試");
+    assert_eq!(budget.try_consume(&key), Some(3), "再下一次是第 3 次嘗試");
+    assert_eq!(budget.try_consume(&key), None, "達到上限後不得再消耗");
 }
 
 // ── 自訂義任務（任務服務） ──────────────────────────────

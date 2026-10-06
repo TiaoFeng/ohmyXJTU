@@ -47,6 +47,7 @@ fn non_connection_errors_are_not_retryable() {
         AppError::UntrustedHost {
             host: "x".to_owned(),
         },
+        AppError::untrusted_url("evil.example", "非校内网域"),
         AppError::TaskNotFound,
         AppError::config("x"),
     ];
@@ -54,6 +55,21 @@ fn non_connection_errors_are_not_retryable() {
         assert!(!err.is_connection_error(), "{err} 不是连线层错误");
         assert!(!err.needs_relogin(), "{err} 不需要重新登入");
     }
+}
+
+/// 被拒絕開啟的網址：訊息只含主機名，絕不含完整網址（可能帶存取 token）。
+#[test]
+fn untrusted_url_reports_only_the_host() {
+    let err = AppError::untrusted_url("evil.example", "非校内网域");
+    let message = err.to_string();
+    assert!(message.contains("evil.example"), "应指出主機：{message}");
+    assert!(message.contains("非校内网域"), "应说明原因：{message}");
+
+    let err = AppError::untrusted_url("", "必须使用 https");
+    assert!(
+        err.to_string().contains("（无主机名）"),
+        "缺少主機名时应有占位：{err}"
+    );
 }
 
 /// 登入態失效要靠重新登入恢復：不是連線層錯誤，也不該被當成同類。

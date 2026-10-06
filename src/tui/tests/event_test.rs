@@ -850,10 +850,12 @@ fn needs_term_does_not_steal_an_open_form() {
         "仍要标记作业页"
     );
     assert_eq!(app.term_options.len(), 1, "选项要记下来供 `s` 使用");
+    // 畫面上有彈窗：`s` 會被彈窗吃掉（且提示會被下一次按鍵清掉），
+    // 因此文案必須說清楚要先關掉它才可行動。
     assert!(
         app.message_text()
-            .is_some_and(|text| text.contains("按 s 选择要查看的学期")),
-        "应留下提示：{:?}",
+            .is_some_and(|text| text.contains("请先关闭当前窗口")),
+        "应留下可执行的提示：{:?}",
         app.message_text()
     );
 }

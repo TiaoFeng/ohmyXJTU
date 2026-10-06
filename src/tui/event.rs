@@ -238,6 +238,15 @@ fn apply_schedule(app: &mut App, data: ScheduleData) {
     app.ensure_main();
 }
 
+/// 判定不出本學期時的作業頁訊息（作業頁可見時 `s` 直接可用）。
+const NEEDS_TERM_MESSAGE: &str = "未确定本学期：按 s 选择要查看的学期";
+/// 同上，但畫面上有彈窗時的訊息。
+///
+/// 彈窗獨占按鍵（`popup_owns_keys`），`s` 根本到不了主畫面；而且這是一則暫時
+/// 訊息，使用者按下的任何鍵（包含用來關閉彈窗的 `esc`）都會先把它清掉，因此
+/// 必須在文字裡說清楚下一步該做什麼。
+const NEEDS_TERM_POPUP_MESSAGE: &str = "未确定本学期：请先关闭当前窗口，再按 s 选择学期";
+
 /// 背景載入判定不出本學期：標記作業頁，並在可以的時候直接開啟學期選擇器。
 ///
 /// 學期選擇器是彈窗：只有主畫面（沒有其他彈窗）時才直接開啟。使用者可能正在
@@ -251,13 +260,13 @@ fn apply_homework_needs_term(
     reason: String,
 ) {
     app.term_options = options.clone();
-    app.homework.fail("未确定本学期：按 s 选择要查看的学期");
+    app.homework.fail(NEEDS_TERM_MESSAGE);
     let picker = TermPickerState::new(options, suggestion, reason);
     match app.screen {
         // 主畫面，或選擇器已經開著（例如使用者已按 `s`）：顯示／更新它。
         Screen::Main | Screen::TermPicker(_) => app.set_screen(Screen::TermPicker(picker)),
         // 其他彈窗（任務表單、設定、排序提示…）：不要搶走畫面。
-        _ => app.set_message("未确定本学期：按 s 选择要查看的学期"),
+        _ => app.set_message(NEEDS_TERM_POPUP_MESSAGE),
     }
 }
 

@@ -5,8 +5,8 @@ use serde::Deserialize;
 use crate::tone::Tone;
 
 use super::super::{
-    lenient_flag, optional_string_or_number, string_lenient, string_or_number, u32_lenient,
-    u32_or_string,
+    date_string, lenient_flag, optional_string_or_number, string_lenient, string_or_number,
+    u32_lenient, u32_or_string,
 };
 
 /// 考勤狀態。
@@ -185,7 +185,8 @@ pub struct WaterRecord {
     pub teacher_name: Option<String>,
     /// 伺服器回傳的考勤狀態字串。
     pub attendance_status: String,
-    /// 上課日期（`YYYY-MM-DD`）。
+    /// 上課日期（解析時正規化為 `YYYY-MM-DD`；格式無法解讀時該筆記錄會被跳過）。
+    #[serde(deserialize_with = "date_string")]
     pub attendance_date: String,
     /// 所屬學期識別碼。
     #[serde(default, deserialize_with = "optional_string_or_number")]

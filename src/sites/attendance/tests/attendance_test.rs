@@ -493,6 +493,64 @@ fn flow_page_tolerates_loosely_typed_and_unused_fields() {
     assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
+/// 考勤日期接受 `-` 與 `/` 分隔，解析時一律正規化為 `YYYY-MM-DD`。
+///
+/// 比對以日期字串全等為鍵：分隔符一變（`2026/10/07`）就會全數失配，每一堂已過
+/// 的課都變成「待核实」。無法解讀的日期則由 `parse_lenient` 跳過並計數。
+#[test]
+fn normalizes_attendance_dates_and_skips_unreadable_ones() {
+    use crate::http::fake::json;
+
+    let (mut session, _requests) = attendance_api_with(|_request| {
+        Ok(json(serde_json::json!({
+            "code": 0,
+            "message": "ok",
+            "data": {
+                "total": 3,
+                "rows": [
+                    {
+                        "resultId": 1,
+                        "startSection": 1,
+                        "endSection": 2,
+                        "attendanceStatus": "NORMAL",
+                        "attendanceDate": "2026/09/01"
+                    },
+                    {
+                        "resultId": 2,
+                        "startSection": 1,
+                        "endSection": 2,
+                        "attendanceStatus": "NORMAL",
+                        "attendanceDate": " 2026-09-02 "
+                    },
+                    {
+                        "resultId": 3,
+                        "startSection": 1,
+                        "endSection": 2,
+                        "attendanceStatus": "NORMAL",
+                        "attendanceDate": "下周一"
+                    }
+                ]
+            }
+        })))
+    });
+    let mut api = AttendanceApi::new(&mut session);
+
+    let start = chrono::NaiveDate::from_ymd_opt(2026, 9, 1).expect("日期");
+    let end = chrono::NaiveDate::from_ymd_opt(2026, 9, 7).expect("日期");
+    let batch = api.records_between(start, end).expect("查询应成功");
+
+    assert_eq!(batch.records.len(), 2);
+    assert_eq!(batch.skipped, 1, "无法解读的日期应被跳过并计数");
+    assert_eq!(
+        batch.records[0].attendance_date, "2026-09-01",
+        "斜杠应被正规化"
+    );
+    assert_eq!(
+        batch.records[1].attendance_date, "2026-09-02",
+        "前后空白应被去除"
+    );
+}
+
 /// 課表逐項寬容：讀不出來的課程只跳過該門，不得讓整份課表失敗。
 #[test]
 fn weekly_courses_skips_unparsable_items() {

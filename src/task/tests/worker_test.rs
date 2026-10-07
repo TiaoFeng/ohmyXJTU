@@ -3225,7 +3225,9 @@ fn schedule_in_session_matches_attendance_without_notice() {
     let today = chrono::Local::now().date_naive();
     let (start, day_of_week) = semester_fixture_meeting_today(today, 3);
     let end = (today + chrono::Duration::days(90)).to_string();
-    let attendance_date = today.to_string();
+    // 日期刻意用 `YYYY/MM/DD`：解析時必須正規化，否則比對全數失配（每一堂已過
+    // 的課都會變成「待核实」）。
+    let attendance_date = today.format("%Y/%m/%d").to_string();
     let mut harness = harness(move |request: &HttpRequest| {
         let url = request.url.clone();
         if url.ends_with("/timetable/semesters") {

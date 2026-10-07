@@ -13,18 +13,20 @@ use super::schedule::CourseSlot;
 /// 找出課程在指定日期的考勤狀態。
 ///
 /// 同一時段若有多筆記錄，取嚴重度最高者；`None` 代表沒有可用記錄。
+/// 記錄的日期在解析時已正規化為 `YYYY-MM-DD`（見 [`crate::sites::date_string`]），
+/// 因此這裡直接比較字串即可。
 pub fn status_for(
     slot: &CourseSlot,
     date: NaiveDate,
     records: &[WaterRecord],
 ) -> Option<AttendanceStatus> {
-    let expected_date = date.to_string();
+    let expected_date = date.format("%Y-%m-%d").to_string();
     records
         .iter()
         .filter(|record| {
             record.start_section == slot.start_section
                 && record.end_section == slot.end_section
-                && record.attendance_date.trim() == expected_date
+                && record.attendance_date == expected_date
                 && matches_optional(slot.classroom.as_deref(), record.classroom_name.as_deref())
                 && matches_optional(slot.teacher.as_deref(), record.teacher_name.as_deref())
         })

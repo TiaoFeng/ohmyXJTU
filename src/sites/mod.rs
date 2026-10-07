@@ -144,6 +144,32 @@ where
     Ok(u32_or_string(deserializer).unwrap_or(0))
 }
 
+/// 日期欄位：接受 `YYYY-MM-DD` 與 `YYYY/MM/DD`，一律正規化為 `YYYY-MM-DD`。
+///
+/// 考勤比對以「日期字串全等」為鍵，因此分隔符一變（`2026/10/07`）就會全數失配，
+/// 每一堂已過的課都變成「待核实」——錯得無聲且全面。這裡在解析時就正規化，
+/// 呼叫端不必各自處理格式差異。
+///
+/// 無法解讀時回報錯誤（訊息不含欄位值），該筆記錄由 [`parse_lenient`] 跳過並計數；
+/// 留著一個永遠配不上的日期只會讓使用者看到一堆沒有原因的「待核实」。
+pub(crate) fn date_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    let Some(serde_json::Value::String(raw)) = value else {
+        return Err(serde::de::Error::custom("期望 YYYY-MM-DD 格式的日期"));
+    };
+    normalize_date(&raw).ok_or_else(|| serde::de::Error::custom("日期格式无法识别"))
+}
+
+/// 把日期字串正規化為 `YYYY-MM-DD`（同時驗證日期本身合法）。
+fn normalize_date(raw: &str) -> Option<String> {
+    let normalized = raw.trim().replace('/', "-");
+    let date = chrono::NaiveDate::parse_from_str(&normalized, "%Y-%m-%d").ok()?;
+    Some(date.format("%Y-%m-%d").to_string())
+}
+
 /// 缺欄位時回傳 `None`，型別不符時才報錯的可選字串。
 pub(crate) fn optional_string_or_number<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where

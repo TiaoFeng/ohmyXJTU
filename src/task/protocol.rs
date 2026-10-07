@@ -610,6 +610,14 @@ pub(super) fn is_account_switch_step(job: &Job) -> bool {
     )
 }
 
+/// 這次失敗之後，登入流程是否已經不可能再繼續。
+///
+/// 除了送簡訊驗證碼：那只是「那一次發送」失敗，驅動器與流程都還在，使用者
+/// 再按一次就能重送，因此不算流程結束。
+pub(super) fn login_step_breaks_the_flow(job: &Job) -> bool {
+    is_account_switch_step(job) && !matches!(job, Job::SendMfaCode)
+}
+
 /// 任務所屬站點。
 pub(super) fn site_of(job: &Job) -> Option<SiteKind> {
     match job {

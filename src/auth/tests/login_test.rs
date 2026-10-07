@@ -11,6 +11,7 @@ use ::rsa::{Pkcs1v15Encrypt, RsaPrivateKey, RsaPublicKey};
 use crate::credentials::Credentials;
 use crate::http::fake::FakeClient;
 use crate::http::{HttpClient, HttpRequest, HttpResponse};
+use crate::text::MAX_INLINE_CHARS;
 
 use super::*;
 
@@ -625,6 +626,40 @@ fn surfaces_server_alert_message_on_failure() {
         .expect("执行登录");
     match reply {
         LoginReply::Fail { message } => assert_eq!(message, "登录失败：用户名或密码错误"),
+        other => panic!("应当是失败状态，实际为 {other:?}"),
+    }
+}
+
+/// 伺服器提示文字（`el-alert`）必須先清理：控制字元與超長內容不可帶進介面。
+#[test]
+fn sanitizes_server_alert_message() {
+    let long = "错".repeat(MAX_INLINE_CHARS + 20);
+    let failed = format!(
+        "<html><body><el-alert title=\"\u{1b}[31m坏\u{7}{long}\" type=\"error\"></el-alert></body></html>"
+    );
+    let client = Arc::new(FakeClient::with_responder(move |request| {
+        match request.url.as_str() {
+            LOGIN_URL => Ok(page(POST_URL, &login_page(false, "e8s1"))),
+            rsa::PUBLIC_KEY_URL => Ok(public_key_response()),
+            _ => Ok(HttpResponse::new(401, POST_URL, failed.as_bytes())),
+        }
+    }));
+
+    let mut driver = driver(&client);
+    match driver
+        .start(&credentials(), AccountType::Undergraduate)
+        .expect("执行登录")
+    {
+        LoginReply::Fail { message } => {
+            assert!(!message.contains('\u{1b}'), "控制字元应被移除：{message:?}");
+            assert!(!message.contains('\u{7}'), "控制字元应被移除：{message:?}");
+            assert!(
+                message.chars().count() <= MAX_INLINE_CHARS,
+                "超长提示应被截断：{} 字元",
+                message.chars().count()
+            );
+            assert!(message.ends_with('…'), "截断应以省略号结尾：{message:?}");
+        }
         other => panic!("应当是失败状态，实际为 {other:?}"),
     }
 }

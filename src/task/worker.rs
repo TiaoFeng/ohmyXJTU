@@ -42,8 +42,8 @@ use crate::domain::semester::TermCode;
 use crate::error::{AppError, AppResult};
 use crate::session::{AccessMode, SessionManager, SiteKind};
 use crate::task::protocol::{
-    DataKey, Event, FailedTarget, Job, failed_target_of, is_account_switch_step, resource_of,
-    site_of,
+    DataKey, Event, FailedTarget, Job, failed_target_of, is_account_switch_step,
+    login_step_breaks_the_flow, resource_of, site_of,
 };
 use crate::task::tasks::{self, TaskHandle};
 
@@ -484,7 +484,18 @@ impl Worker {
                         if what.is_empty() { "操作" } else { &what }
                     )));
                 }
-                Err(err) => return Err(err),
+                Err(err) => {
+                    // 登入步驟重試到最後仍失敗：流程不可能再有進展，作廢它，否則
+                    // 資料任務會一直被延後（頁面卡在「載入中」）。等待重登的任務
+                    // 刻意保留（見 `Worker::abort_broken_login`），也刻意不動
+                    // `VerificationRetry`——那是「驗證碼填錯」，流程仍可用。
+                    if login_step_breaks_the_flow(&job)
+                        && !matches!(err, AppError::VerificationRetry(_))
+                    {
+                        self.abort_broken_login();
+                    }
+                    return Err(err);
+                }
             }
         }
     }

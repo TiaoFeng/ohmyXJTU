@@ -15,6 +15,7 @@ use crate::model::{ActivityDetailView, FlowData, ScheduleData};
 use crate::session::{AccessMode, SiteKind};
 use crate::sites::lms::LmsActivity;
 use crate::task::{CoursesData, Event, FailedTarget, HomeworkUpdate, Job};
+use crate::text::{MAX_INLINE_CHARS, sanitize_inline};
 
 use super::app::{
     App, FormKind, FormState, HomeworkData, LmsLevel, LoginScreen, Page, Screen, SettingsState,
@@ -568,7 +569,12 @@ fn failed_resource_is_stale(app: &App, target: FailedTarget, resource: Option<&s
 }
 
 /// 顯示登入錯誤：憑證表單就地顯示，其餘登入畫面回到失敗畫面。
+///
+/// 訊息可能直接來自伺服器（登入頁的 `el-alert` 文字，見 `auth::login`），因此
+/// 與其他伺服器文字走同一套清理（[`sanitize_inline`]）：控制字元與超長內容
+/// 都不該進入畫面。
 fn set_login_error(app: &mut App, site: SiteKind, message: String) {
+    let message = sanitize_inline(&message, MAX_INLINE_CHARS);
     match app.login.as_deref_mut() {
         Some(LoginScreen::Credentials { form, .. }) => {
             form.busy = false;

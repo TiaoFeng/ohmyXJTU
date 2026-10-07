@@ -22,6 +22,7 @@ use crate::credentials::Credentials;
 use crate::error::{AppError, AppResult};
 use crate::http::{HttpClient, HttpRequest, HttpResponse};
 use crate::json::split_envelope;
+use crate::text::{MAX_INLINE_CHARS, sanitize_inline};
 use crate::webvpn;
 
 use super::captcha;
@@ -159,6 +160,9 @@ impl LoginDriver {
     }
 
     /// 登入網址是否已具備登入態（不需要提交帳密）。
+    ///
+    /// 僅供測試斷言（生產碼用的是 [`Self::used_existing_session`]）。
+    #[cfg(test)]
     pub fn is_already_authenticated(&self) -> bool {
         self.already_authenticated.is_some()
     }
@@ -435,24 +439,24 @@ impl LoginDriver {
 
     fn process_login_response(&mut self, response: HttpResponse) -> AppResult<LoginReply> {
         let text = response.text();
-        let alert = html::alert_message(&text);
+        // 登入頁的提示文字由伺服器提供（`el-alert`）：與其他伺服器文字走同一套
+        // 清理，避免控制字元或超長內容一路帶到介面（覆蓋層提示與底欄訊息）。
+        let alert = html::alert_message(&text)
+            .map(|alert| sanitize_inline(&alert.text(), MAX_INLINE_CHARS));
 
         if response.status == 401 {
             self.fail_count += 1;
             self.captcha_code.clear();
-            let message = alert.map_or_else(
-                || "登录失败，用户名或密码错误。".to_owned(),
-                |alert| alert.text(),
-            );
+            let message = alert.unwrap_or_else(|| "登录失败，用户名或密码错误。".to_owned());
             return Ok(LoginReply::Fail { message });
         }
         response.error_for_status()?;
 
-        if let Some(alert) = alert {
+        if let Some(message) = alert {
             self.fail_count += 1;
             self.captcha_code.clear();
             return Ok(LoginReply::Fail {
-                message: format!("登录失败：{}", alert.text()),
+                message: format!("登录失败：{message}"),
             });
         }
 

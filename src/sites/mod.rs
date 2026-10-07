@@ -203,6 +203,39 @@ where
     Ok(number)
 }
 
+/// 寬容布林：接受布林、`0`/`1` 與其字串形式（`true`／`false`／`yes`／`y`／
+/// `no`／`n`）；缺欄位或型別不符時回 `None`。
+///
+/// 伺服器對布林欄位的型別並不統一（考勤流水與思源學堂都出現過字串形式），
+/// 型別異常不該讓整頁解析失敗；參考實作以同一套寬容規則讀取（`KqHttp.bool`）。
+pub(crate) fn lenient_bool<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| match value {
+        serde_json::Value::Bool(flag) => Some(flag),
+        serde_json::Value::Number(number) => number.as_i64().map(|number| number != 0),
+        serde_json::Value::String(text) => match text.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" | "yes" | "y" => Some(true),
+            "false" | "0" | "no" | "n" => Some(false),
+            _ => None,
+        },
+        _ => None,
+    }))
+}
+
+/// 寬容旗標：與 [`lenient_bool`] 同一套規則，但缺少或無法解讀時視為 `false`。
+///
+/// 用於「預設為否」的旗標欄位（例如考勤流水的 `effective`）：伺服器沒給或給了
+/// 看不懂的值時，保守地不宣稱該筆記錄有效。
+pub(crate) fn lenient_flag<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(lenient_bool(deserializer)?.unwrap_or(false))
+}
+
 /// 缺欄位、不是陣列或個別項目解析失敗時都不報錯的列表欄位。
 ///
 /// 逐項解析並跳過失敗的項目（與 [`parse_lenient`] 同精神）：附件清單異常不該讓

@@ -1,8 +1,10 @@
 //! 應用程式資料目錄與檔案路徑解析。
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::error::{AppError, AppResult};
+
+use super::secure_file::create_private_dir;
 
 /// 應用程式資料目錄名稱（位於使用者的標準資料目錄之下）。
 pub const APP_DIR_NAME: &str = "ohmyXJTU";
@@ -50,17 +52,4 @@ pub fn tasks_path() -> AppResult<PathBuf> {
 /// 驗證碼圖片路徑（不建立資料目錄；供程式結束時清理使用）。
 pub fn captcha_path_no_create() -> Option<PathBuf> {
     dirs::data_dir().map(|base| base.join(APP_DIR_NAME).join(CAPTCHA_FILE_NAME))
-}
-
-fn create_private_dir(dir: &Path) -> AppResult<()> {
-    if dir.is_dir() {
-        return Ok(());
-    }
-    std::fs::create_dir_all(dir)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
-    }
-    Ok(())
 }

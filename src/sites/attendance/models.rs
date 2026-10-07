@@ -4,7 +4,7 @@ use serde::Deserialize;
 
 use crate::tone::Tone;
 
-use super::super::{optional_string_or_number, string_or_number, u32_or_string};
+use super::super::{lenient_flag, optional_string_or_number, string_or_number, u32_or_string};
 
 /// 考勤狀態。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -205,7 +205,12 @@ pub struct FlowRecord {
     #[serde(default)]
     pub collect_time: Option<String>,
     /// 是否落在某堂課的考勤範圍內。
-    #[serde(default)]
+    ///
+    /// 寬容讀取：伺服器對布林欄位的型別並不統一（參考實作的 `KqHttp.bool`
+    /// 同時嘗試 `effective` 與 `isEffective`，並接受 `"1"`／`"true"` 等字串）。
+    /// 缺少或無法解讀時視為 `false`（保守地不宣稱該筆記錄有效），不讓整頁
+    /// 流水因單一欄位的型別而解析失敗。
+    #[serde(default, alias = "isEffective", deserialize_with = "lenient_flag")]
     pub effective: bool,
 }
 

@@ -15,6 +15,7 @@ use crate::model::{ActivityDetailView, FlowData, ScheduleData};
 use crate::session::{AccessMode, SiteKind};
 use crate::sites::lms::LmsCourse;
 use crate::task::{CoursesData, Event, FailedTarget, HomeworkUpdate, Job};
+use crate::text::MAX_INLINE_CHARS;
 use crate::tui::app::{
     AgreementState, App, FormState, HomeworkData, LmsLevel, LoginScreen, NavItem, Page, Screen,
     SettingsState, TaskEntry, TaskFormState, TermPickerState,
@@ -952,6 +953,60 @@ fn login_failed_stays_on_credentials_form() {
             );
         }
         other => panic!("应停留在凭证表单，实际为 {other:?}"),
+    }
+}
+
+/// 登入錯誤訊息可能直接來自伺服器（登入頁的 `el-alert`）：必須與其他伺服器
+/// 文字一樣先清理，再寫進覆蓋層與表單。
+#[test]
+fn login_error_message_is_sanitized() {
+    let long = "错".repeat(MAX_INLINE_CHARS + 20);
+    let hostile = format!("\u{1b}[31m登录失败\u{7}{long}");
+
+    let mut form_app = credentials_app("3120000001");
+    apply_event(
+        &mut form_app,
+        Event::LoginFailed {
+            site: crate::session::SiteKind::Attendance,
+            message: hostile.clone(),
+        },
+    );
+
+    let Some(LoginScreen::Credentials { form, .. }) = form_app.login.as_deref() else {
+        panic!("应停留在凭证表单");
+    };
+    let error = form.error.clone().expect("表单应显示错误");
+    assert!(!error.contains('\u{1b}'), "控制字元应被移除：{error:?}");
+    assert!(!error.contains('\u{7}'), "控制字元应被移除：{error:?}");
+    assert!(
+        error.chars().count() <= MAX_INLINE_CHARS,
+        "超长訊息应被截断：{} 字元",
+        error.chars().count()
+    );
+
+    // 非憑證表單的登入畫面（例如進度）會收斂成失敗畫面，同樣要清理。
+    let mut progress = app();
+    progress.set_screen(Screen::Main);
+    progress.login = Some(Box::new(LoginScreen::Progress {
+        note: "正在登录考勤系统…".to_owned(),
+    }));
+    apply_event(
+        &mut progress,
+        Event::LoginFailed {
+            site: crate::session::SiteKind::Attendance,
+            message: hostile,
+        },
+    );
+    match progress.login.as_deref() {
+        Some(LoginScreen::Failed { message, .. }) => {
+            assert!(!message.contains('\u{1b}'), "控制字元应被移除：{message:?}");
+            assert!(
+                message.chars().count() <= MAX_INLINE_CHARS,
+                "超长訊息应被截断：{} 字元",
+                message.chars().count()
+            );
+        }
+        other => panic!("应切换到失败画面，实际为 {other:?}"),
     }
 }
 

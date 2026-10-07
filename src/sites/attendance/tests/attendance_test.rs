@@ -227,3 +227,126 @@ fn records_between_marks_truncation_at_the_page_cap() {
     assert_eq!(batch.records.len(), 2000, "至多 20 页 × 100 笔");
     assert_eq!(requests.load(Ordering::SeqCst), 20, "恰应请求 20 页");
 }
+
+/// `total` 說有記錄、回應卻沒有 `rows` 陣列：不得當成空頁一路翻到上限。
+///
+/// 當成空陣列會白跑 20 頁請求、最後以「超過分頁上限」回報且沒有任何記錄，把
+/// 協定問題誤報成資料問題；`total` 為 0 時缺 `rows` 則是正常的。
+#[test]
+fn missing_rows_array_follows_total() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use crate::config::{AccessPolicy, Config};
+    use crate::http::HttpClient;
+    use crate::http::fake::{FakeClient, json};
+    use crate::session::{AccessMode, SessionManager, SiteKind};
+
+    let start = chrono::NaiveDate::from_ymd_opt(2026, 9, 1).expect("日期");
+    let end = chrono::NaiveDate::from_ymd_opt(2026, 9, 7).expect("日期");
+
+    // 同一個假客戶端：課程考勤記錄說有 250 筆、流水說沒有記錄。
+    let requests = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&requests);
+    let client = Arc::new(FakeClient::with_responder(move |request: &HttpRequest| {
+        counter.fetch_add(1, Ordering::SeqCst);
+        let total = if request.url.contains("attendance-records") {
+            250
+        } else {
+            0
+        };
+        Ok(json(serde_json::json!({
+            "code": 0,
+            "message": "ok",
+            "data": { "total": total },
+        })))
+    }));
+    let direct: Arc<dyn HttpClient> = client.clone();
+    let webvpn: Arc<dyn HttpClient> = client;
+    let config = Config {
+        access_policy: AccessPolicy::Direct,
+        ..Config::default()
+    };
+    let mut session = SessionManager::with_clients(&config, direct, webvpn);
+    session.register(Box::new(AttendanceSite));
+    session.mark_logged_in(SiteKind::Attendance, AccessMode::Direct, Vec::new());
+    let mut api = AttendanceApi::new(&mut session);
+
+    let err = api
+        .records_between(start, end)
+        .expect_err("total 与回应矛盾时应回报协议错误");
+    assert!(matches!(err, AppError::Protocol(_)), "{err:?}");
+    assert!(err.to_string().contains("记录数组"), "{err}");
+    assert_eq!(requests.load(Ordering::SeqCst), 1, "不应重试或继续翻页");
+
+    // total 為 0 時缺 rows 是正常回應：空結果、不標截斷、只查一次。
+    let page = api.flow_page(1, 100).expect("total 为 0 时应视为空页");
+    assert!(page.records.is_empty());
+    assert_eq!(page.total, 0);
+    assert_eq!(requests.load(Ordering::SeqCst), 2);
+}
+
+/// 流水回應說還有記錄、這一頁卻是空的：標記為不完整並停止，不重複翻頁。
+#[test]
+fn empty_page_stops_the_pagination_early() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use crate::config::{AccessPolicy, Config};
+    use crate::http::HttpClient;
+    use crate::http::fake::{FakeClient, json};
+    use crate::session::{AccessMode, SessionManager, SiteKind};
+
+    let requests = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&requests);
+    let client = Arc::new(FakeClient::with_responder(move |_request: &HttpRequest| {
+        counter.fetch_add(1, Ordering::SeqCst);
+        // total 一直說還有 250 筆，但每一頁都回空陣列。
+        Ok(json(serde_json::json!({
+            "code": 0,
+            "message": "ok",
+            "data": { "rows": [], "total": 250 },
+        })))
+    }));
+    let direct: Arc<dyn HttpClient> = client.clone();
+    let webvpn: Arc<dyn HttpClient> = client;
+    let config = Config {
+        access_policy: AccessPolicy::Direct,
+        ..Config::default()
+    };
+    let mut session = SessionManager::with_clients(&config, direct, webvpn);
+    session.register(Box::new(AttendanceSite));
+    session.mark_logged_in(SiteKind::Attendance, AccessMode::Direct, Vec::new());
+    let mut api = AttendanceApi::new(&mut session);
+
+    let start = chrono::NaiveDate::from_ymd_opt(2026, 9, 1).expect("日期");
+    let end = chrono::NaiveDate::from_ymd_opt(2026, 9, 7).expect("日期");
+    let batch = api.records_between(start, end).expect("查询本身应成功");
+
+    assert!(batch.records.is_empty());
+    assert!(batch.truncated, "回应不完整时必须标记截断");
+    assert_eq!(requests.load(Ordering::SeqCst), 1, "空页不应重复请求");
+}
+
+/// 流水旗標 `effective` 寬容讀取：字串形式與 `isEffective` 別名都要接受。
+#[test]
+fn parses_the_effective_flag_leniently() {
+    let value = serde_json::json!([
+        {"id": 1, "effective": true},
+        {"id": 2, "effective": "1"},
+        {"id": 3, "effective": "false"},
+        {"id": 4, "isEffective": "yes"},
+        {"id": 5},
+        {"id": 6, "effective": {"unexpected": true}},
+    ]);
+
+    let records: Vec<FlowRecord> =
+        crate::sites::deserialize_value(value, "查询考勤流水").expect("应可解析");
+    assert_eq!(records.len(), 6, "单笔型别异常不得让整页失败");
+    assert!(records[0].effective, "true 视为有效");
+    assert!(records[1].effective, "\"1\" 视为有效");
+    assert!(!records[2].effective, "\"false\" 视为无效");
+    assert!(records[3].effective, "isEffective 别名应被接受");
+    assert!(!records[4].effective, "缺字段保守视为无效");
+    assert!(!records[5].effective, "无法解读的型别视为无效");
+}

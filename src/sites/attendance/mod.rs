@@ -13,6 +13,7 @@ pub use models::{
 use std::collections::HashMap;
 
 use chrono::NaiveDate;
+use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use url::Url;
 
@@ -138,15 +139,10 @@ impl<'a> AttendanceApi<'a> {
             json!({ "pageNum": page, "pageSize": page_size, "data": {} }),
         );
         let data = self.data(request, "查询考勤流水")?;
-        let records = deserialize_value(
-            data.get("rows")
-                .cloned()
-                .unwrap_or_else(|| Value::Array(Vec::new())),
-            "查询考勤流水",
-        )?;
         // `total` 必須是整數：缺欄位或型別不符時明確報錯，避免靜默歸零而
         // 只取到第一頁的資料（流水被悄悄截斷）。
         let total = required_total(&data, "查询考勤流水")?;
+        let records = required_rows(&data, total, "查询考勤流水")?;
         Ok(FlowPage {
             records,
             total,
@@ -172,17 +168,18 @@ impl<'a> AttendanceApi<'a> {
                 }),
             );
             let data = self.data(request, "查询课程考勤记录")?;
-            let rows: Vec<WaterRecord> = deserialize_value(
-                data.get("rows")
-                    .cloned()
-                    .unwrap_or_else(|| Value::Array(Vec::new())),
-                "查询课程考勤记录",
-            )?;
             let total = required_total(&data, "查询课程考勤记录")?;
+            let rows: Vec<WaterRecord> = required_rows(&data, total, "查询课程考勤记录")?;
+            let before = records.len();
             records.extend(rows);
 
             if records.len() as u64 >= total {
                 break false;
+            }
+            // `total` 說還有記錄、這一頁卻一筆都沒有：再翻頁只會重複同樣的
+            // 請求（最多 MAX_PAGES 次）。標記為不完整並停止，不假裝已取完。
+            if records.len() == before {
+                break true;
             }
             if page >= MAX_PAGES {
                 break true;
@@ -196,6 +193,29 @@ impl<'a> AttendanceApi<'a> {
         let response = self.session.send(SiteKind::Attendance, request)?;
         unwrap_envelope(&response, context)
     }
+}
+
+/// 取出分頁回應的記錄陣列。
+///
+/// `total` 為 0 時缺 `rows` 是正常的（真的沒有記錄）；`total` 大於 0 卻沒有
+/// 可用的 `rows` 陣列，代表回應與 `total` 自相矛盾——當成空陣列會讓分頁一路
+/// 查到上限，最後以「超過分頁上限」回報且沒有任何記錄，把協定問題誤報成
+/// 資料問題。
+fn required_rows<T: DeserializeOwned>(
+    data: &Value,
+    total: u64,
+    context: &str,
+) -> AppResult<Vec<T>> {
+    let rows = data.get("rows").cloned().unwrap_or(Value::Null);
+    if matches!(rows, Value::Array(_)) {
+        return deserialize_value(rows, context);
+    }
+    if total == 0 {
+        return Ok(Vec::new());
+    }
+    Err(AppError::protocol(format!(
+        "{context} 响应缺少记录数组（total 为 {total}）"
+    )))
 }
 
 /// 取出必填的整數 `total`；缺欄位或型別不符時回報協定錯誤。

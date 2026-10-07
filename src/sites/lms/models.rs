@@ -6,7 +6,7 @@
 use serde::Deserialize;
 
 use super::super::{
-    lenient_array, optional_string_lenient, optional_string_or_number,
+    lenient_array, lenient_bool, optional_string_lenient, optional_string_or_number,
     optional_string_or_number_lenient, optional_u64_lenient, string_or_number,
 };
 use super::html;
@@ -518,22 +518,4 @@ impl LmsSubmissionList {
         (self.skipped > 0)
             .then(|| format!("无法确认提交状态：有 {} 条提交记录无法解析", self.skipped))
     }
-}
-
-/// 寬容布林：接受布林、`0`/`1` 與其字串形式；其他型別視為未知（`None`）。
-fn lenient_bool<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value: Option<serde_json::Value> = serde::Deserialize::deserialize(deserializer)?;
-    Ok(value.and_then(|value| match value {
-        serde_json::Value::Bool(flag) => Some(flag),
-        serde_json::Value::Number(number) => number.as_i64().map(|number| number != 0),
-        serde_json::Value::String(text) => match text.trim().to_ascii_lowercase().as_str() {
-            "true" | "1" => Some(true),
-            "false" | "0" => Some(false),
-            _ => None,
-        },
-        _ => None,
-    }))
 }

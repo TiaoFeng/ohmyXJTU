@@ -1515,6 +1515,158 @@ fn relogin_progress_is_followed_by_a_page_failure_when_the_login_breaks() {
     assert!(harness.worker.retry.is_none());
 }
 
+/// 登入步驟失敗後不得留下一個「沒有人會再推進它」的流程。
+///
+/// 取不到驗證碼圖片（`show_captcha` 失敗）就是這種情形：錯誤從 `drive` 冒出
+/// 之後若還留著 `flow`，工作者主迴圈（`Worker::run`）會一直延後資料任務——
+/// 使用者按 `r` 送出的任務只會被合併進待執行佇列，頁面看起來像卡在「載入中」。
+#[test]
+fn a_failed_login_step_does_not_leave_the_flow_behind() {
+    let mut harness = harness(|request: &HttpRequest| {
+        let url = request.url.as_str();
+        if url == crate::auth::captcha::CAPTCHA_URL {
+            // 取不到驗證碼圖片：非連線層錯誤，不會自動重試。
+            return Ok(HttpResponse::new(404, url.to_owned(), b"".as_slice()));
+        }
+        if url == rsa::PUBLIC_KEY_URL {
+            return Ok(HttpResponse::new(
+                200,
+                rsa::PUBLIC_KEY_URL,
+                public_key_pem(),
+            ));
+        }
+        if url == attendance::LOGIN_URL {
+            return Ok(HttpResponse::new(200, ATTENDANCE_POST, login_page()));
+        }
+        // 帳密被拒；失敗次數會跨驅動器累積（第三次之後要求圖片驗證碼）。
+        Ok(HttpResponse::new(
+            401,
+            ATTENDANCE_POST,
+            "<html></html>".to_owned(),
+        ))
+    });
+
+    // 前三次：帳密被拒，流程正常結束。
+    for _ in 0..3 {
+        harness
+            .dispatch(Job::RetryLogin {
+                site: SiteKind::Attendance,
+            })
+            .expect("帐密被拒应正常回报");
+        assert!(harness.worker.flow.is_none(), "凭据被拒后不应留下流程");
+    }
+
+    // 第四次：已達驗證碼門檻，但圖片取不到 → 登入流程無法繼續。
+    harness.worker.captcha_path = Some(std::path::PathBuf::from("/nonexistent/captcha.png"));
+    let err = harness
+        .dispatch(Job::RetryLogin {
+            site: SiteKind::Attendance,
+        })
+        .expect_err("取不到验证码图片时登录应当失败");
+    assert!(matches!(err, AppError::Http { status: 404 }), "{err:?}");
+    assert!(
+        harness.worker.flow.is_none(),
+        "失败的登入步骤必须作废流程，否则资料任务会被无限延后"
+    );
+    assert!(
+        harness.worker.captcha_path.is_none(),
+        "作废流程时应一并清掉验证码暂存"
+    );
+}
+
+/// 互動登入步驟「硬失敗」（不是驗證碼填錯）時同樣要作廢流程。
+///
+/// 這裡刻意讓待存憑證為 `None`（一般的手動重登）：這種情況下
+/// `discard_pending_vault` 會直接返回，不會順手清掉流程，必須由控制任務的
+/// 善後負責；否則 `flow` 會一直留著，資料任務永遠排不到。
+#[test]
+fn a_hard_login_step_failure_drops_the_flow_without_a_pending_switch() {
+    let mut harness = harness(|request: &HttpRequest| {
+        let url = request.url.as_str();
+        if url == rsa::PUBLIC_KEY_URL {
+            return Ok(HttpResponse::new(
+                200,
+                rsa::PUBLIC_KEY_URL,
+                public_key_pem(),
+            ));
+        }
+        if url == attendance::LOGIN_URL {
+            return Ok(HttpResponse::new(
+                200,
+                ATTENDANCE_POST,
+                login_page_with_mfa(),
+            ));
+        }
+        if url.contains("/mfa/detect") {
+            return Ok(json(serde_json::json!({
+                "code": 0,
+                "data": { "state": "s-1", "need": true }
+            })));
+        }
+        if url.contains("/securephone/send") || url.contains("/initByType/securephone") {
+            return Ok(json(serde_json::json!({
+                "code": 0,
+                "data": { "securePhone": "138****1234", "gid": "g-1" }
+            })));
+        }
+        // 核驗端點壞掉：不是「驗證碼填錯」，不可重試也不可保留流程。
+        Ok(HttpResponse::new(500, url.to_owned(), b"".as_slice()))
+    });
+
+    harness
+        .dispatch(Job::RetryLogin {
+            site: SiteKind::Attendance,
+        })
+        .expect("登录应停在短信验证");
+    assert!(harness.saw(|event| matches!(event, Event::LoginNeedsMfa { .. })));
+    harness
+        .dispatch(Job::SendMfaCode)
+        .expect("发送验证码应当成功");
+    assert!(
+        harness.worker.pending_vault.is_none(),
+        "测试前提：没有待存凭证"
+    );
+
+    let err = harness
+        .dispatch(Job::VerifyMfaCode(Secret::from("123456")))
+        .expect_err("核验接口坏掉时应回报错误");
+    assert!(!matches!(err, AppError::VerificationRetry(_)), "{err:?}");
+    assert!(
+        harness.worker.flow.is_none(),
+        "硬失败后必须作废流程，否则资料任务会被无限延后"
+    );
+}
+
+/// 只有「送簡訊驗證碼」失敗不算流程結束：驅動器仍可用，使用者再按一次即可重送。
+#[test]
+fn only_a_sms_send_failure_keeps_the_login_flow_alive() {
+    for job in [
+        Job::RetryLogin {
+            site: SiteKind::Attendance,
+        },
+        Job::RetryWithAccount {
+            site: SiteKind::Attendance,
+            passphrase: Secret::from("secret123"),
+            credentials: Credentials::new("3120000002", "new-password"),
+        },
+        Job::ChangeAccount {
+            passphrase: Secret::from("secret123"),
+            credentials: Credentials::new("3120000002", "new-password"),
+        },
+        Job::SubmitCaptcha(Secret::from("abcd")),
+        Job::VerifyMfaCode(Secret::from("123456")),
+    ] {
+        assert!(login_step_breaks_the_flow(&job), "应作废流程：{job:?}");
+    }
+    assert!(
+        !login_step_breaks_the_flow(&Job::SendMfaCode),
+        "送码失败只是那一次发送失败，驱动仍可用"
+    );
+    assert!(!login_step_breaks_the_flow(&Job::LoadSchedule {
+        force: false
+    }));
+}
+
 /// 取消登入：丟棄流程、待存憑證與待重試任務。
 ///
 /// 登入互動期間資料任務一律延後，若不取消，使用者關閉登入覆蓋層後按 `r`

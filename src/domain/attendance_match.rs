@@ -75,8 +75,9 @@ impl From<AttendanceStatus> for LessonAttendance {
 /// 顯示用狀態。
 ///
 /// - 有記錄：顯示伺服器回報的狀態。
-/// - 無記錄且課程尚未發生：顯示「待考勤」。
-/// - 無記錄且課程已過：顯示「待核实」。
+/// - 無記錄且課程在未來（`lesson_date > today`）：顯示「待考勤」。
+/// - 無記錄且課程在當天或過去：顯示「待核实」——本程式沒有節次時間表，無法
+///   判斷今天這堂是否已經上完，因此不推斷為「尚未發生」（缺失記錄不得推斷為正常）。
 pub fn display_state(
     status: Option<AttendanceStatus>,
     lesson_date: NaiveDate,

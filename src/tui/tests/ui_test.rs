@@ -2444,7 +2444,6 @@ fn homework_detail_combines_media_and_link_hint() {
     );
 }
 
-/// 底欄在詳情可捲動時提示捲動鍵（終端夠寬時才看得見完整提示）。
 /// 底欄訊息依語意上色：一般提示（例如「登录成功」）不該長得像錯誤。
 #[test]
 fn footer_colors_messages_by_tone() {
@@ -2455,7 +2454,7 @@ fn footer_colors_messages_by_tone() {
         (0..WIDTH)
             .map(|x| &buffer[(x, row)])
             .find(|cell| cell.symbol() != " ")
-            .expect("底栏应有讯息")
+            .expect("底栏应有訊息")
             .clone()
     }
 
@@ -2485,6 +2484,7 @@ fn footer_colors_messages_by_tone() {
     );
 }
 
+/// 底欄在詳情可捲動時提示捲動鍵（終端夠寬時才看得見完整提示）。
 #[test]
 fn footer_hints_scrolling_when_detail_is_scrollable() {
     let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00+08:00").expect("固定时间");
@@ -3335,7 +3335,7 @@ fn task_page_hides_the_search_box_when_no_search_is_open() {
         crate::tui::views::draw(frame, &mut app)
     });
     let text = screen_text(terminal.backend());
-    assert!(!text.contains("搜索："), "未搜寻时不应出现搜寻框：\n{text}");
+    assert!(!text.contains("搜索："), "未搜尋時不應出现搜尋框：\n{text}");
 }
 
 #[test]

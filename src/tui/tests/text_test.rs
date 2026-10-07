@@ -22,6 +22,16 @@ fn debug_is_masked_and_clear_empties() {
     assert_eq!(line.cursor(), 0);
 }
 
+/// 多行輸入框的 `Debug` 不得印出使用者輸入的內容（任務描述）。
+#[test]
+fn text_area_debug_hides_the_text() {
+    let area = TextArea::new("第一章\n第二章");
+    let text = format!("{area:?}");
+    assert!(!text.contains("第一章"), "不得输出输入内容：{text}");
+    assert!(!text.contains("第二章"), "不得输出输入内容：{text}");
+    assert!(text.contains("lines: 2"), "只应显示行数：{text}");
+}
+
 #[test]
 fn edits_by_grapheme() {
     let mut line = InputLine::new();

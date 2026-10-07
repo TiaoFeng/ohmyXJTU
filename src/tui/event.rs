@@ -285,6 +285,8 @@ fn apply_flow(app: &mut App, data: FlowData) {
         return;
     }
     app.flow_pending_page = None;
+    // 記住這一頁：下次翻回同一頁時直接顯示，不必再查一次。
+    app.store_flow_page(&data);
     app.attendance = Page::Ready(data);
     app.updated_at.attendance = Some(now_clock());
     app.flow_state.select(Some(0));

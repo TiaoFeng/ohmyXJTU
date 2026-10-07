@@ -1199,6 +1199,12 @@ pub struct App {
     ///
     /// 收到相符的資料後即清空。
     pub flow_pending_page: Option<u32>,
+    /// 已載入過的考勤流水各頁（記憶體快取）。
+    ///
+    /// 翻頁時直接顯示，不重複查詢該頁（使用者要重新查詢按 `r`，那時整個快取
+    /// 作廢）。以會話為界：換帳號時清空，切換訪問模式則保留（資料仍屬於同一
+    /// 份流水）。
+    flow_pages: HashMap<u32, FlowData>,
     /// 思源學堂頁。
     pub lms: LmsState,
     /// 訪問策略設定。
@@ -1260,6 +1266,7 @@ impl App {
             term_options: Vec::new(),
             attendance: Page::Idle,
             flow_pending_page: None,
+            flow_pages: HashMap::new(),
             lms: LmsState::default(),
             access_policy,
             site_modes: HashMap::new(),
@@ -1431,6 +1438,7 @@ impl App {
             self.term_options.clear();
             self.attendance = Page::Idle;
             self.flow_pending_page = None;
+            self.flow_pages.clear();
             // 自訂義任務屬於本機資料，與帳號無關：內容保留，只清掉任務頁的
             // 暫時狀態（搜尋、多選、待確認刪除）。
             self.task_page.clear_transient();
@@ -1652,6 +1660,30 @@ impl App {
     /// 丟棄所有週快取（使用者按 `r` 強制重新查詢時）。
     pub fn clear_schedule_weeks(&mut self) {
         self.schedule_weeks.clear();
+    }
+
+    /// 記住一頁考勤流水（由流水事件寫入），供之後翻回該頁時直接顯示。
+    pub fn store_flow_page(&mut self, data: &FlowData) {
+        self.flow_pages.insert(data.page, data.clone());
+    }
+
+    /// 顯示記憶體中該頁的流水並回到第一列；回傳是否命中快取。
+    ///
+    /// 未命中時呼叫端要清空內容並請工作者載入該頁（見
+    /// `controller::change_flow_page`）。更新時間刻意不動：這份資料是先前抓
+    /// 回來的，標題上的「更新于」仍必須是那一次的結果。
+    pub fn show_cached_flow_page(&mut self, page: u32) -> bool {
+        let Some(data) = self.flow_pages.get(&page).cloned() else {
+            return false;
+        };
+        self.attendance = Page::Ready(data);
+        self.flow_state.select(Some(0));
+        true
+    }
+
+    /// 丟棄所有流水頁快取（使用者按 `r` 強制重新查詢時）。
+    pub fn clear_flow_pages(&mut self) {
+        self.flow_pages.clear();
     }
 
     /// 將指定位置標記為失敗（錯誤只影響對應頁面）。

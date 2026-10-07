@@ -370,6 +370,67 @@ fn bracket_keys_page_the_flow_on_attendance_page() {
     assert_eq!(app.homework_group, HomeworkGroup::Unfinished);
 }
 
+/// 看過的流水頁：翻回去時直接顯示記憶體中的那一頁（不進載入中、不重查）；
+/// 待回頁碼仍要記（遲到的舊頁結果必須據此丟棄）。
+#[test]
+fn switching_back_to_a_cached_flow_page_shows_it_without_reloading() {
+    let (jobs, rx) = channel();
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Attendance;
+    app.attendance = Page::Ready(crate::model::FlowData {
+        records: Vec::new(),
+        page: 1,
+        total_pages: 3,
+        total: 20,
+    });
+    app.store_flow_page(&crate::model::FlowData {
+        records: Vec::new(),
+        page: 2,
+        total_pages: 3,
+        total: 60,
+    });
+
+    press(&mut app, &jobs, KeyCode::Char(']'));
+    assert_eq!(app.flow_pending_page, Some(2), "应记下待回的目标页码");
+    assert!(!app.attendance.is_loading(), "命中快取不应进入加载中");
+    assert_eq!(
+        app.attendance.ready().map(|data| data.total),
+        Some(60),
+        "应直接显示该页的快取资料"
+    );
+    assert!(rx.try_recv().is_err(), "命中快取不应送出网络任务");
+}
+
+/// `r` 強制刷新：頁快取作廢，之後翻回任何一頁都會重新查詢。
+#[test]
+fn refresh_clears_the_flow_page_cache() {
+    let (jobs, rx) = channel();
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Attendance;
+    app.attendance = Page::Ready(crate::model::FlowData {
+        records: Vec::new(),
+        page: 1,
+        total_pages: 3,
+        total: 20,
+    });
+    app.store_flow_page(&crate::model::FlowData {
+        records: Vec::new(),
+        page: 2,
+        total_pages: 3,
+        total: 60,
+    });
+
+    // 重新查詢目前頁（第 1 頁）：頁快取一併作廢。
+    press(&mut app, &jobs, KeyCode::Char('r'));
+    assert!(matches!(rx.try_recv(), Ok(Job::LoadFlow { page: 1 })));
+
+    press(&mut app, &jobs, KeyCode::Char(']'));
+    assert!(app.attendance.is_loading(), "过期快取不应直接显示");
+    assert!(matches!(rx.try_recv(), Ok(Job::LoadFlow { page: 2 })));
+}
+
 #[test]
 fn enter_toggles_details_and_escape_closes() {
     let (jobs, _rx) = channel();

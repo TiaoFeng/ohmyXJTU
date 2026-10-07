@@ -53,6 +53,10 @@ pub(super) fn request(app: &mut App, jobs: &Sender<Job>, nav: NavItem, force: bo
             let _ = jobs.send(Job::LoadHomework { force });
         }
         NavItem::Attendance => {
+            if force {
+                // 強制刷新：頁快取一律作廢（之後翻回任何一頁都會重新查詢）。
+                app.clear_flow_pages();
+            }
             let page = flow_page(app);
             app.attendance.start_loading("正在加载考勤流水…");
             let _ = jobs.send(Job::LoadFlow { page });
@@ -344,10 +348,14 @@ fn flow_page(app: &App) -> u32 {
 
 /// 考勤流水分頁（`[`／`]`）；超出頁數範圍時不動作。
 ///
+/// 該頁已載入過（`App::flow_pages`）時直接顯示快取：翻頁不再重查，也不會再閃
+/// 一次「載入中」——使用者要重新查詢時按 `r`（那時整個頁快取作廢）。
+///
 /// 目標頁以 [`flow_page`] 為準：載入期間 `ready()` 仍是上一頁，拿它計算會讓
 /// 連續按鍵（例如連按兩次 `]`）都算成同一頁而只前進一次。目標頁另記在
 /// `App::flow_pending_page`：已在執行中的舊頁載入不會被作廢（翻頁指令要等它
-/// 回報後才生效），其結果必須由 `event::apply_flow` 依此欄位丟棄。
+/// 回報後才生效），其結果必須由 `event::apply_flow` 依此欄位丟棄——快取命中
+/// 時同樣要記，否則那筆遲到的舊頁結果會把畫面換回使用者已經離開的那一頁。
 pub(super) fn change_flow_page(app: &mut App, jobs: &Sender<Job>, delta: i32) {
     if app.nav != NavItem::Attendance {
         return;
@@ -362,6 +370,9 @@ pub(super) fn change_flow_page(app: &mut App, jobs: &Sender<Job>, delta: i32) {
 
     let target = u32::try_from(target).unwrap_or(1);
     app.flow_pending_page = Some(target);
+    if app.show_cached_flow_page(target) {
+        return;
+    }
     app.attendance
         .start_loading(format!("正在加载第 {target} 页…"));
     let _ = jobs.send(Job::LoadFlow { page: target });

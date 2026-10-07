@@ -412,6 +412,57 @@ fn flow_event_without_a_pending_switch_is_always_applied() {
     assert_eq!(app.flow_pending_page, None);
 }
 
+/// 套用的流水事件會存入頁快取：翻回同一頁時直接顯示、不重查。
+#[test]
+fn applied_flow_event_fills_the_page_cache() {
+    let mut app = app();
+    app.nav = NavItem::Attendance;
+    apply_flow_event(&mut app, 1);
+    apply_flow_event(&mut app, 2);
+    assert_eq!(app.attendance.ready().map(|data| data.page), Some(2));
+
+    // 翻回第 1 頁：內容直接來自快取（不進載入中），也不送出翻頁任務。
+    let (jobs, rx) = channel();
+    controller::change_flow_page(&mut app, &jobs, -1);
+    assert_eq!(app.flow_pending_page, Some(1));
+    assert!(!app.attendance.is_loading(), "命中快取不应进入加载中");
+    assert_eq!(app.attendance.ready().map(|data| data.page), Some(1));
+    assert!(rx.try_recv().is_err(), "命中快取不应送出网络任务");
+}
+
+/// 換帳號時頁快取一併作廢：新帳號翻到同一頁碼必須重新查詢，否則會顯示上一個
+/// 帳號留下來的流水。
+#[test]
+fn account_change_clears_the_flow_page_cache() {
+    let mut app = app();
+    app.nav = NavItem::Attendance;
+    app.store_flow_page(&FlowData {
+        records: Vec::new(),
+        page: 2,
+        total_pages: 5,
+        total: 99,
+    });
+
+    apply_event(
+        &mut app,
+        Event::SessionsCleared {
+            account_changed: true,
+        },
+    );
+
+    // 新帳號載入第 1 頁後翻到第 2 頁：舊帳號的快取不得命中。
+    apply_flow_event(&mut app, 1);
+    let (jobs, rx) = channel();
+    controller::change_flow_page(&mut app, &jobs, 1);
+    assert!(app.attendance.is_loading(), "换账号后不得命中旧快取");
+    assert_eq!(
+        app.attendance.ready().map(|data| data.total),
+        Some(0),
+        "载入中应显示新帐号第 1 页的旧资料"
+    );
+    assert!(matches!(rx.try_recv(), Ok(Job::LoadFlow { page: 2 })));
+}
+
 /// 待回頁碼的生命週期：換帳號清除，切換訪問模式保留（與課表的待回週次一致）。
 #[test]
 fn pending_flow_page_follows_the_account_lifecycle() {

@@ -186,10 +186,24 @@ impl Drop for InputLine {
 /// 每個邏輯行各由一個 [`InputLine`] 維護（含游標），因此插入、刪除、字素級
 /// 游標與水平捲動等行為都與單行輸入完全一致；畫面只顯示游標附近的行，不做
 /// 自動軟換行（過寬的行由 `input_window` 水平捲動）。
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TextArea {
     lines: Vec<InputLine>,
     row: usize,
+}
+
+/// 手寫 [`std::fmt::Debug`]：多行輸入框存的就是使用者輸入的任務描述。
+///
+/// 目前 [`InputLine`] 自己的 `Debug` 已經遮蔽內容，這裡仍然明寫——否則哪天
+/// `InputLine` 的遮罩被拿掉，這一層會跟著漏（與 `Secret` 同一條規則）。
+impl std::fmt::Debug for TextArea {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TextArea")
+            .field("lines", &self.lines.len())
+            .field("row", &self.row)
+            .finish()
+    }
 }
 
 impl TextArea {

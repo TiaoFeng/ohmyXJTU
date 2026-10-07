@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
-use ratatui::style::Color;
+use ratatui::style::{Color, Modifier};
 
 use crate::config::AccessPolicy;
 use crate::domain::attendance_match::LessonAttendance;
@@ -663,7 +663,7 @@ fn activity_detail_converts_submission_times_to_school_time() {
         description: None,
         end_time: Some("2026-09-25T15:59:59.000Z".to_owned()),
         submit_by_group: Some(false),
-        submissions: Some(list.list),
+        submissions: Some(list),
         note: None,
     });
 
@@ -1980,7 +1980,7 @@ fn activity_detail_counts_effective_submissions_consistently() {
         description: None,
         end_time: None,
         submit_by_group: Some(false),
-        submissions: Some(list.list),
+        submissions: Some(list),
         note: None,
     });
 
@@ -2020,7 +2020,7 @@ fn activity_detail_reports_no_effective_submissions() {
         description: None,
         end_time: None,
         submit_by_group: Some(false),
-        submissions: Some(list.list),
+        submissions: Some(list),
         note: None,
     });
 
@@ -2031,6 +2031,109 @@ fn activity_detail_reports_no_effective_submissions() {
     assert!(
         text.contains("提交记录：暂无有效提交（另有 2 条历史版本）"),
         "全为旧版本时不得显示为有效提交：\n{text}"
+    );
+}
+
+/// 分數以 JSON 字串回傳時不得連引號一起顯示。
+///
+/// 伺服器對分數的型別並不統一（`90`、`"90"`、`null`）：直接 `Display` 一個
+/// `serde_json::Value` 會印出 `"90"`，看起來像資料壞掉。
+#[test]
+fn activity_detail_shows_scores_without_json_quotes() {
+    let list: LmsSubmissionList = serde_json::from_str(
+        r#"{"list":[
+            {"id":1,"is_latest_version":true,"submitted_at":"2026-09-20T02:00:00Z","score":"90"},
+            {"id":2,"is_latest_version":true,"submitted_at":"2026-09-21T02:00:00Z","score":88.5},
+            {"id":3,"is_latest_version":true,"submitted_at":"2026-09-22T02:00:00Z","score":null},
+            {"id":4,"is_latest_version":true,"submitted_at":"2026-09-23T02:00:00Z"}
+        ]}"#,
+    )
+    .expect("脱敏样本");
+
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Lms;
+    app.lms.level = LmsLevel::Detail;
+    app.lms.detail = Page::Ready(ActivityDetailView {
+        id: "1".to_owned(),
+        title: "作业A".to_owned(),
+        kind: ActivityKind::Homework,
+        description: None,
+        end_time: None,
+        submit_by_group: Some(false),
+        submissions: Some(list),
+        note: None,
+    });
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(text.contains("分数：90"), "字符串分数不应带引号：\n{text}");
+    assert!(!text.contains("\"90\""), "不得显示 JSON 引号：\n{text}");
+    assert!(text.contains("分数：88.5"), "数字分数应原样显示：\n{text}");
+    assert_eq!(
+        text.matches("分数：").count(),
+        2,
+        "null 与缺字段不应显示分数：\n{text}"
+    );
+}
+
+/// 有提交記錄讀不出來時不得宣稱「視為未提交」（讀不出來的那筆可能才是有效提交）。
+#[test]
+fn activity_detail_reports_unreadable_submissions() {
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Lms;
+    app.lms.level = LmsLevel::Detail;
+    app.lms.detail = Page::Ready(ActivityDetailView {
+        id: "1".to_owned(),
+        title: "作业A".to_owned(),
+        kind: ActivityKind::Homework,
+        description: None,
+        end_time: None,
+        submit_by_group: Some(false),
+        submissions: Some(LmsSubmissionList {
+            list: Vec::new(),
+            skipped: 2,
+        }),
+        note: None,
+    });
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(
+        text.contains("提交记录：无法确认（2 条记录无法解析）"),
+        "读不出记录时应显示无法确认：\n{text}"
+    );
+    assert!(
+        !text.contains("视为未提交"),
+        "有记录读不出来时不得说视为未提交：\n{text}"
+    );
+
+    // 已確認有有效提交時，額外說明讀不出來的筆數（上面的數字可能偏低）。
+    let list: LmsSubmissionList =
+        serde_json::from_str(r#"{"list":[{"id":1,"is_latest_version":true}]}"#).expect("脱敏样本");
+    app.lms.detail = Page::Ready(ActivityDetailView {
+        id: "1".to_owned(),
+        title: "作业A".to_owned(),
+        kind: ActivityKind::Homework,
+        description: None,
+        end_time: None,
+        submit_by_group: Some(false),
+        submissions: Some(LmsSubmissionList { skipped: 1, ..list }),
+        note: None,
+    });
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(
+        text.contains("提交记录：1 条有效，另有 1 条无法解析"),
+        "已确认时应保留无法解析的说明：\n{text}"
     );
 }
 
@@ -2338,6 +2441,46 @@ fn homework_detail_combines_media_and_link_hint() {
     assert!(
         text.contains("说明含图片、链接"),
         "图片与链接并存时应合并提示：\n{text}"
+    );
+}
+
+/// 底欄訊息依語意上色：一般提示（例如「登录成功」）不該長得像錯誤。
+#[test]
+fn footer_colors_messages_by_tone() {
+    /// 底欄第一個非空白格（訊息一律以一個空白起頭）。
+    fn footer_cell(terminal: &TestBackend) -> ratatui::buffer::Cell {
+        let buffer = terminal.buffer();
+        let row = HEIGHT - 1;
+        (0..WIDTH)
+            .map(|x| &buffer[(x, row)])
+            .find(|cell| cell.symbol() != " ")
+            .expect("底栏应有訊息")
+            .clone()
+    }
+
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+
+    // 一般提示：提示色、不是紅色。
+    app.set_message("登录成功");
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let cell = footer_cell(terminal.backend());
+    assert_eq!(cell.symbol(), "登");
+    assert_eq!(cell.fg, THEME.blue, "一般提示应为提示色：{cell:?}");
+    assert_ne!(cell.fg, THEME.red, "一般提示不得显示为错误色");
+
+    // 錯誤訊息：紅色粗體。
+    app.set_error_message("作业失败：网络连接失败");
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let cell = footer_cell(terminal.backend());
+    assert_eq!(cell.fg, THEME.red, "错误应以错误色呈现：{cell:?}");
+    assert!(
+        cell.modifier.contains(Modifier::BOLD),
+        "错误应加粗强调：{cell:?}"
     );
 }
 

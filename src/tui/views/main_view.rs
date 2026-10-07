@@ -7,6 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, Paragraph};
 
 use crate::text::display_width;
+use crate::tone::Tone;
 use crate::tui::app::{App, LmsLevel, NavItem, Screen};
 use crate::tui::theme::THEME;
 use crate::tui::views::{content, settings, task_form, task_menu, term_picker};
@@ -130,10 +131,14 @@ const SCROLL_HINT: &str = "PgUp/PgDn 滚动";
 const SORT_HINT: &str = "排序：[p] 优先级  [d] 截止时间  [n] 默认  esc 取消";
 
 fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
+    // 訊息依語意上色：失敗與異常狀態用紅色粗體，操作結果與一般提示用一般色——
+    // 「登录成功」「已添加任务」不該長得像錯誤。
     let line = match app.message_text() {
         Some(message) => Line::from(Span::styled(
             format!(" {message}"),
-            THEME.error_style().add_modifier(Modifier::BOLD),
+            THEME
+                .status_style(app.message_tone().unwrap_or(Tone::Info))
+                .add_modifier(Modifier::BOLD),
         )),
         None => Line::from(Span::styled(
             format!(" {}", hints(app, area.width.saturating_sub(FOOTER_INDENT))),

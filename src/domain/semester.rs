@@ -53,12 +53,14 @@ impl TermCode {
         Self::new(year.parse().ok()?, ordinal.parse().ok()?)
     }
 
-    /// 起始學年。
+    /// 起始學年（僅供測試斷言解析結果）。
+    #[cfg(test)]
     pub fn start_year(self) -> u16 {
         self.start_year
     }
 
-    /// 學期序（1 起）。
+    /// 學期序（1 起；僅供測試斷言解析結果）。
+    #[cfg(test)]
     pub fn ordinal(self) -> u8 {
         self.ordinal
     }

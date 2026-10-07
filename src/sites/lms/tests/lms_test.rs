@@ -107,6 +107,95 @@ fn parses_activities_and_kinds() {
     );
 }
 
+/// 型別異常的欄位只損失該欄位，不得讓整筆作業消失或整課作業退回「待核实」。
+///
+/// 伺服器對這些欄位的型別並不穩定（布林出現過 `0`／`"true"`，文字出現過數字）；
+/// 修復前 `submit_by_group`／`published` 是嚴格的 `Option<bool>`、`title` 是嚴格的
+/// `Option<String>`，任何一個型別異常都會讓整項被 `parse_lenient` 丟棄——作業直接
+/// 從任務頁消失。
+#[test]
+fn tolerates_loosely_typed_activity_fields() {
+    let value = json!([{
+        "id": 9101,
+        "course_id": 4711,
+        "type": "homework",
+        "title": 123,
+        "start_time": 5,
+        "end_time": "2026-09-30T15:59:00.000Z",
+        "submit_by_group": "true",
+        "group_id": {"unexpected": true},
+        "user_submit_count": "3",
+        "published": 0
+    }]);
+
+    let (activities, skipped): (Vec<LmsActivity>, usize) =
+        crate::sites::parse_lenient(value, "查询课程活动").unwrap();
+    assert_eq!(skipped, 0, "型别异常不应让整项被跳过");
+    let activity = &activities[0];
+    assert_eq!(activity.kind(), ActivityKind::Homework);
+    assert_eq!(activity.title, None, "无法解读的标题视为缺漏");
+    assert_eq!(activity.display_title(), "作业", "标题缺漏时回退为类型标签");
+    assert_eq!(activity.start_time, None);
+    assert_eq!(
+        activity.submit_by_group,
+        Some(true),
+        "字符串布林应按宽容规则解读"
+    );
+    assert_eq!(activity.group_id, None);
+    assert_eq!(activity.user_submit_count, Some(3), "数字字符串应可解读");
+    assert_eq!(activity.published, Some(false), "0 应解读为假");
+    assert_eq!(activity.course_id.as_deref(), Some("4711"));
+
+    // 活動類型讀不出來時保留項目（型別未知），而不是整項消失。
+    let value = json!([{"id": 9102, "type": 3, "title": "类型异常"}]);
+    let (activities, skipped): (Vec<LmsActivity>, usize) =
+        crate::sites::parse_lenient(value, "查询课程活动").unwrap();
+    assert_eq!(skipped, 0);
+    assert_eq!(activities[0].kind(), ActivityKind::Unknown);
+    assert_eq!(activities[0].display_title(), "类型异常");
+}
+
+/// 提交單位欄位型別異常時視同缺少：一律「待核实」且**不發出任何提交查詢**。
+///
+/// 猜成個人作業可能把小組作業的提交記錄誤判為「已完成」，因此保守方向必須是
+/// 「無法確認」。詳情缺少 `submit_by_group` 的既有語意與此一致，這裡鎖定型別
+/// 異常也走同一條路。
+#[test]
+fn unknown_submit_by_group_type_stays_unknown_without_requests() {
+    use std::sync::Arc;
+
+    use crate::config::{AccessPolicy, Config};
+    use crate::http::HttpClient;
+    use crate::http::fake::FakeClient;
+    use crate::session::{AccessMode, SessionManager, SiteKind};
+
+    let client = Arc::new(FakeClient::with_responder(|_request: &HttpRequest| {
+        panic!("无法判定提交单位时不得发出任何请求");
+    }));
+    let direct: Arc<dyn HttpClient> = client.clone();
+    let webvpn: Arc<dyn HttpClient> = client;
+    let config = Config {
+        access_policy: AccessPolicy::Direct,
+        ..Config::default()
+    };
+    let mut session = SessionManager::with_clients(&config, direct, webvpn);
+    session.register(Box::new(LmsSite));
+    session.mark_logged_in(SiteKind::Lms, AccessMode::Direct, Vec::new());
+    let mut api = LmsApi::new(&mut session);
+
+    let detail: LmsActivity = crate::sites::deserialize_value(
+        json!({"id": "9001", "type": "homework", "submit_by_group": "maybe"}),
+        "查询活动详情",
+    )
+    .expect("活动详情");
+    assert_eq!(detail.submit_by_group, None, "无法解读时应视为缺漏");
+
+    let summary = api.submission_summary_for(&detail).expect("摘要");
+    assert_eq!(summary.submit_by_group, None);
+    assert_eq!(summary.count, None, "无法确认时提交数必须为未知");
+    assert_eq!(summary.note.as_deref(), Some(MISSING_SUBMIT_BY_GROUP_NOTE));
+}
+
 #[test]
 fn classifies_server_types_case_insensitively() {
     assert_eq!(
@@ -384,6 +473,23 @@ fn parses_user_id_from_loose_javascript_page() {
     assert_eq!(user_id_from_page(html), None);
 }
 
+/// 使用者資訊含代理對（emoji）時仍必須取得到 `user.id`。
+///
+/// 頁面以 UTF-16 跳脫表示非 BMP 字元（`\uD83D\uDE00`）；若解析器不組合代理對，
+/// 整段 `globalData` 會解析失敗，`user_id` 取不到，個人作業的提交查詢全部失敗
+/// 而顯示「待核实」。
+#[test]
+fn parses_user_id_when_the_page_contains_surrogate_pairs() {
+    let html = r#"<html><script>
+        var globalData = { user: { id: 5150, name: "\uD83D\uDE00 张三" }, dept: {} };
+    </script></html>"#;
+    assert_eq!(user_id_from_page(html).as_deref(), Some("5150"));
+
+    // 整段無法解析時改按 user/dept 邊界擷取：該路徑同樣要看得到代理對。
+    let html = r#"<script>var globalData = { flag: getFlag(), user: { id: 6, tag: "\uDE00" }, dept: {} };</script>"#;
+    assert_eq!(user_id_from_page(html).as_deref(), Some("6"));
+}
+
 #[test]
 fn post_login_rejects_maintenance_and_login_pages() {
     use std::sync::Arc;
@@ -508,6 +614,98 @@ fn effective_count_excludes_old_versions() {
         2,
         "旧版本（false／0／\"false\"）不计入有效提交"
     );
+}
+
+/// 提交記錄的欄位讀不出來時只損失該欄位，整筆記錄必須保留。
+///
+/// 丟棄整筆會讓「已完成」被誤判成「未提交／逾期」（`domain::homework::judge`）；
+/// 參考實作對這些欄位也採寬容讀取（`safeInt`／`safeString`）。
+#[test]
+fn incomplete_submission_records_are_still_counted() {
+    let value = json!({
+        "list": [
+            {"submitted_at": "2026-09-20 10:00:00", "is_latest_version": true},
+            {"id": null, "is_latest_version": true},
+            {"id": {"nested": 1}, "is_latest_version": true},
+            {"id": 4, "submitted_at": 1758333600, "comment": {"text": "好"}}
+        ],
+    });
+
+    let submissions: LmsSubmissionList =
+        crate::sites::deserialize_value(value, "查询作业提交记录").expect("应可解析");
+    assert_eq!(submissions.count(), 4, "字段缺漏或类型异常不得丢弃整笔记录");
+    assert_eq!(submissions.skipped, 0);
+    assert_eq!(submissions.confirmed_effective_count(), Some(4));
+    assert_eq!(submissions.list[0].id, None, "缺字段的 id 视为缺漏");
+    assert_eq!(submissions.list[1].id, None, "null 的 id 视为缺漏");
+    assert_eq!(submissions.list[3].id.as_deref(), Some("4"));
+    assert_eq!(
+        submissions.list[0].timestamp(),
+        Some("2026-09-20 10:00:00"),
+        "时间为字符串时照常显示"
+    );
+    assert_eq!(
+        submissions.list[3].timestamp(),
+        None,
+        "时间不是字符串时视为未知，不伪造时间"
+    );
+}
+
+/// 提交記錄整批讀不出來時必須回報「無法確認」，不可當成「零筆提交」。
+#[test]
+fn unreadable_submission_records_are_reported_as_unknown() {
+    use std::sync::Arc;
+
+    use crate::config::{AccessPolicy, Config};
+    use crate::http::HttpClient;
+    use crate::http::fake::FakeClient;
+    use crate::session::{AccessMode, SessionManager, SiteKind};
+
+    let payload = serde_json::to_vec(&json!({"list": [7, null, "x"]})).expect("序列化固定回应");
+    let client = Arc::new(FakeClient::with_responder(move |_request: &HttpRequest| {
+        Ok(HttpResponse::new(
+            200,
+            "https://lms.xjtu.edu.cn/api/activities/9001/groups/42/submission_list",
+            payload.clone(),
+        ))
+    }));
+    let direct: Arc<dyn HttpClient> = client.clone();
+    let webvpn: Arc<dyn HttpClient> = client;
+    let config = Config {
+        access_policy: AccessPolicy::Direct,
+        ..Config::default()
+    };
+    let mut session = SessionManager::with_clients(&config, direct, webvpn);
+    session.register(Box::new(LmsSite));
+    session.mark_logged_in(SiteKind::Lms, AccessMode::Direct, Vec::new());
+    let mut api = LmsApi::new(&mut session);
+
+    let list = api
+        .submissions("9001", true, Some("42"))
+        .expect("查询本身应当成功");
+    assert_eq!(list.count(), 0, "没有任何记录能解析");
+    assert_eq!(list.skipped, 3, "无法解析的记录数必须保留");
+    assert_eq!(
+        list.confirmed_effective_count(),
+        None,
+        "有记录读不出来时不得当成零笔提交"
+    );
+
+    // 摘要必須顯示「待核实」而不是「未提交」。
+    let detail: LmsActivity = crate::sites::deserialize_value(
+        json!({
+            "id": "9001",
+            "type": "homework",
+            "submit_by_group": true,
+            "group_id": "42"
+        }),
+        "查询活动详情",
+    )
+    .expect("活动详情");
+    let summary = api.submission_summary_for(&detail).expect("摘要");
+    assert_eq!(summary.count, None, "无法确认时提交数必须为未知");
+    let note = summary.note.expect("应说明无法确认的原因");
+    assert!(note.contains("3 条提交记录无法解析"), "{note}");
 }
 
 /// 課程識別碼不合法時必須回報協定錯誤，且不得發出任何請求。

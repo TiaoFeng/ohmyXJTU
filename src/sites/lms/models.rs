@@ -6,8 +6,8 @@
 use serde::Deserialize;
 
 use super::super::{
-    lenient_array, optional_string_lenient, optional_string_or_number, optional_u64_lenient,
-    string_or_number,
+    lenient_array, lenient_bool, optional_string_lenient, optional_string_or_number,
+    optional_string_or_number_lenient, optional_u64_lenient, string_lenient, string_or_number,
 };
 use super::html;
 
@@ -257,31 +257,37 @@ impl ActivityContent {
 }
 
 /// 活動（作業、資料、課程內容…）。
+///
+/// 除了 `id`（本程式據以查詳情與提交記錄，讀不出來就無法處理該項），其餘欄位
+/// 一律寬容讀取：清單與詳情都是**整項**解析，任何一個欄位型別異常都會讓整筆
+/// 作業從任務頁消失（清單）或讓該課程的作業全部退回「待核实」（詳情）。伺服器
+/// 對這些欄位的型別並不穩定（布林出現過 `0`／`"true"`，文字出現過數字），
+/// 型別異常時只應損失該欄位。
 #[derive(Debug, Clone, Deserialize)]
 pub struct LmsActivity {
     /// 活動識別碼。
     #[serde(deserialize_with = "string_or_number")]
     pub id: String,
     /// 所屬課程識別碼。
-    #[serde(default, deserialize_with = "optional_string_or_number")]
+    #[serde(default, deserialize_with = "optional_string_or_number_lenient")]
     pub course_id: Option<String>,
-    /// 活動類型字串（`type`）。
-    #[serde(rename = "type", default)]
+    /// 活動類型字串（`type`）；讀不出來時為空字串（視為未知類型）。
+    #[serde(rename = "type", default, deserialize_with = "string_lenient")]
     pub kind: String,
     /// 標題。
-    #[serde(default)]
+    #[serde(default, deserialize_with = "optional_string_lenient")]
     pub title: Option<String>,
     /// 開始時間。
-    #[serde(default)]
+    #[serde(default, deserialize_with = "optional_string_lenient")]
     pub start_time: Option<String>,
     /// 截止時間。
-    #[serde(default)]
+    #[serde(default, deserialize_with = "optional_string_lenient")]
     pub end_time: Option<String>,
-    /// 是否以小組為單位提交。
-    #[serde(default)]
+    /// 是否以小組為單位提交；型別異常時視同缺少（保持「待核实」，不猜成個人）。
+    #[serde(default, deserialize_with = "lenient_bool")]
     pub submit_by_group: Option<bool>,
     /// 小組識別碼（小組作業時使用）。
-    #[serde(default, deserialize_with = "optional_string_or_number")]
+    #[serde(default, deserialize_with = "optional_string_or_number_lenient")]
     pub group_id: Option<String>,
     /// 活動正文區塊（`data`；只有詳情回應提供，列表項目為 `None`）。
     ///
@@ -310,11 +316,11 @@ pub struct LmsActivity {
     /// 此欄位；參考實作同樣從頂層取用。
     #[serde(default, deserialize_with = "lenient_array")]
     pub uploads: Vec<LmsUpload>,
-    /// 伺服器記錄的提交次數。
-    #[serde(default)]
+    /// 伺服器記錄的提交次數（接受數字與可解析的數字字串）。
+    #[serde(default, deserialize_with = "optional_u64_lenient")]
     pub user_submit_count: Option<u64>,
     /// 是否已發布。
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_bool")]
     pub published: Option<bool>,
 }
 
@@ -409,16 +415,20 @@ impl LmsActivity {
 }
 
 /// 一筆提交記錄。
+///
+/// 所有欄位都採寬容讀取：提交記錄的**筆數**決定作業是「已完成」還是「未提交」，
+/// 因此任何欄位讀不出來時只損失該欄位，不可讓整筆記錄被跳過（參考實作對這些
+/// 欄位同樣以 `safeString`／`safeInt` 讀取，讀不到就給預設值）。
 #[derive(Debug, Clone, Deserialize)]
 pub struct LmsSubmission {
-    /// 提交識別碼。
-    #[serde(deserialize_with = "string_or_number")]
-    pub id: String,
+    /// 提交識別碼；讀不出來時為 `None`（本程式不以此欄位判斷任何事）。
+    #[serde(default, deserialize_with = "optional_string_or_number_lenient")]
+    pub id: Option<String>,
     /// 提交時間。
-    #[serde(default)]
+    #[serde(default, deserialize_with = "optional_string_lenient")]
     pub submitted_at: Option<String>,
     /// 建立時間。
-    #[serde(default)]
+    #[serde(default, deserialize_with = "optional_string_lenient")]
     pub created_at: Option<String>,
     /// 是否為最新版本（寬容解析：布林、`0`/`1` 或字串）。
     #[serde(default, deserialize_with = "lenient_bool")]
@@ -439,7 +449,7 @@ pub struct LmsSubmission {
     #[serde(default)]
     pub score: Option<serde_json::Value>,
     /// 批註。
-    #[serde(default)]
+    #[serde(default, deserialize_with = "optional_string_lenient")]
     pub comment: Option<String>,
 }
 
@@ -469,10 +479,16 @@ pub struct LmsSubmissionList {
     /// 提交記錄。
     #[serde(default)]
     pub list: Vec<LmsSubmission>,
+    /// 解析失敗而被跳過的記錄數（[`crate::sites::parse_lenient`] 的契約）。
+    ///
+    /// 不是伺服器欄位，而是解析結果的一部分：由查詢端在逐項解析後填入，
+    /// 用於區分「真的沒有提交」與「有記錄但讀不出來」。
+    #[serde(default)]
+    pub skipped: usize,
 }
 
 impl LmsSubmissionList {
-    /// 提交記錄數。
+    /// 提交記錄數（不含被跳過的記錄）。
     pub fn count(&self) -> usize {
         self.list.len()
     }
@@ -480,29 +496,32 @@ impl LmsSubmissionList {
     /// 有效提交數。
     ///
     /// 判據為 [`LmsSubmission::is_effective`]（單一定義）；介面顯示必須
-    /// 與此保持一致。
+    /// 與此保持一致。被跳過的記錄不計入，因此有跳過時這個數字可能偏低——
+    /// 需要「能否確認」的判斷請用 [`Self::confirmed_effective_count`]。
     pub fn effective_count(&self) -> usize {
         self.list
             .iter()
             .filter(|submission| submission.is_effective())
             .count()
     }
-}
 
-/// 寬容布林：接受布林、`0`/`1` 與其字串形式；其他型別視為未知（`None`）。
-fn lenient_bool<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value: Option<serde_json::Value> = serde::Deserialize::deserialize(deserializer)?;
-    Ok(value.and_then(|value| match value {
-        serde_json::Value::Bool(flag) => Some(flag),
-        serde_json::Value::Number(number) => number.as_i64().map(|number| number != 0),
-        serde_json::Value::String(text) => match text.trim().to_ascii_lowercase().as_str() {
-            "true" | "1" => Some(true),
-            "false" | "0" => Some(false),
-            _ => None,
-        },
-        _ => None,
-    }))
+    /// 可確認的有效提交數；`None` 代表無法確認（應顯示「待核实」）。
+    ///
+    /// 已有至少一筆有效提交時判定不受影響：多一筆讀不出來的記錄只會讓真實數字
+    /// 更大，不會改變「已提交」。一筆有效提交都沒有、卻有記錄讀不出來時，讀不出來
+    /// 的那筆可能才是有效提交，因此回 `None`——當成「零筆提交」會讓作業被誤判成
+    /// 「未提交／逾期」（見 `domain::homework::judge` 的規則）。
+    pub fn confirmed_effective_count(&self) -> Option<usize> {
+        let effective = self.effective_count();
+        (effective > 0 || self.skipped == 0).then_some(effective)
+    }
+
+    /// 有記錄無法解析時的說明；沒有跳過任何記錄時為 `None`。
+    ///
+    /// 格式與 [`crate::sites::lms::submission_failure_note`] 一致（兩者都是
+    /// 「無法確認提交狀態」的原因），供作業摘要與介面顯示。
+    pub fn unreadable_note(&self) -> Option<String> {
+        (self.skipped > 0)
+            .then(|| format!("无法确认提交状态：有 {} 条提交记录无法解析", self.skipped))
+    }
 }

@@ -25,7 +25,7 @@ fn seal_then_unseal_round_trips() {
 fn each_seal_uses_a_fresh_salt_and_nonce() {
     let first = seal_vault(b"same plaintext");
     let second = seal_vault(b"same plaintext");
-    assert_ne!(first, second, "同一口令兩次密封不應產生相同位元組");
+    assert_ne!(first, second, "同一口令两次密封不应产生相同位元组");
     assert_eq!(
         &unseal(PASSPHRASE, VAULT_PREFIX, &first).unwrap().0[..],
         b"same plaintext"
@@ -99,23 +99,23 @@ fn malformed_envelopes_are_rejected() {
 #[test]
 fn reseal_reuses_the_salt_and_stays_readable() {
     let (first, sealed) = seal(PASSPHRASE, VAULT_PREFIX, b"one").expect("密封");
-    let second = reseal(&sealed, VAULT_PREFIX, b"two").expect("重封裝");
+    let second = reseal(&sealed, VAULT_PREFIX, b"two").expect("重封装");
 
     // 鹽值與參數必須沿用（只換 nonce）：否則下次以口令解鎖派生不出同一把金鑰。
     let salt_start = MAGIC.len() + 1 + 4 + 4 + 4;
     assert_eq!(
         first[salt_start..salt_start + SALT_LEN],
         second[salt_start..salt_start + SALT_LEN],
-        "重封裝必须沿用同一盐值"
+        "重封装必须沿用同一盐值"
     );
-    assert_ne!(first, second, "重封裝应使用新的 nonce 与内容");
+    assert_ne!(first, second, "重封装应使用新的 nonce 与内容");
 
     // 舊檔案以口令仍可解開，新檔案亦然。
     assert_eq!(
         &unseal(PASSPHRASE, VAULT_PREFIX, &first).unwrap().0[..],
         b"one"
     );
-    let (plaintext, _) = unseal(PASSPHRASE, VAULT_PREFIX, &second).expect("以口令解开重封裝结果");
+    let (plaintext, _) = unseal(PASSPHRASE, VAULT_PREFIX, &second).expect("以口令解开重封装结果");
     assert_eq!(&plaintext[..], b"two");
 }
 
@@ -123,8 +123,8 @@ fn reseal_reuses_the_salt_and_stays_readable() {
 fn resealed_bytes_open_under_the_cached_key_semantics() {
     // 連續兩次重封裝都不得改變鹽值（模擬同一會話中的多次保存）。
     let (_, sealed) = seal(PASSPHRASE, TASKS_PREFIX, b"[]").expect("密封");
-    let first = reseal(&sealed, TASKS_PREFIX, b"[1]").expect("重封裝");
-    let second = reseal(&sealed, TASKS_PREFIX, b"[1,2]").expect("再重封裝");
+    let first = reseal(&sealed, TASKS_PREFIX, b"[1]").expect("重封装");
+    let second = reseal(&sealed, TASKS_PREFIX, b"[1,2]").expect("再重封装");
     let salt_start = MAGIC.len() + 1 + 4 + 4 + 4;
     assert_eq!(
         first[salt_start..salt_start + SALT_LEN],

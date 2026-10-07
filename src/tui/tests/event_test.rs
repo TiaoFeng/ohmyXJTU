@@ -15,6 +15,7 @@ use crate::model::{ActivityDetailView, FlowData, ScheduleData};
 use crate::session::{AccessMode, SiteKind};
 use crate::sites::lms::LmsCourse;
 use crate::task::{CoursesData, Event, FailedTarget, HomeworkUpdate, Job};
+use crate::text::MAX_INLINE_CHARS;
 use crate::tui::app::{
     AgreementState, App, FormState, HomeworkData, LmsLevel, LoginScreen, NavItem, Page, Screen,
     SettingsState, TaskEntry, TaskFormState, TermPickerState,
@@ -178,6 +179,36 @@ fn schedule_event_tracks_the_week_and_account_change_clears_it() {
     assert_eq!(app.schedule_week, None, "换账号后回到当前周");
     assert_eq!(app.schedule_total, None);
     assert!(app.schedule.is_idle());
+}
+
+/// 換帳號必須清掉學期選擇器殘留的選項（它們來自舊帳號的作業清單）。
+#[test]
+fn account_change_clears_the_term_picker_options() {
+    let mut app = app();
+    app.term_options = vec![TermCode::parse("2025-2026-2").expect("学期")];
+
+    apply_event(
+        &mut app,
+        Event::SessionsCleared {
+            account_changed: false,
+        },
+    );
+    assert_eq!(
+        app.term_options.len(),
+        1,
+        "切换访问模式时资料仍有效，选项应保留"
+    );
+
+    apply_event(
+        &mut app,
+        Event::SessionsCleared {
+            account_changed: true,
+        },
+    );
+    assert!(
+        app.term_options.is_empty(),
+        "换账号后不得留下旧账号的学期选项"
+    );
 }
 
 /// 套用一筆課表事件（`label` 用來辨識是哪一週的資料）。
@@ -898,14 +929,29 @@ fn access_policy_event_updates_state() {
 #[test]
 fn notice_event_only_sets_message() {
     let mut app = app();
+    apply_event(&mut app, Event::Notice("已记住学期 2026-2027-1".to_owned()));
+    assert_eq!(app.message_text(), Some("已记住学期 2026-2027-1"));
+    assert_eq!(
+        app.message_tone(),
+        Some(crate::tone::Tone::Info),
+        "一般回报应用提示色"
+    );
+    assert!(app.homework.is_idle());
+}
+
+/// 警告事件：以警告色呈現（與提示色、錯誤色區分），同樣不動任何頁面。
+#[test]
+fn warning_event_sets_message_with_warning_tone() {
+    let mut app = app();
     apply_event(
         &mut app,
-        Event::Notice("已跳过 2 项无法解析的思源学堂数据".to_owned()),
+        Event::Warning("已跳过 2 项无法解析的思源学堂数据".to_owned()),
     );
     assert_eq!(
         app.message_text(),
         Some("已跳过 2 项无法解析的思源学堂数据")
     );
+    assert_eq!(app.message_tone(), Some(crate::tone::Tone::Warning));
     assert!(app.homework.is_idle());
 }
 
@@ -952,6 +998,60 @@ fn login_failed_stays_on_credentials_form() {
             );
         }
         other => panic!("应停留在凭证表单，实际为 {other:?}"),
+    }
+}
+
+/// 登入錯誤訊息可能直接來自伺服器（登入頁的 `el-alert`）：必須與其他伺服器
+/// 文字一樣先清理，再寫進覆蓋層與表單。
+#[test]
+fn login_error_message_is_sanitized() {
+    let long = "错".repeat(MAX_INLINE_CHARS + 20);
+    let hostile = format!("\u{1b}[31m登录失败\u{7}{long}");
+
+    let mut form_app = credentials_app("3120000001");
+    apply_event(
+        &mut form_app,
+        Event::LoginFailed {
+            site: crate::session::SiteKind::Attendance,
+            message: hostile.clone(),
+        },
+    );
+
+    let Some(LoginScreen::Credentials { form, .. }) = form_app.login.as_deref() else {
+        panic!("应停留在凭证表单");
+    };
+    let error = form.error.clone().expect("表单应显示错误");
+    assert!(!error.contains('\u{1b}'), "控制字元应被移除：{error:?}");
+    assert!(!error.contains('\u{7}'), "控制字元应被移除：{error:?}");
+    assert!(
+        error.chars().count() <= MAX_INLINE_CHARS,
+        "超长訊息应被截断：{} 字元",
+        error.chars().count()
+    );
+
+    // 非憑證表單的登入畫面（例如進度）會收斂成失敗畫面，同樣要清理。
+    let mut progress = app();
+    progress.set_screen(Screen::Main);
+    progress.login = Some(Box::new(LoginScreen::Progress {
+        note: "正在登录考勤系统…".to_owned(),
+    }));
+    apply_event(
+        &mut progress,
+        Event::LoginFailed {
+            site: crate::session::SiteKind::Attendance,
+            message: hostile,
+        },
+    );
+    match progress.login.as_deref() {
+        Some(LoginScreen::Failed { message, .. }) => {
+            assert!(!message.contains('\u{1b}'), "控制字元应被移除：{message:?}");
+            assert!(
+                message.chars().count() <= MAX_INLINE_CHARS,
+                "超长訊息应被截断：{} 字元",
+                message.chars().count()
+            );
+        }
+        other => panic!("应切换到失败画面，实际为 {other:?}"),
     }
 }
 
@@ -1119,9 +1219,14 @@ fn disabled_session_returns_to_the_unlock_screen() {
     assert!(
         app.message
             .as_ref()
-            .is_some_and(|(text, _)| text.contains("会话已停用")),
+            .is_some_and(|(text, _, _)| text.contains("会话已停用")),
         "应提示用户重新解锁：{:?}",
         app.message
+    );
+    assert_eq!(
+        app.message_tone(),
+        Some(crate::tone::Tone::Danger),
+        "停用会话属于异常状态，应以错误色呈现"
     );
 }
 

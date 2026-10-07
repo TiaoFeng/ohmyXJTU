@@ -8,7 +8,7 @@ use chrono::NaiveDate;
 
 use crate::domain::attendance_match::LessonAttendance;
 use crate::sites::attendance::FlowRecord;
-use crate::sites::lms::{ActivityContent, ActivityKind, LmsSubmission};
+use crate::sites::lms::{ActivityContent, ActivityKind, LmsSubmissionList};
 
 /// 本週的一堂課。
 #[derive(Debug, Clone)]
@@ -79,7 +79,10 @@ pub struct ActivityDetailView {
     /// 是否小組作業；`None` 代表無法確認（詳情缺少該欄位）。
     pub submit_by_group: Option<bool>,
     /// 提交記錄；`None` 代表無法確認（僅作業有提交狀態）。
-    pub submissions: Option<Vec<LmsSubmission>>,
+    ///
+    /// 保留整個列表而不只是記錄本身：`skipped` 區分「真的沒有提交」與
+    /// 「有記錄但讀不出來」，介面才不會把後者說成「視為未提交」。
+    pub submissions: Option<LmsSubmissionList>,
     /// 補充說明（例如無法確認提交狀態的原因）。
     pub note: Option<String>,
 }

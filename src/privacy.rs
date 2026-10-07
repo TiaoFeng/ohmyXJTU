@@ -105,7 +105,8 @@ pub fn document() -> &'static [Block] {
     DOCUMENT.get_or_init(|| parse(TEXT))
 }
 
-/// 取出文件標頭宣告的版本（供測試校驗與 [`VERSION`] 一致）。
+/// 取出文件標頭宣告的版本（僅供測試校驗與 [`VERSION`] 一致）。
+#[cfg(test)]
 pub fn embedded_version(text: &str) -> Option<&str> {
     text.lines().find_map(|line| {
         let rest = line.split("**版本**：").nth(1)?;

@@ -156,12 +156,12 @@ fn run(mut store: TaskStore, events: Sender<Event>, worker: Sender<Job>, jobs: R
 /// 存儲不可用，後續的任務操作會回報同一個原因。
 fn load(store: &mut TaskStore, passphrase: &Secret, events: &Sender<Event>) {
     match store.init(passphrase) {
-        Ok(Some(notice)) => emit(events, Event::Notice(notice)),
+        Ok(Some(notice)) => emit(events, Event::Warning(notice)),
         Ok(None) => {}
         Err(err) => {
             let message = format!("任务文件不可用（{err}）；本次会话无法保存自定义任务");
             store.mark_unavailable(message.clone());
-            emit(events, Event::Notice(message));
+            emit(events, Event::Warning(message));
         }
     }
     emit_snapshot(store, events);

@@ -13,18 +13,20 @@ use super::schedule::CourseSlot;
 /// 找出課程在指定日期的考勤狀態。
 ///
 /// 同一時段若有多筆記錄，取嚴重度最高者；`None` 代表沒有可用記錄。
+/// 記錄的日期在解析時已正規化為 `YYYY-MM-DD`（見 [`crate::sites::date_string`]），
+/// 因此這裡直接比較字串即可。
 pub fn status_for(
     slot: &CourseSlot,
     date: NaiveDate,
     records: &[WaterRecord],
 ) -> Option<AttendanceStatus> {
-    let expected_date = date.to_string();
+    let expected_date = date.format("%Y-%m-%d").to_string();
     records
         .iter()
         .filter(|record| {
             record.start_section == slot.start_section
                 && record.end_section == slot.end_section
-                && record.attendance_date.trim() == expected_date
+                && record.attendance_date == expected_date
                 && matches_optional(slot.classroom.as_deref(), record.classroom_name.as_deref())
                 && matches_optional(slot.teacher.as_deref(), record.teacher_name.as_deref())
         })
@@ -75,8 +77,9 @@ impl From<AttendanceStatus> for LessonAttendance {
 /// 顯示用狀態。
 ///
 /// - 有記錄：顯示伺服器回報的狀態。
-/// - 無記錄且課程尚未發生：顯示「待考勤」。
-/// - 無記錄且課程已過：顯示「待核实」。
+/// - 無記錄且課程在未來（`lesson_date > today`）：顯示「待考勤」。
+/// - 無記錄且課程在當天或過去：顯示「待核实」——本程式沒有節次時間表，無法
+///   判斷今天這堂是否已經上完，因此不推斷為「尚未發生」（缺失記錄不得推斷為正常）。
 pub fn display_state(
     status: Option<AttendanceStatus>,
     lesson_date: NaiveDate,

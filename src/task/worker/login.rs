@@ -166,9 +166,40 @@ impl Worker {
                     driver,
                     retry,
                 });
-                self.handle_reply(reply)
+                let result = self.handle_reply(reply);
+                if let Err(err) = &result
+                    && !matches!(err, AppError::VerificationRetry(_))
+                {
+                    // 流程已無法繼續（例如取不到驗證碼圖片、身份選擇失敗）：不能
+                    // 留著它——工作者主迴圈在 `flow.is_some()` 期間一律延後資料
+                    // 任務，那樣頁面會卡在「載入中」直到使用者關掉登入彈窗。
+                    //
+                    // `VerificationRetry`（驗證碼填錯）是唯一的例外：流程仍可用，
+                    // 使用者重輸即可（`handle_reply` 目前不會回這個錯誤，保留判斷
+                    // 是為了不誤傷未來的可重試路徑）。
+                    self.abort_broken_login();
+                }
+                result
             }
         }
+    }
+
+    /// 作廢一個不可能再被推進的登入流程。
+    ///
+    /// 工作者主迴圈在 `flow.is_some()` 期間一律延後資料任務，因此留下「沒有
+    /// 人會再推進它」的流程會讓頁面卡在「載入中」——使用者按 `r` 送出的任務
+    /// 只會被合併進待執行佇列。
+    ///
+    /// 等待重登的任務（`Worker::retry`）刻意不動：它是「登入成功後要續跑的
+    /// 那一個任務」，使用者按 Enter 重試登入成功時仍要跑它（見
+    /// [`Self::finish_login`]）；真的放棄則由 [`Self::cancel_login`] 收斂。
+    pub(super) fn abort_broken_login(&mut self) {
+        if self.flow.is_none() {
+            return;
+        }
+        self.flow = None;
+        // 驗證碼圖片屬於已作廢的流程，不再有用。
+        self.clear_captcha();
     }
 
     /// 處理登入驅動器的回報（成功、失敗、驗證碼、簡訊或身份選擇）。
@@ -224,7 +255,7 @@ impl Worker {
                     Ok(phone) => Some(phone),
                     Err(err) => {
                         // 取不到手機號時明確告知，不靜默顯示成「沒有手機號」。
-                        self.emit(Event::Notice(format!("无法获取短信验证手机号：{err}")));
+                        self.emit(Event::Warning(format!("无法获取短信验证手机号：{err}")));
                         None
                     }
                 };
@@ -384,6 +415,9 @@ impl Worker {
         // 課表快取與選定週次都屬於舊帳號。
         self.schedule_cache = None;
         self.schedule_week = None;
+        // 「當前學期」是上一次查考勤系統的結果，同樣屬於舊帳號（與
+        // `change_account` 同一組清理；`chosen_term` 是使用者的選擇，保留）。
+        self.known_term = None;
         self.emit(Event::SessionsCleared {
             account_changed: true,
         });

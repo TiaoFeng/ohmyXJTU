@@ -15,6 +15,7 @@ use crate::model::{ActivityDetailView, FlowData, ScheduleData};
 use crate::session::{AccessMode, SiteKind};
 use crate::sites::lms::LmsActivity;
 use crate::task::{CoursesData, Event, FailedTarget, HomeworkUpdate, Job};
+use crate::text::{MAX_INLINE_CHARS, sanitize_inline};
 
 use super::app::{
     App, FormKind, FormState, HomeworkData, LmsLevel, LoginScreen, Page, Screen, SettingsState,
@@ -89,6 +90,7 @@ pub(crate) fn apply_event(app: &mut App, event: Event, jobs: &Sender<Job>) {
         Event::PassphraseUpdated => apply_passphrase_updated(app),
         Event::AccessPolicyUpdated(policy) => apply_access_policy_updated(app, policy),
         Event::Notice(message) => app.set_message(message),
+        Event::Warning(message) => app.set_warning_message(message),
         Event::Failed {
             what,
             message,
@@ -213,7 +215,7 @@ fn apply_session_disabled(app: &mut App, message: String) {
     let mut form = FormState::unlock();
     form.error = Some(message);
     app.set_screen(Screen::Unlock(form));
-    app.set_message("会话已停用：请输入加密口令重新解锁");
+    app.set_error_message("会话已停用：请输入加密口令重新解锁");
 }
 
 fn apply_schedule(app: &mut App, data: ScheduleData) {
@@ -447,7 +449,7 @@ fn apply_credential_save_failed(app: &mut App, message: String) {
         form.busy = false;
         form.error = Some(message.clone());
     }
-    app.set_message(message);
+    app.set_error_message(message);
 }
 
 /// 修改口令成功：離開處理中狀態並回到設定選單。
@@ -534,7 +536,7 @@ fn apply_failure(
                 // 資料任務失敗：只標記對應頁面，不影響根畫面。
             }
         }
-        app.set_message(text);
+        app.set_error_message(text);
     }
     // 登入嘗試若以失敗收場（包含自動重登連開始都做不到，例如離線），
     // 覆蓋層必須離開「正在登入」：進度畫面只接受 q，否則使用者會被
@@ -568,7 +570,12 @@ fn failed_resource_is_stale(app: &App, target: FailedTarget, resource: Option<&s
 }
 
 /// 顯示登入錯誤：憑證表單就地顯示，其餘登入畫面回到失敗畫面。
+///
+/// 訊息可能直接來自伺服器（登入頁的 `el-alert` 文字，見 `auth::login`），因此
+/// 與其他伺服器文字走同一套清理（[`sanitize_inline`]）：控制字元與超長內容
+/// 都不該進入畫面。
 fn set_login_error(app: &mut App, site: SiteKind, message: String) {
+    let message = sanitize_inline(&message, MAX_INLINE_CHARS);
     match app.login.as_deref_mut() {
         Some(LoginScreen::Credentials { form, .. }) => {
             form.busy = false;

@@ -12,7 +12,7 @@ use crate::text::{MAX_INLINE_CHARS, sanitize_inline};
 
 /// 解開 `{code, message, data}` 外殼，回傳 `data` 的值。
 ///
-/// `context` 用於錯誤訊息前缀（例如「核验短信验证码」），讓使用者知道是
+/// `context` 用於錯誤訊息前綴（例如「核验短信验证码」），讓使用者知道是
 /// 哪個階段的回應格式不符；錯誤訊息不含回應內容。
 pub fn split_envelope(response: &HttpResponse, context: &str) -> AppResult<serde_json::Value> {
     response.error_for_status()?;

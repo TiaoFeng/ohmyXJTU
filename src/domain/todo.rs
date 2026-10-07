@@ -107,7 +107,7 @@ impl TaskState {
 }
 
 /// 自訂義任務。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Task {
     /// 穩定識別碼（同一份任務檔內唯一）。
     pub id: u64,
@@ -128,6 +128,30 @@ pub struct Task {
     /// 是否已完成。
     #[serde(default)]
     pub completed: bool,
+}
+
+/// 手寫 [`std::fmt::Debug`]：任務內容、描述與標籤是使用者的私人資料（磁碟上以
+/// 口令加密保存），任何 `{:?}` 都不得把它們印出來——與 `Secret`／`HttpRequest`
+/// 同一條規則。只保留「有沒有內容」與非文字欄位，讓除錯仍看得到狀態。
+impl std::fmt::Debug for Task {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Task")
+            .field("id", &self.id)
+            .field("priority", &self.priority)
+            .field("completed", &self.completed)
+            .field("deadline", &self.deadline)
+            .field("content", &self.content.is_empty())
+            .field(
+                "description",
+                &self
+                    .description
+                    .as_deref()
+                    .is_some_and(|text| !text.is_empty()),
+            )
+            .field("tag", &self.display_tag().is_some())
+            .finish()
+    }
 }
 
 impl Task {

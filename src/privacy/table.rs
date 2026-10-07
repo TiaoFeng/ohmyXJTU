@@ -83,11 +83,15 @@ impl Table {
     }
 
     /// 標頭列（可能為空）。
+    ///
+    /// 僅供測試斷言解析結果。
+    #[cfg(test)]
     pub fn headers(&self) -> &[String] {
         &self.headers
     }
 
     /// 資料列。
+    #[cfg(test)]
     pub fn rows(&self) -> &[Vec<String>] {
         &self.rows
     }

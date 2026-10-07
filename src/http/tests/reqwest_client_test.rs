@@ -9,7 +9,7 @@ use std::net::TcpListener;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use url::Url;
 
@@ -103,6 +103,87 @@ fn ok_response(body: &str) -> Vec<u8> {
 
 fn client() -> ReqwestClient {
     ReqwestClient::new("ohmyXJTU-test").expect("建立 HTTP 客户端")
+}
+
+/// 逾時是整條請求的預算，不是每一跳各算一次。
+///
+/// 逐跳各自吃一次逾時的話，慢速重導鏈最壞會拖上「逾時 × 跳數」，而工作執行緒
+/// 在這段期間無法處理任何控制任務（取消登入、結束、設定），使用者看到的就是
+/// 卡死。這裡每一跳都慢但都在單跳逾時之內：修復前會一路跟完十跳才以「重定向
+/// 次數過多」失敗，修復後會很快用完預算並回報逾時。
+#[test]
+fn redirect_chain_shares_a_single_timeout_budget() {
+    const DELAY: Duration = Duration::from_millis(120);
+    const TIMEOUT: Duration = Duration::from_millis(400);
+
+    let (base, hits) = serve(12, |_index, base| {
+        thread::sleep(DELAY);
+        redirect_response(302, &format!("{base}/next"))
+    });
+
+    let started = Instant::now();
+    let err = insecure_client()
+        .send(HttpRequest::get(format!("{base}/start")).timeout(TIMEOUT))
+        .expect_err("整条链超出预算时必须逾时");
+    let elapsed = started.elapsed();
+
+    assert!(
+        matches!(
+            err,
+            AppError::Network {
+                kind: NetworkKind::Timeout,
+                ..
+            }
+        ),
+        "应是逾时而非重定向次数过多：{err:?}"
+    );
+    assert!(elapsed < DELAY * 4, "不应跟完整条链：{elapsed:?}");
+    assert!(
+        hits.load(Ordering::SeqCst) < 6,
+        "超出预算后不应继续送请求：{}",
+        hits.load(Ordering::SeqCst)
+    );
+}
+
+/// 未指定逾時的請求同樣受整條鏈的預算約束。
+///
+/// 這是修復前真正失效的情形：生產碼只有探測請求會顯式指定逾時（而且它不跟隨
+/// 重定向），其餘請求的 `timeout` 都是 `None`。若預算只認 `request.timeout`，
+/// 慢速重導鏈仍會「每跳各吃一次預設逾時」。這裡把客戶端預設逾時縮到 400ms，
+/// 讓這個情形也能在毫秒級驗證。
+#[test]
+fn redirect_chain_budget_applies_without_an_explicit_timeout() {
+    const DELAY: Duration = Duration::from_millis(120);
+    const DEFAULT: Duration = Duration::from_millis(400);
+
+    let (base, hits) = serve(12, |_index, base| {
+        thread::sleep(DELAY);
+        redirect_response(302, &format!("{base}/next"))
+    });
+
+    let started = Instant::now();
+    let err = ReqwestClient::new_insecure_with_timeout_for_tests("ohmyXJTU-test", DEFAULT)
+        .expect("建立 HTTP 客户端")
+        .send(HttpRequest::get(format!("{base}/start")))
+        .expect_err("整条链超出默认逾时预算时必须逾时");
+    let elapsed = started.elapsed();
+
+    assert!(
+        matches!(
+            err,
+            AppError::Network {
+                kind: NetworkKind::Timeout,
+                ..
+            }
+        ),
+        "应是逾时而非重定向次数过多：{err:?}"
+    );
+    assert!(elapsed < DELAY * 4, "不应跟完整条链：{elapsed:?}");
+    assert!(
+        hits.load(Ordering::SeqCst) < 6,
+        "超出预算后不应继续送请求：{}",
+        hits.load(Ordering::SeqCst)
+    );
 }
 
 /// 不檢查重定向目的地的客戶端（本機假伺服器用；信任規則由純函式測試涵蓋）。
@@ -700,6 +781,6 @@ fn timeouts_stay_short_and_ordered() {
     assert_eq!(super::CONNECT_TIMEOUT, Duration::from_secs(10));
     assert!(
         super::CONNECT_TIMEOUT < super::DEFAULT_TIMEOUT,
-        "连線階段必須先於總逾時結束"
+        "连線阶段必须先于总逾时结束"
     );
 }

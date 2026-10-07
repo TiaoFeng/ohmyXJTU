@@ -337,7 +337,7 @@ impl Worker {
             courses?
         };
         if skipped_data > 0 {
-            self.emit(Event::Notice(format!(
+            self.emit(Event::Warning(format!(
                 "已跳过 {skipped_data} 项无法解析的思源学堂数据"
             )));
         }
@@ -418,7 +418,7 @@ impl Worker {
         // 考勤故障但仍在其他來源下繼續：明確告知使用者學期是從何而來的，
         // 否則他會以為看到的就是考勤認定的本學期。
         if let Some(err) = attendance_error {
-            self.emit(Event::Notice(format!(
+            self.emit(Event::Warning(format!(
                 "考勤系统暂时不可用（{err}），本学期改用{}判定",
                 term_source.label()
             )));
@@ -453,7 +453,7 @@ impl Worker {
                 match self.course_activities_step(runner)? {
                     Ok((activities, skipped)) => {
                         if skipped > 0 {
-                            self.emit(Event::Notice(format!(
+                            self.emit(Event::Warning(format!(
                                 "已跳过 {skipped} 项无法解析的思源学堂数据"
                             )));
                         }

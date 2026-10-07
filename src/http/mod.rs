@@ -11,6 +11,7 @@ pub mod fake;
 
 pub use reqwest_client::ReqwestClient;
 
+use std::fmt;
 use std::time::Duration;
 
 use serde::de::DeserializeOwned;
@@ -27,18 +28,65 @@ pub enum Method {
 }
 
 /// 請求主體。
-#[derive(Debug, Clone)]
+///
+/// 手寫 [`fmt::Debug`]：表單欄位帶著帳號、圖形驗證碼與簡訊驗證碼，任何 `{:?}`
+/// 都只輸出**欄位名稱**，不輸出內容。
+#[derive(Clone)]
 pub enum Body {
     /// `application/x-www-form-urlencoded` 表單。
     Form(Vec<(String, String)>),
     /// `application/json`。
     Json(serde_json::Value),
-    /// 原始位元組。
-    Bytes(Vec<u8>),
+}
+
+impl fmt::Debug for Body {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Form(fields) => formatter
+                .debug_tuple("Form")
+                .field(&field_names(fields))
+                .finish(),
+            // JSON 主體含業務資料與識別碼，只描述型別。
+            Self::Json(_) => formatter.write_str("Json(<redacted>)"),
+        }
+    }
+}
+
+/// 取出成對欄位的名稱（供遮罩後的 `Debug` 使用）。
+pub(crate) fn field_names(fields: &[(String, String)]) -> Vec<&str> {
+    fields.iter().map(|(name, _)| name.as_str()).collect()
+}
+
+/// 去掉查詢字串與 userinfo 的網址（供遮罩後的 `Debug` 使用）。
+///
+/// 查詢字串可能帶著一次性 ticket 或業務憑證（登入回跳位址就是這樣傳遞的），
+/// userinfo（`https://token@host/`）同樣是憑證：兩者都只保留協定、主機與路徑，
+/// 與網路錯誤訊息一貫的處理方式相同。
+pub(crate) fn redacted_url(url: &str) -> String {
+    let Ok(mut parsed) = url::Url::parse(url) else {
+        return "<url>".to_owned();
+    };
+    let has_userinfo = !parsed.username().is_empty() || parsed.password().is_some();
+    let has_query = parsed.query().is_some() || parsed.fragment().is_some();
+    if !has_userinfo && !has_query {
+        return url.to_owned();
+    }
+    parsed.set_username("").ok();
+    parsed.set_password(None).ok();
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    if has_query {
+        format!("{}?<redacted>", parsed.as_str())
+    } else {
+        parsed.to_string()
+    }
 }
 
 /// 一次 HTTP 請求。
-#[derive(Debug, Clone)]
+///
+/// 手寫 [`fmt::Debug`]：標頭值（例如考勤的 `X-Business-Token`）與主體內容都是
+/// 憑證，任何 `{:?}` 都不得把它們印出來（見 `crate::credentials::secret` 的同一條規則）。
+#[derive(Clone)]
 pub struct HttpRequest {
     /// 請求方法。
     pub method: Method,
@@ -130,6 +178,9 @@ impl HttpRequest {
     }
 
     /// 讀取表單欄位（僅 `Body::Form`）。
+    ///
+    /// 僅供測試斷言送出的欄位。
+    #[cfg(test)]
     pub fn form_field(&self, name: &str) -> Option<&str> {
         match &self.body {
             Some(Body::Form(fields)) => fields
@@ -149,8 +200,26 @@ impl HttpRequest {
     }
 }
 
+impl fmt::Debug for HttpRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HttpRequest")
+            .field("method", &self.method)
+            .field("url", &redacted_url(&self.url))
+            .field("headers", &field_names(&self.headers))
+            .field("body", &self.body)
+            .field("timeout", &self.timeout)
+            .field("follow_redirects", &self.follow_redirects)
+            .finish()
+    }
+}
+
 /// 一次 HTTP 回應。
-#[derive(Debug, Clone)]
+///
+/// 手寫 [`fmt::Debug`]：`final_url` 可能帶著一次性 ticket，`body` 是未經處理的
+/// 回應內容（登入頁、成績、提交記錄…），因此只輸出狀態碼、去查詢的網址、標頭
+/// 名稱與本文長度。
+#[derive(Clone)]
 pub struct HttpResponse {
     /// HTTP 狀態碼。
     pub status: u16,
@@ -163,7 +232,8 @@ pub struct HttpResponse {
 }
 
 impl HttpResponse {
-    /// 建立回應（主要供測試使用）。
+    /// 建立回應（僅供測試：生產回應一律來自客戶端）。
+    #[cfg(test)]
     pub fn new(status: u16, final_url: impl Into<String>, body: impl Into<Vec<u8>>) -> Self {
         Self {
             status,
@@ -213,8 +283,24 @@ impl HttpResponse {
     }
 }
 
+impl fmt::Debug for HttpResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HttpResponse")
+            .field("status", &self.status)
+            .field("final_url", &redacted_url(&self.final_url))
+            .field("headers", &field_names(&self.headers))
+            .field("body_len", &self.body.len())
+            .finish()
+    }
+}
+
 /// HTTP 客戶端抽象。
 pub trait HttpClient: Send + Sync {
     /// 送出請求並讀取完整回應。
     fn send(&self, request: HttpRequest) -> AppResult<HttpResponse>;
 }
+
+#[cfg(test)]
+#[path = "tests/mod_test.rs"]
+mod mod_test;

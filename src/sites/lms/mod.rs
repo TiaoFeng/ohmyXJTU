@@ -310,12 +310,22 @@ impl<'a> LmsApi<'a> {
         }
 
         match self.submissions(&detail.id, submit_by_group, detail.group_id.as_deref()) {
-            Ok(list) => Ok(SubmissionSummary {
-                submit_by_group: Some(submit_by_group),
-                count: Some(list.effective_count()),
-                note: None,
-                description,
-            }),
+            Ok(list) => {
+                // 有記錄讀不出來且沒有任何已確認的有效提交時回報「待核实」：
+                // 那些記錄可能才是這次有效提交（見 `confirmed_effective_count`）。
+                let count = list.confirmed_effective_count();
+                let note = if count.is_none() {
+                    list.unreadable_note()
+                } else {
+                    None
+                };
+                Ok(SubmissionSummary {
+                    submit_by_group: Some(submit_by_group),
+                    count,
+                    note,
+                    description,
+                })
+            }
             // 登入態失效必須向上傳播，交由統一重登流程處理。
             Err(err) if err.needs_relogin() => Err(err),
             // 其他錯誤保持「待核实」，並保留階段化原因。
@@ -397,13 +407,14 @@ impl<'a> LmsApi<'a> {
             ));
         }
         // 欄位存在但不是陣列（或個別項目解析失敗）一律回報或跳過：見
-        // `parse_lenient` 的契約。
+        // `parse_lenient` 的契約。被跳過的項目數必須保留：全部讀不出來時
+        // 代表「無法確認提交狀態」，而不是「零筆提交」。
         let list = value
             .get("list")
             .cloned()
             .unwrap_or_else(|| Value::Array(Vec::new()));
-        let (list, _) = parse_lenient::<LmsSubmission>(list, "查询作业提交记录")?;
-        Ok(LmsSubmissionList { list })
+        let (list, skipped) = parse_lenient::<LmsSubmission>(list, "查询作业提交记录")?;
+        Ok(LmsSubmissionList { list, skipped })
     }
 }
 

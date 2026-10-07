@@ -861,7 +861,9 @@ fn connection_errors_are_retried_before_reporting_failure() {
     assert_eq!(
         events
             .iter()
-            .filter(|event| matches!(event, Event::Notice(message) if message.contains("正在重试")))
+            .filter(
+                |event| matches!(event, Event::Warning(message) if message.contains("正在重试"))
+            )
             .count(),
         MAX_ATTEMPTS as usize - 1,
         "每次重试都应有提示"
@@ -908,7 +910,7 @@ fn harness_in_auto_with_probe(probe_status: u16) -> Harness {
     assert_eq!(
         session.resolve_access_mode(SiteKind::Attendance).unwrap(),
         AccessMode::Direct,
-        "探測有回應時先走直連"
+        "探测有回应时先走直连"
     );
     session.mark_logged_in(SiteKind::Attendance, AccessMode::Direct, Vec::new());
     harness
@@ -926,7 +928,7 @@ fn a_rejection_matching_the_probe_falls_back_to_webvpn() {
             .expect("会话已建立")
             .probe_rejection(),
         Some(403),
-        "探測被 403 拒絕時應留下訊號"
+        "探测被 403 拒绝时应留下讯号"
     );
 
     let _ = harness.dispatch(Job::LoadSchedule { force: true });
@@ -935,16 +937,16 @@ fn a_rejection_matching_the_probe_falls_back_to_webvpn() {
     assert!(
         events.iter().any(|event| matches!(
             event,
-            Event::Notice(message) if message.contains("已改用 WebVPN 重试")
+            Event::Warning(message) if message.contains("已改用 WebVPN 重试")
         )),
-        "應提示已改走 WebVPN：{events:?}"
+        "应提示已改走 WebVPN：{events:?}"
     );
     assert!(
         events.iter().all(|event| !matches!(
             event,
             Event::Failed { message, .. } if message.contains("异常状态码")
         )),
-        "回退後不應直接回報狀態碼錯誤：{events:?}"
+        "回退后不应直接回报状态码错误：{events:?}"
     );
 }
 
@@ -968,7 +970,7 @@ fn a_business_rejection_without_a_probe_signal_does_not_fall_back() {
     assert!(
         events.iter().all(|event| !matches!(
             event,
-            Event::Notice(message) if message.contains("已改用 WebVPN")
+            Event::Warning(message) if message.contains("已改用 WebVPN")
         )),
         "不得回退：{events:?}"
     );
@@ -981,7 +983,7 @@ fn a_business_rejection_without_a_probe_signal_does_not_fall_back() {
                 ..
             } if message.contains("异常状态码")
         )),
-        "應直接回報業務失敗：{events:?}"
+        "应直接回报业务失败：{events:?}"
     );
 }
 
@@ -1123,7 +1125,9 @@ fn preload_login_failure_reports_without_queueing_any_load() {
     assert_eq!(
         events
             .iter()
-            .filter(|event| matches!(event, Event::Notice(message) if message.contains("正在重试")))
+            .filter(
+                |event| matches!(event, Event::Warning(message) if message.contains("正在重试"))
+            )
             .count(),
         MAX_ATTEMPTS as usize - 1,
         "登入失败也应有自动重试提示"
@@ -1302,13 +1306,13 @@ fn finishing_a_login_resumes_tasks_from_both_sources() {
         )
         .expect("收尾应成功");
 
-    assert!(harness.worker.retry.is_none(), "等待中的任務不应被遗留");
+    assert!(harness.worker.retry.is_none(), "等待中的任务不应被遗留");
     let mut queued: Vec<String> = harness.worker.pending_data.iter().map(Job::label).collect();
     queued.sort();
     assert_eq!(
         queued,
         vec!["作业", "课表"],
-        "兩邊的等待任務都應續跑：{queued:?}"
+        "两边的等待任务都应续跑：{queued:?}"
     );
 }
 
@@ -1513,6 +1517,158 @@ fn relogin_progress_is_followed_by_a_page_failure_when_the_login_breaks() {
         "进度之后必须跟着原页面的失败事件，界面才能收敛覆盖层：{events:?}"
     );
     assert!(harness.worker.retry.is_none());
+}
+
+/// 登入步驟失敗後不得留下一個「沒有人會再推進它」的流程。
+///
+/// 取不到驗證碼圖片（`show_captcha` 失敗）就是這種情形：錯誤從 `drive` 冒出
+/// 之後若還留著 `flow`，工作者主迴圈（`Worker::run`）會一直延後資料任務——
+/// 使用者按 `r` 送出的任務只會被合併進待執行佇列，頁面看起來像卡在「載入中」。
+#[test]
+fn a_failed_login_step_does_not_leave_the_flow_behind() {
+    let mut harness = harness(|request: &HttpRequest| {
+        let url = request.url.as_str();
+        if url == crate::auth::captcha::CAPTCHA_URL {
+            // 取不到驗證碼圖片：非連線層錯誤，不會自動重試。
+            return Ok(HttpResponse::new(404, url.to_owned(), b"".as_slice()));
+        }
+        if url == rsa::PUBLIC_KEY_URL {
+            return Ok(HttpResponse::new(
+                200,
+                rsa::PUBLIC_KEY_URL,
+                public_key_pem(),
+            ));
+        }
+        if url == attendance::LOGIN_URL {
+            return Ok(HttpResponse::new(200, ATTENDANCE_POST, login_page()));
+        }
+        // 帳密被拒；失敗次數會跨驅動器累積（第三次之後要求圖片驗證碼）。
+        Ok(HttpResponse::new(
+            401,
+            ATTENDANCE_POST,
+            "<html></html>".to_owned(),
+        ))
+    });
+
+    // 前三次：帳密被拒，流程正常結束。
+    for _ in 0..3 {
+        harness
+            .dispatch(Job::RetryLogin {
+                site: SiteKind::Attendance,
+            })
+            .expect("帐密被拒应正常回报");
+        assert!(harness.worker.flow.is_none(), "凭据被拒后不应留下流程");
+    }
+
+    // 第四次：已達驗證碼門檻，但圖片取不到 → 登入流程無法繼續。
+    harness.worker.captcha_path = Some(std::path::PathBuf::from("/nonexistent/captcha.png"));
+    let err = harness
+        .dispatch(Job::RetryLogin {
+            site: SiteKind::Attendance,
+        })
+        .expect_err("取不到验证码图片时登录应当失败");
+    assert!(matches!(err, AppError::Http { status: 404 }), "{err:?}");
+    assert!(
+        harness.worker.flow.is_none(),
+        "失败的登入步骤必须作废流程，否则资料任务会被无限延后"
+    );
+    assert!(
+        harness.worker.captcha_path.is_none(),
+        "作废流程时应一并清掉验证码暂存"
+    );
+}
+
+/// 互動登入步驟「硬失敗」（不是驗證碼填錯）時同樣要作廢流程。
+///
+/// 這裡刻意讓待存憑證為 `None`（一般的手動重登）：這種情況下
+/// `discard_pending_vault` 會直接返回，不會順手清掉流程，必須由控制任務的
+/// 善後負責；否則 `flow` 會一直留著，資料任務永遠排不到。
+#[test]
+fn a_hard_login_step_failure_drops_the_flow_without_a_pending_switch() {
+    let mut harness = harness(|request: &HttpRequest| {
+        let url = request.url.as_str();
+        if url == rsa::PUBLIC_KEY_URL {
+            return Ok(HttpResponse::new(
+                200,
+                rsa::PUBLIC_KEY_URL,
+                public_key_pem(),
+            ));
+        }
+        if url == attendance::LOGIN_URL {
+            return Ok(HttpResponse::new(
+                200,
+                ATTENDANCE_POST,
+                login_page_with_mfa(),
+            ));
+        }
+        if url.contains("/mfa/detect") {
+            return Ok(json(serde_json::json!({
+                "code": 0,
+                "data": { "state": "s-1", "need": true }
+            })));
+        }
+        if url.contains("/securephone/send") || url.contains("/initByType/securephone") {
+            return Ok(json(serde_json::json!({
+                "code": 0,
+                "data": { "securePhone": "138****1234", "gid": "g-1" }
+            })));
+        }
+        // 核驗端點壞掉：不是「驗證碼填錯」，不可重試也不可保留流程。
+        Ok(HttpResponse::new(500, url.to_owned(), b"".as_slice()))
+    });
+
+    harness
+        .dispatch(Job::RetryLogin {
+            site: SiteKind::Attendance,
+        })
+        .expect("登录应停在短信验证");
+    assert!(harness.saw(|event| matches!(event, Event::LoginNeedsMfa { .. })));
+    harness
+        .dispatch(Job::SendMfaCode)
+        .expect("发送验证码应当成功");
+    assert!(
+        harness.worker.pending_vault.is_none(),
+        "测试前提：没有待存凭证"
+    );
+
+    let err = harness
+        .dispatch(Job::VerifyMfaCode(Secret::from("123456")))
+        .expect_err("核验接口坏掉时应回报错误");
+    assert!(!matches!(err, AppError::VerificationRetry(_)), "{err:?}");
+    assert!(
+        harness.worker.flow.is_none(),
+        "硬失败后必须作废流程，否则资料任务会被无限延后"
+    );
+}
+
+/// 只有「送簡訊驗證碼」失敗不算流程結束：驅動器仍可用，使用者再按一次即可重送。
+#[test]
+fn only_a_sms_send_failure_keeps_the_login_flow_alive() {
+    for job in [
+        Job::RetryLogin {
+            site: SiteKind::Attendance,
+        },
+        Job::RetryWithAccount {
+            site: SiteKind::Attendance,
+            passphrase: Secret::from("secret123"),
+            credentials: Credentials::new("3120000002", "new-password"),
+        },
+        Job::ChangeAccount {
+            passphrase: Secret::from("secret123"),
+            credentials: Credentials::new("3120000002", "new-password"),
+        },
+        Job::SubmitCaptcha(Secret::from("abcd")),
+        Job::VerifyMfaCode(Secret::from("123456")),
+    ] {
+        assert!(login_step_breaks_the_flow(&job), "应作废流程：{job:?}");
+    }
+    assert!(
+        !login_step_breaks_the_flow(&Job::SendMfaCode),
+        "送码失败只是那一次发送失败，驱动仍可用"
+    );
+    assert!(!login_step_breaks_the_flow(&Job::LoadSchedule {
+        force: false
+    }));
 }
 
 /// 取消登入：丟棄流程、待存憑證與待重試任務。
@@ -2448,7 +2604,7 @@ fn homework_fetches_activity_lists_in_batches_without_repeating_requests() {
     assert_eq!(
         titles,
         ["作业A", "作业B", "作业C", "作业D", "作业E"],
-        "结果应依课程顺序彙總"
+        "结果应依课程顺序汇总"
     );
 
     let seen = site.urls();
@@ -3073,7 +3229,9 @@ fn schedule_in_session_matches_attendance_without_notice() {
     let today = chrono::Local::now().date_naive();
     let (start, day_of_week) = semester_fixture_meeting_today(today, 3);
     let end = (today + chrono::Duration::days(90)).to_string();
-    let attendance_date = today.to_string();
+    // 日期刻意用 `YYYY/MM/DD`：解析時必須正規化，否則比對全數失配（每一堂已過
+    // 的課都會變成「待核实」）。
+    let attendance_date = today.format("%Y/%m/%d").to_string();
     let mut harness = harness(move |request: &HttpRequest| {
         let url = request.url.clone();
         if url.ends_with("/timetable/semesters") {
@@ -3134,6 +3292,152 @@ fn schedule_in_session_matches_attendance_without_notice() {
     assert_eq!(
         schedule.lessons[0].attendance,
         LessonAttendance::Recorded(AttendanceStatus::Normal)
+    );
+}
+
+/// 學期日期同樣接受 `-` 與 `/` 分隔（與考勤記錄共用同一套正規化）。
+///
+/// `startDate` 原本是嚴格解析：伺服器改以 `2026/09/07` 回傳時，整頁課表會直接
+/// 失敗——比「全數待核实」更糟；`endDate` 解析失敗則會靜默關掉「已結束」的判斷。
+#[test]
+fn semester_dates_accept_slashes() {
+    let today = chrono::Local::now().date_naive();
+    let (start, day_of_week) = semester_fixture_meeting_today(today, 3);
+    let start = start.replace('-', "/");
+    let end = (today + chrono::Duration::days(90))
+        .format("%Y/%m/%d")
+        .to_string();
+    let mut harness = harness(move |request: &HttpRequest| {
+        let url = request.url.clone();
+        if url.ends_with("/timetable/semesters") {
+            return Ok(json(serde_json::json!({ "code": 0, "data": [{
+                "semesterId": "s-1",
+                "academicYear": "2026-2027",
+                "semesterName": "第一学期",
+                "startDate": start.clone(),
+                "endDate": end.clone(),
+            }]})));
+        }
+        if url.contains("/timetable/weekly") {
+            return Ok(json(serde_json::json!({ "code": 0, "data": { "courses": [{
+                "courseName": "线性代数",
+                "teacherName": "张老师",
+                "classroomName": "主楼A101",
+                "dayOfWeek": day_of_week,
+                "startSection": 1,
+                "endSection": 2,
+                "weekRanges": "1-30",
+            }]}})));
+        }
+        if url.contains("attendance-records") {
+            return Ok(json(serde_json::json!({ "code": 0, "data": {
+                "rows": [],
+                "total": 0,
+            }})));
+        }
+        panic!("未预期的请求：{url}");
+    });
+    harness.login_both_sites();
+
+    harness
+        .dispatch(Job::LoadSchedule { force: false })
+        .expect("斜线日期不得让整页失败");
+
+    let schedule = harness
+        .drain_events()
+        .into_iter()
+        .find_map(|event| match event {
+            Event::Schedule(data) => Some(*data),
+            _ => None,
+        })
+        .expect("应发出课表事件");
+    assert_eq!(schedule.week, 3, "周次仍应正确计算");
+    assert_eq!(schedule.lessons.len(), 1, "课程应照常载入");
+    assert!(schedule.notice.is_none(), "不得出现解析失败提示");
+}
+
+/// 讀不出來的考勤記錄與課程只跳過該筆，並在課表頁提示筆數。
+///
+/// 修復前是整批嚴格解析：一筆 `resultId` 型別異常的記錄或一門缺 `dayOfWeek`
+/// 的課程都會讓整個課表頁失敗，連帶所有課程都沒有考勤狀態。
+#[test]
+fn schedule_reports_skipped_records_and_courses() {
+    let today = chrono::Local::now().date_naive();
+    let (start, day_of_week) = semester_fixture_meeting_today(today, 3);
+    let end = (today + chrono::Duration::days(90)).to_string();
+    let attendance_date = today.to_string();
+    let mut harness = harness(move |request: &HttpRequest| {
+        let url = request.url.clone();
+        if url.ends_with("/timetable/semesters") {
+            return Ok(json(serde_json::json!({ "code": 0, "data": [{
+                "semesterId": "s-1",
+                "academicYear": "2026-2027",
+                "semesterName": "第一学期",
+                "startDate": start.clone(),
+                "endDate": end.clone(),
+            }]})));
+        }
+        if url.contains("/timetable/weekly") {
+            return Ok(json(serde_json::json!({ "code": 0, "data": { "courses": [
+                {
+                    "courseName": "线性代数",
+                    "teacherName": "张老师",
+                    "classroomName": "主楼A101",
+                    "dayOfWeek": day_of_week,
+                    "startSection": 1,
+                    "endSection": 2,
+                    "weekRanges": "1-30",
+                },
+                // 缺 `dayOfWeek`：无法比对，跳過這門課。
+                {"courseName": "缺星期", "startSection": 3, "endSection": 4}
+            ]}})));
+        }
+        if url.contains("attendance-records") {
+            return Ok(json(serde_json::json!({ "code": 0, "data": {
+                "rows": [
+                    {
+                        "resultId": 1,
+                        "startSection": 1,
+                        "endSection": 2,
+                        "courseWeek": 3,
+                        "classroomName": "主楼A101",
+                        "teacherName": "张老师",
+                        "attendanceStatus": "NORMAL",
+                        "attendanceDate": attendance_date.clone(),
+                    },
+                    // 缺 `attendanceStatus`：无法比对，跳過這筆。
+                    {"resultId": 2, "startSection": 1, "endSection": 2}
+                ],
+                "total": 2,
+            }})));
+        }
+        panic!("未预期的请求：{url}");
+    });
+    harness.login_both_sites();
+
+    harness
+        .dispatch(Job::LoadSchedule { force: false })
+        .expect("单笔异常不得让课表加载失败");
+
+    let schedule = harness
+        .drain_events()
+        .into_iter()
+        .find_map(|event| match event {
+            Event::Schedule(data) => Some(*data),
+            _ => None,
+        })
+        .expect("应发出课表事件");
+    assert_eq!(schedule.skipped, 1, "读不出来的课程数应计入提示");
+    let notice = schedule.notice.as_deref().unwrap_or_default();
+    assert!(
+        notice.contains("已跳过 1 条无法解析的考勤记录"),
+        "应提示被跳过的记录：{notice}"
+    );
+    assert_eq!(schedule.lessons.len(), 1, "能解析的课程仍应显示");
+    assert_eq!(
+        schedule.lessons[0].attendance,
+        LessonAttendance::Recorded(AttendanceStatus::Normal),
+        "能解析的记录仍应正常比对"
     );
 }
 
@@ -3582,9 +3886,14 @@ fn forced_refresh_keeps_the_selected_week() {
 /// 學期已結束時明確切週：補查該週課表與考勤（預設載入仍不查詢）。
 #[test]
 fn explicit_week_after_semester_end_loads_that_week() {
+    use chrono::Datelike as _;
+
     let seen = Arc::new(Mutex::new(Vec::new()));
     let today = chrono::Local::now().date_naive();
-    let start = (today - chrono::Duration::days(90)).to_string();
+    // 開始日取週一（校曆常態）：非週一會多出一句「週次可能整體偏移」的提示，
+    // 那不是本測試要驗的東西（另見 `schedule_warns_when_the_semester_starts_mid_week`）。
+    let monday = today - chrono::Duration::days(i64::from(today.weekday().num_days_from_monday()));
+    let start = (monday - chrono::Duration::days(13 * 7)).to_string();
     let end = (today - chrono::Duration::days(3)).to_string();
     let mut harness = harness(schedule_site(Arc::clone(&seen), start, end, 1));
     harness.login_both_sites();
@@ -3613,6 +3922,37 @@ fn explicit_week_after_semester_end_loads_that_week() {
     assert!(schedule.notice.is_none(), "明确切周不再提示学期已结束");
     assert_eq!(schedule.lessons.len(), 1, "补查的课表应有第 3 周的课程");
     assert_eq!(schedule.total_weeks, 30);
+}
+
+/// 學期開始日不是週一時，課表頁必須明說「週次與日期可能整體偏移」。
+///
+/// 週次與日期都以學期開始日為第 1 週第 1 天錨定（參考實作錨定週一）；校曆從
+/// 週一開始時兩者等價。若不是，偏移是無聲的系統性錯誤（每堂課的日期與週次
+/// 一起位移），因此在提示列明說——不改錨點語意（改了會讓所有既有日期位移），
+/// 只讓不對勁看得見。
+#[test]
+fn schedule_warns_when_the_semester_starts_mid_week() {
+    use chrono::Datelike as _;
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let today = chrono::Local::now().date_naive();
+    // 刻意用非週一的開始日（本週週一的前一天）。
+    let monday = today - chrono::Duration::days(i64::from(today.weekday().num_days_from_monday()));
+    let start = (monday - chrono::Duration::days(1)).to_string();
+    let end = (today + chrono::Duration::days(90)).to_string();
+    let mut harness = harness(schedule_site(Arc::clone(&seen), start, end, 1));
+    harness.login_both_sites();
+
+    harness
+        .dispatch(Job::LoadSchedule { force: false })
+        .expect("课表加载应当成功");
+
+    let schedule = schedule_event(&mut harness);
+    let notice = schedule.notice.as_deref().unwrap_or_default();
+    assert!(
+        notice.contains("不是周一"),
+        "开始日非周一时必须提示偏移风险：{notice}"
+    );
 }
 
 /// 同一週次重複切換不重複查詢。
@@ -4225,7 +4565,7 @@ fn opening_homework_activity_without_usable_course_falls_back_to_home() {
             .iter()
             .filter(|event| matches!(
                 event,
-                Event::Notice(message) if message.contains("无法确定作业所属课程")
+                Event::Warning(message) if message.contains("无法确定作业所属课程")
             ))
             .count(),
         2,
@@ -4308,7 +4648,7 @@ fn opening_lesson_without_player_url_falls_back_to_home() {
     assert!(
         events.iter().any(|event| matches!(
             event,
-            Event::Notice(message) if message.contains("无法获取播放地址")
+            Event::Warning(message) if message.contains("无法获取播放地址")
         )),
         "取不到播放地址时应告知用户"
     );
@@ -4347,7 +4687,7 @@ fn opening_lesson_with_an_external_player_url_falls_back_to_home() {
     assert!(
         events.iter().any(|event| matches!(
             event,
-            Event::Notice(message)
+            Event::Warning(message)
                 if message.contains("无法获取播放地址") && message.contains("example.com")
         )),
         "应说明被拒绝的主机：{events:?}"
@@ -4429,7 +4769,7 @@ fn only_the_sms_send_is_not_replayable() {
             kind: lms::ActivityKind::Homework,
         },
     ] {
-        assert!(job.is_replayable(), "{job:?} 可以原樣重送");
+        assert!(job.is_replayable(), "{job:?} 可以原样重送");
     }
 }
 
@@ -4494,7 +4834,7 @@ fn connection_errors_do_not_replay_the_sms_send() {
     assert!(
         !events
             .iter()
-            .any(|event| matches!(event, Event::Notice(message) if message.contains("正在重试"))),
+            .any(|event| matches!(event, Event::Warning(message) if message.contains("正在重试"))),
         "不应有自动重试提示：{events:?}"
     );
     assert!(
@@ -5233,7 +5573,7 @@ fn unlock_tightens_loose_vault_permissions() {
     assert!(
         harness.saw(|event| matches!(
             event,
-            Event::Notice(message) if message.contains("权限")
+            Event::Warning(message) if message.contains("权限")
         )),
         "应提示凭证文件权限过宽"
     );
@@ -5394,6 +5734,86 @@ fn rollback_uses_the_vault_credentials_not_an_unverified_pending_account() {
     );
     let stored = harness.vault.load("secret123").expect("读取凭据");
     assert_eq!(stored.username, "3120000001", "保险库内容不得被更动");
+}
+
+/// 「當前學期」的清理矩陣：所有換帳號路徑都必須作廢，切換訪問模式則保留。
+///
+/// `retry_with_account`（登入失敗畫面按 `e` 重輸帳密）與 `change_account` 是同一種
+/// 帳號切換：它同樣清了 generation、快取、課表快取與選定週次，唯獨漏掉
+/// `known_term`，於是舊帳號查到的學期會繼續分區新帳號的課程。
+#[test]
+fn account_switch_paths_clear_the_remembered_term_but_policy_change_keeps_it() {
+    let mut harness = harness(fake_flow(0));
+    harness.worker.known_term = TermCode::parse("2025-2026-2");
+
+    let _ = harness.dispatch(Job::RetryWithAccount {
+        site: SiteKind::Attendance,
+        credentials: Credentials::new("3120000002", "new-password"),
+        passphrase: "secret123".into(),
+    });
+    assert!(
+        harness.worker.known_term.is_none(),
+        "重输帐密换帐号后不得沿用旧学期"
+    );
+
+    // 切換訪問模式不是換帳號：資料仍有效，學期提示保留。
+    harness.worker.known_term = TermCode::parse("2025-2026-2");
+    harness
+        .dispatch(Job::SetAccessPolicy(AccessPolicy::WebVpn))
+        .expect("保存访问模式");
+    assert_eq!(
+        harness.worker.known_term,
+        TermCode::parse("2025-2026-2"),
+        "切换访问模式时资料仍有效，学期应保留"
+    );
+}
+
+/// 換帳號後不得沿用舊帳號查到的「當前學期」。
+///
+/// `known_term` 是上一次查考勤系統的結果，屬於舊帳號；不清掉的話，課程分區與
+/// 學期判定會先沿用舊資料（考勤剛好不可用時甚至會一直沿用）。使用者自己選的
+/// `chosen_term` 則必須保留。
+#[test]
+fn account_switch_clears_the_remembered_term() {
+    let mut harness = harness(|request: &HttpRequest| {
+        let url = request.url.as_str();
+        if url == rsa::PUBLIC_KEY_URL {
+            return Ok(HttpResponse::new(
+                200,
+                rsa::PUBLIC_KEY_URL,
+                public_key_pem(),
+            ));
+        }
+        if url == attendance::LOGIN_URL {
+            return Ok(HttpResponse::new(200, ATTENDANCE_POST, login_page()));
+        }
+        if request.form_field("failN").is_some() {
+            // 帳密被拒：本次切換注定失敗，但 session 重建與清理已經發生。
+            return Ok(HttpResponse::new(401, ATTENDANCE_POST, "<html></html>"));
+        }
+        Err(AppError::network_kind(
+            NetworkKind::Connect,
+            "连接失败".to_owned(),
+        ))
+    });
+
+    harness.worker.known_term = TermCode::parse("2025-2026-2");
+    harness.worker.chosen_term = TermCode::parse("2025-2026-1");
+
+    let _ = harness.dispatch(Job::ChangeAccount {
+        passphrase: "secret123".into(),
+        credentials: Credentials::new("3120000001", "wrong-password"),
+    });
+
+    assert!(
+        harness.worker.known_term.is_none(),
+        "换账号后不得沿用旧账号查到的学期"
+    );
+    assert_eq!(
+        harness.worker.chosen_term,
+        TermCode::parse("2025-2026-1"),
+        "使用者自己选的学期应保留"
+    );
 }
 
 /// 設定表單重複輸入**同一帳號**的錯誤密碼時，失敗計數必須累積。
@@ -6424,7 +6844,7 @@ fn homework_continues_with_the_remembered_term_when_attendance_times_out() {
     assert!(
         events.iter().any(|event| matches!(
             event,
-            Event::Notice(text) if text.contains("考勤系统暂时不可用")
+            Event::Warning(text) if text.contains("考勤系统暂时不可用")
         )),
         "应提示考勤故障与学期来源"
     );
@@ -6637,7 +7057,7 @@ fn attempt_budget_is_kept_per_task() {
     assert_eq!(
         budget.try_consume(&open),
         Some(2),
-        "首次消耗回報即將進行的嘗試序號"
+        "首次消耗回报即将进行的尝试序号"
     );
     assert_eq!(
         budget.try_consume(&open),
@@ -6663,9 +7083,9 @@ fn connection_retry_budget_counts_up_to_its_own_limit() {
     let mut budget = AttemptBudgets::new(MAX_ATTEMPTS);
     let key = DataKey::Courses;
 
-    assert_eq!(budget.try_consume(&key), Some(2), "首次重試是第 2 次嘗試");
-    assert_eq!(budget.try_consume(&key), Some(3), "再下一次是第 3 次嘗試");
-    assert_eq!(budget.try_consume(&key), None, "達到上限後不得再消耗");
+    assert_eq!(budget.try_consume(&key), Some(2), "首次重试是第 2 次尝试");
+    assert_eq!(budget.try_consume(&key), Some(3), "再下一次是第 3 次尝试");
+    assert_eq!(budget.try_consume(&key), None, "达到上限后不得再消耗");
 }
 
 // ── 自訂義任務（任務服務） ──────────────────────────────
@@ -6744,7 +7164,7 @@ fn config_rebuild_notice_is_emitted_after_unlock() {
     let notice = events
         .iter()
         .position(|event| {
-            matches!(event, Event::Notice(message) if message.contains("配置文件已损坏并重建"))
+            matches!(event, Event::Warning(message) if message.contains("配置文件已损坏并重建"))
         })
         .expect("重建提示应在解锁后送达");
     assert!(notice > ready, "提示必须晚于 VaultReady 才有底栏可显示");
@@ -6765,7 +7185,7 @@ fn config_rebuild_notice_is_absent_without_a_rebuild() {
 
     assert!(
         !events.iter().any(|event| {
-            matches!(event, Event::Notice(message) if message.contains("配置文件已损坏并重建"))
+            matches!(event, Event::Warning(message) if message.contains("配置文件已损坏并重建"))
         }),
         "未发生重建时不应出现提示"
     );
@@ -6921,7 +7341,7 @@ fn changing_the_passphrase_is_refused_when_the_task_file_is_unreadable() {
     assert!(
         events.iter().any(|event| matches!(
             event,
-            Event::Notice(message) if message.contains("任务文件无法读取")
+            Event::Warning(message) if message.contains("任务文件无法读取")
         )),
         "解锁应提示任务文件无法读取：{events:?}"
     );

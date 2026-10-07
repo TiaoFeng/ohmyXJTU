@@ -94,6 +94,70 @@ fn keeps_ascii_escapes_and_rejects_trailing_backslash() {
     assert!(parse_js_object("{ user: { a: \"\\uZZZZ\" }, dept: {} }", "user", "dept").is_none());
 }
 
+/// UTF-16 代理對必須組合成一個字元。
+///
+/// JS 與 JSON 都以 UTF-16 表示字串，emoji 等非 BMP 字元是一對代理。修復前
+/// 解析器對每個 `\uXXXX` 各呼叫一次 `char::from_u32`，`\uD83D` 單獨看回 `None`，
+/// 整段 `globalData` 因此解析失敗——`user_id` 取不到，個人作業全部退回「待核实」。
+#[test]
+fn combines_utf16_surrogate_pairs() {
+    let page = "{ user: { id: 1, name: \"\\uD83D\\uDE00 同学\", note: \"\\u{1F600}\" }, dept: {} }";
+    let user = parse_js_object(page, "user", "dept").expect("应解析");
+    assert_eq!(user["name"], json!("😀 同学"));
+    assert_eq!(user["note"], json!("😀"));
+    // 代理對之外的既有跳脫不受影響。
+    assert_eq!(
+        parse_js_object("{ user: { a: \"\\u4e2d\" }, dept: {} }", "user", "dept").expect("应解析")
+            ["a"],
+        json!("中")
+    );
+}
+
+/// 孤立代理以 U+FFFD 取代：只損失該字元，不讓整段解析失敗。
+#[test]
+fn replaces_lone_surrogates_instead_of_failing() {
+    let page = "{ user: { a: \"x\\uD83Dy\", b: \"\\uDE00\", c: \"\\uD83Dz\" }, dept: {} }";
+    let user = parse_js_object(page, "user", "dept").expect("应解析");
+    assert_eq!(user["a"], json!("x\u{fffd}y"), "高位代理后接普通字元");
+    assert_eq!(user["b"], json!("\u{fffd}"), "只有低位代理");
+    assert_eq!(user["c"], json!("\u{fffd}z"), "高位代理在字串结尾");
+
+    // 大括號形式同一套政策：降級而不是讓整段解析失敗。
+    let page = "{ user: { a: \"x\\u{D800}y\", b: \"\\u{DFFF}\" }, dept: {} }";
+    let user = parse_js_object(page, "user", "dept").expect("应解析");
+    assert_eq!(user["a"], json!("x\u{fffd}y"), "大括号形式的孤立代理");
+    assert_eq!(user["b"], json!("\u{fffd}"));
+}
+
+/// 代理對的邊界碼位：`\uD800\uDC00`（最低）與 `\uDBFF\uDFFF`（最高）。
+#[test]
+fn combines_surrogate_pairs_at_both_ends() {
+    let page = "{ user: { low: \"\\uD800\\uDC00\", high: \"\\uDBFF\\uDFFF\" }, dept: {} }";
+    let user = parse_js_object(page, "user", "dept").expect("应解析");
+    assert_eq!(
+        user["low"],
+        json!("\u{10000}"),
+        "最低的代理对应组成 U+10000"
+    );
+    assert_eq!(
+        user["high"],
+        json!("\u{10FFFF}"),
+        "最高的代理对应组成 U+10FFFF"
+    );
+}
+
+/// `\u{…}` 的語法錯誤仍回 `None`（解析器與頁面格式不符應該看得見）。
+#[test]
+fn rejects_malformed_braced_escapes() {
+    for page in [
+        "{ user: { a: \"\\u{110000}\" }, dept: {} }",
+        "{ user: { a: \"\\u{}\" }, dept: {} }",
+        "{ user: { a: \"\\u{1F600\" }, dept: {} }",
+    ] {
+        assert!(parse_js_object(page, "user", "dept").is_none(), "{page}");
+    }
+}
+
 /// 巢狀深度上限：超限回 `None`，不得遞迴到堆疊溢位。
 ///
 /// 修復前這裡的輸入會讓解析器遞迴上萬層（工作執行緒堆疊 2 MiB）而直接

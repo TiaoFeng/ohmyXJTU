@@ -76,7 +76,7 @@ pub fn run() -> AppResult<()> {
     loop_result.and(restore_result)
 }
 
-/// 安裝 panic hook：還原終端、輸出單行錯誤訊息後結束行程。
+/// 安裝 panic hook：還原終端、清掉暫存檔、輸出單行錯誤訊息後結束行程。
 ///
 /// 訊息不含 panic 內容（避免任何潛在敏感資料外洩），只保留發生位置；
 /// 任何執行緒 panic 都會終止行程，避免背景執行緒死亡後介面卡死。
@@ -91,6 +91,10 @@ pub fn install_panic_hook() {
             crossterm::event::DisableBracketedPaste,
             crossterm::cursor::Show
         );
+        // `exit` 會跳過 `main` 收尾的清理，因此在這裡補做一次：登入流程若正停在
+        // 驗證碼，磁碟上會留著 captcha.png，而 `PRIVACY.md` 承諾登入終態與結束時
+        // 一律刪除它。清理是 best-effort（不建立目錄、失敗忽略）。
+        crate::auth::captcha::cleanup_on_exit();
         let location = info
             .location()
             .map(|location| (location.file(), location.line()));
@@ -141,17 +145,17 @@ fn main_loop(
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     // 背景工作執行緒已結束：之後不會再有任何事件，頁面會永遠停在
                     // 「載入中」且按鍵無效。明確提示使用者退出重啟，而不是靜默停滯。
-                    app.set_message("后台任务已停止，请按 q 退出后重新启动");
+                    app.set_error_message("后台任务已停止，请按 q 退出后重新启动");
                     break;
                 }
             }
         }
 
-        // 事件要求的瀏覽器開啟：在這裡執行，錯誤以狀態訊息回報。
+        // 事件要求的瀏覽器開啟：在這裡執行，結果以狀態訊息回報（失敗為錯誤色）。
         if let Some(url) = app.pending_open.take() {
             match crate::system::browser::open_url(&url) {
-                Ok(()) => app.set_message("已在浏览器打开：如需登录请在浏览器完成登录"),
-                Err(err) => app.set_message(format!("打开网页失败：{err}")),
+                Ok(()) => app.report_open_result(None),
+                Err(err) => app.report_open_result(Some(err.to_string())),
             }
         }
 

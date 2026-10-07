@@ -6,7 +6,7 @@
 
 use crate::config::AccessPolicy;
 use crate::credentials::{Credentials, Secret};
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::session::{SessionManager, SiteKind};
 use crate::sites::attendance::AttendanceSite;
 use crate::sites::lms::LmsSite;
@@ -81,6 +81,9 @@ impl Worker {
         // 課表快取與選定週次都屬於舊帳號。
         self.schedule_cache = None;
         self.schedule_week = None;
+        // 「當前學期」是上一次查考勤系統的結果，同樣屬於舊帳號（`chosen_term`
+        // 是使用者自己的選擇，保留）。
+        self.known_term = None;
         // 失敗計數以 (帳號, 後端) 為鍵保存：換了帳號自然從 0 起算，
         // 同一帳號重試則保留——否則伺服器要求的驗證碼永遠不會出現。
         self.login_failure_key = None;
@@ -104,7 +107,7 @@ impl Worker {
     fn report_vault_permissions(&mut self) {
         let path = self.vault.path().to_path_buf();
         if let Ok(true) = crate::io::ensure_private(&path) {
-            self.emit(Event::Notice(format!(
+            self.emit(Event::Warning(format!(
                 "凭证文件权限过宽（其他用户可读），已收紧为仅本人可读写：{}",
                 path.display()
             )));
@@ -121,7 +124,7 @@ impl Worker {
     /// `rebuilt` 不是持久化欄位，`mem::take` 同時保證同一次執行只提示一次。
     fn report_config_rebuild(&mut self) {
         if std::mem::take(&mut self.config.rebuilt) {
-            self.emit(Event::Notice(
+            self.emit(Event::Warning(
                 "配置文件已损坏并重建：已同意的协议与记住的学期已重置".to_owned(),
             ));
         }
@@ -137,12 +140,14 @@ impl Worker {
         let credentials = self.vault.load(old)?;
         self.tasks.rekey(&new.into())?;
         if let Err(err) = self.vault.store(new, &credentials) {
-            // 保險庫仍是舊口令：把任務檔換回舊口令。回復失敗時明確回報，
-            // 讓使用者知道任務檔可能需要以舊口令重新解鎖。
+            // 保險庫仍是舊口令：把任務檔換回舊口令。回復失敗時把細節附在錯誤
+            // 訊息裡（見 [`AppError::PassphraseRollback`]）——另外發一則通知會
+            // 被緊接著的失敗訊息蓋掉，使用者永遠看不到。
             if let Err(rollback) = self.tasks.rekey(&old.into()) {
-                self.emit(Event::Notice(format!(
-                    "口令修改失败，且任务文件未能还原（{rollback}）；请以原口令重新解锁"
-                )));
+                return Err(AppError::PassphraseRollback {
+                    reason: err.to_string(),
+                    rollback: rollback.to_string(),
+                });
             }
             return Err(err);
         }
@@ -179,6 +184,9 @@ impl Worker {
         // 課表快取與選定週次都屬於舊帳號：一併作廢（介面也會清除頁面資料）。
         self.schedule_cache = None;
         self.schedule_week = None;
+        // 「當前學期」是上一次查考勤系統的結果，同樣屬於舊帳號：作廢後由下一次
+        // 載入重新確認。`chosen_term` 是使用者自己的選擇，保留。
+        self.known_term = None;
         // 舊帳號的站點登入狀態與頁面資料已失效：介面應清除。
         self.emit(Event::SessionsCleared {
             account_changed: true,

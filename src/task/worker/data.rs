@@ -4,7 +4,7 @@
 //! API 取資料並轉成介面模型。學期判定所需的考勤查詢（`Worker::attendance_term`）
 //! 也在這裡，供作業載入共用。
 
-use chrono::{Local, NaiveDate};
+use chrono::{Datelike as _, Local, NaiveDate, Weekday};
 
 use crate::domain::semester::TermCode;
 use crate::domain::{attendance_match, schedule};
@@ -41,13 +41,17 @@ impl Worker {
                 let session = self.session_mut()?;
                 AttendanceApi::new(session).current_semester()?
             };
+            // 學期日期與考勤記錄共用同一套日期正規化（見
+            // [`crate::sites::parse_date_lenient`]）：伺服器改以 `2026/09/07`
+            // 回傳時，`start_date` 不該讓整頁失敗（比「全數待核实」更糟），
+            // `end_date` 也不該靜默失效（那會關掉「已結束」的判斷）。
             let start = parse_date(&semester.start_date)?;
             // `end_date` 為選填：缺失或無法解析時不啟用「已結束」判斷（不讓整個
             // 頁面因此失敗），但可解析時一定以它為準。
             let end = semester
                 .end_date
                 .as_deref()
-                .and_then(|raw| NaiveDate::parse_from_str(raw.trim(), "%Y-%m-%d").ok());
+                .and_then(crate::sites::parse_date_lenient);
             let term = semester.term_name();
             let label = semester.display_label();
             // 記錄本會話得知的學期，供思源學堂課程分區使用（不重複查詢考勤）。
@@ -77,15 +81,18 @@ impl Worker {
                 }
             }
 
-            let courses = {
+            let (courses, skipped_unparsed) = {
                 let session = self.session_mut()?;
                 AttendanceApi::new(session).weekly_courses(&semester.semester_id)?
             };
             let slots = schedule::merge_courses(&courses);
-            let skipped = courses
-                .iter()
-                .filter(|course| schedule::parse_weeks(&course.week_ranges).is_empty())
-                .count();
+            // 兩種「跳過」都要回報：整門課讀不出來，以及週次欄位無法解析
+            // （後者仍算一門課，只是無法判斷它出現在哪幾週）。
+            let skipped = skipped_unparsed
+                + courses
+                    .iter()
+                    .filter(|course| schedule::parse_weeks(&course.week_ranges).is_empty())
+                    .count();
             let max_week = slots
                 .iter()
                 .flat_map(|slot| slot.weeks.iter().copied())
@@ -112,7 +119,11 @@ impl Worker {
             return Err(AppError::protocol("周次超出可表示的日期范围"));
         };
 
-        let RecordBatch { records, truncated } = {
+        let RecordBatch {
+            records,
+            truncated,
+            skipped: skipped_records,
+        } = {
             let session = self.session_mut()?;
             AttendanceApi::new(session).records_between(monday, sunday)?
         };
@@ -141,12 +152,7 @@ impl Worker {
         // `merge_courses` 的課名順序。
         lessons.sort_by_key(|lesson| (lesson.date, lesson.start_section, lesson.end_section));
 
-        let notice = truncated.then(|| {
-            format!(
-                "考勤记录超过分页上限，仅比对前 {} 条，部分课程可能显示「待核实」",
-                records.len()
-            )
-        });
+        let notice = schedule_notice(truncated, records.len(), skipped_records, cache.start);
 
         Ok(ScheduleData {
             semester: cache.label,
@@ -210,9 +216,19 @@ impl Worker {
 
     /// 考勤流水（一頁）。
     pub(super) fn load_flow(&mut self, page: u32) -> AppResult<FlowData> {
-        let session = self.session_mut()?;
-        let mut api = AttendanceApi::new(session);
-        let page_data = api.flow_page(page.max(1), FLOW_PAGE_SIZE)?;
+        let page_data = {
+            let session = self.session_mut()?;
+            let mut api = AttendanceApi::new(session);
+            api.flow_page(page.max(1), FLOW_PAGE_SIZE)?
+        };
+        // 跳過的流水不會出現在清單裡，但 `total` 仍含它們：不提示的話，使用者
+        // 只會看到頁碼對不上而不知原因。
+        if page_data.skipped > 0 {
+            self.emit(Event::Warning(format!(
+                "已跳过 {} 条无法解析的考勤流水",
+                page_data.skipped
+            )));
+        }
 
         Ok(FlowData {
             total: page_data.total,
@@ -273,7 +289,7 @@ impl Worker {
             description,
             end_time: detail.activity.end_time,
             submit_by_group: detail.activity.submit_by_group,
-            submissions: detail.submissions.map(|list| list.list),
+            submissions: detail.submissions,
             note: detail.note,
         })
     }
@@ -296,7 +312,7 @@ impl Worker {
                     Ok(player_url) => url = player_url,
                     Err(err) if err.needs_relogin() => return Err(err),
                     Err(err) => {
-                        self.emit(Event::Notice(format!(
+                        self.emit(Event::Warning(format!(
                             "无法获取播放地址，已改为打开思源学堂首页：{err}"
                         )));
                     }
@@ -304,7 +320,7 @@ impl Worker {
             }
             ActivityKind::Homework => match course_id.and_then(lms::course_homework_url) {
                 Some(homework_url) => url = homework_url,
-                None => self.emit(Event::Notice(
+                None => self.emit(Event::Warning(
                     "无法确定作业所属课程，已改为打开思源学堂首页".to_owned(),
                 )),
             },
@@ -345,8 +361,40 @@ fn off_session_schedule(
     }
 }
 
-/// 考勤學期的開始日期（`YYYY-MM-DD`）。
+/// 課表頁提示列：資料不完整（分頁上限）或無法解析時都必須明說。
+///
+/// 兩種情形都不該靜默：使用者看到的考勤狀態是「比對後的結果」，資料少了就會
+/// 有課程顯示「待核实」，沒有提示的話會被誤認為真的沒有記錄。
+fn schedule_notice(
+    truncated: bool,
+    kept: usize,
+    skipped: usize,
+    start: NaiveDate,
+) -> Option<String> {
+    let mut parts = Vec::new();
+    // 週次與日期都以「學期開始日」為第 1 週第 1 天錨定（與參考實作不同，它錨定
+    // 週一）。校曆從週一開始時兩者等價；若不是，日期與週次會整體偏移——這是
+    // 無聲的系統性錯誤，所以在提示列明說，讓使用者一眼看出不對勁。
+    if start.weekday() != Weekday::Mon {
+        parts.push(format!(
+            "学期开始日（{start}）不是周一：周次与日期可能整体偏移，请反馈"
+        ));
+    }
+    if truncated {
+        parts.push(format!(
+            "考勤记录超过分页上限，仅比对前 {kept} 条，部分课程可能显示「待核实」"
+        ));
+    }
+    if skipped > 0 {
+        parts.push(format!(
+            "已跳过 {skipped} 条无法解析的考勤记录，相关课程可能显示「待核实」"
+        ));
+    }
+    (!parts.is_empty()).then(|| parts.join("；"))
+}
+
+/// 考勤學期的開始日期（接受 `-` 與 `/` 分隔；訊息不含欄位值）。
 pub(super) fn parse_date(value: &str) -> AppResult<NaiveDate> {
-    NaiveDate::parse_from_str(value.trim(), "%Y-%m-%d")
-        .map_err(|_| AppError::protocol("学期开始日期格式无法识别（应为 YYYY-MM-DD）"))
+    crate::sites::parse_date_lenient(value)
+        .ok_or_else(|| AppError::protocol("学期开始日期格式无法识别（应为 YYYY-MM-DD）"))
 }

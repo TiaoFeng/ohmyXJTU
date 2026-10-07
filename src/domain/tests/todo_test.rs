@@ -31,6 +31,22 @@ fn task(
 }
 
 #[test]
+fn task_debug_hides_user_text() {
+    let mut task = task(7, "写实验报告", None, Priority::High);
+    task.description = Some("第一章到第三章".to_owned());
+    task.tag = Some("标签甲".to_owned());
+
+    let text = format!("{task:?}");
+    assert!(!text.contains("写实验报告"), "不得输出任务内容：{text}");
+    assert!(!text.contains("第一章到第三章"), "不得输出描述：{text}");
+    assert!(!text.contains("标签甲"), "不得输出标签：{text}");
+    // 非文字欄位仍要看得到，除錯才有意義。
+    assert!(text.contains("id: 7"), "{text}");
+    assert!(text.contains("priority: High"), "{text}");
+    assert!(text.contains("content: false"), "只顯示有無：{text}");
+}
+
+#[test]
 fn parse_deadline_input_accepts_supported_shapes() {
     assert_eq!(parse_deadline_input("").unwrap(), None);
     assert_eq!(parse_deadline_input("   ").unwrap(), None);

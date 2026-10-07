@@ -17,11 +17,6 @@ use zeroize::{Zeroize, Zeroizing};
 pub struct Secret(Zeroizing<String>);
 
 impl Secret {
-    /// 建立空字串。
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// 以明文檢視內容。
     pub fn as_str(&self) -> &str {
         self.0.as_str()
@@ -33,6 +28,9 @@ impl Secret {
     }
 
     /// 清空並覆寫底層緩衝。
+    ///
+    /// 目前只有測試呼叫（生產碼靠 [`Drop`] 自動零化）：保留這個方法讓「用完
+    /// 立刻丟掉明文」不用依賴作用域結束。
     pub fn clear(&mut self) {
         self.0.zeroize();
     }

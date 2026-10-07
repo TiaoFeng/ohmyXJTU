@@ -195,6 +195,35 @@ fn messages_expire_only_after_ttl() {
     assert_eq!(app.message_text(), Some("登录成功"));
 }
 
+/// 開啟瀏覽器的結果：成功為一般提示色，失敗為錯誤色。
+#[test]
+fn open_result_uses_the_error_tone_only_on_failure() {
+    let mut app = App::new(AccessPolicy::Auto);
+
+    app.report_open_result(None);
+    assert_eq!(app.message_tone(), Some(crate::tone::Tone::Info));
+    assert!(
+        app.message_text()
+            .is_some_and(|text| text.contains("已在浏览器打开")),
+        "成功时应提示需在浏览器自行登录：{:?}",
+        app.message_text()
+    );
+
+    app.report_open_result(Some("没有可用的浏览器".to_owned()));
+    assert_eq!(
+        app.message_tone(),
+        Some(crate::tone::Tone::Danger),
+        "失败应以错误色呈现：{:?}",
+        app.message_text()
+    );
+    assert!(
+        app.message_text()
+            .is_some_and(|text| text.starts_with("打开网页失败：")),
+        "应保留失败原因：{:?}",
+        app.message_text()
+    );
+}
+
 #[test]
 fn animation_tick_advances_for_loading_dots() {
     let mut app = App::new(AccessPolicy::Auto);
@@ -411,7 +440,7 @@ fn task_page_combines_tasks_and_homework_in_one_list() {
     assert_eq!(
         app.task_page_group_counts().get(HomeworkGroup::Completed),
         1,
-        "分组计数应包含自訂義任务"
+        "分组计数应包含自订义任务"
     );
 
     let rows = app.task_page_rows();
@@ -600,7 +629,7 @@ fn sorted_entries_follow_the_selection_and_keep_filtering() {
     assert_eq!(
         app.selected_entry().map(entry_label),
         None,
-        "清單變短後越界的索引不應指向別的項目"
+        "清单变短后越界的索引不应指向别的项目"
     );
 }
 
@@ -612,7 +641,7 @@ fn set_message_cleans_and_bounds_the_text() {
     assert_eq!(app.message_text(), Some("查询失败[31m 请重试"));
 
     app.set_message("x".repeat(500));
-    let text = app.message_text().expect("应有訊息");
+    let text = app.message_text().expect("应有讯息");
     assert_eq!(text.chars().count(), crate::text::MAX_INLINE_CHARS);
     assert!(text.ends_with('…'), "截断应加省略号：{text}");
 }

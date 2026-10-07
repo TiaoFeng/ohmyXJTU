@@ -81,6 +81,15 @@ enum ProbeOutcome {
     Unreachable,
 }
 
+/// 快取的探測結果在 `now` 時是否仍然有效。
+///
+/// 兩處取用探測結果的地方（[`SessionManager::probe_campus_network`] 與
+/// [`SessionManager::probe_rejection`]）共用同一個判斷：過期的結果不再代表
+/// 目前的路由狀態，不該用來決定回退。
+fn probe_is_fresh(at: Instant, now: Instant) -> bool {
+    now.duration_since(at) < PROBE_TTL
+}
+
 /// 會話管理器。
 ///
 /// 管理員負責三件事：
@@ -208,11 +217,6 @@ impl SessionManager {
     #[cfg(test)]
     pub fn credentials(&self) -> Option<&Credentials> {
         self.credentials.as_ref()
-    }
-
-    /// 目前的訪問策略。
-    pub fn access_policy(&self) -> AccessPolicy {
-        self.policy
     }
 
     /// 更新訪問策略並清除已解析的結果與探測快取。
@@ -532,7 +536,7 @@ impl SessionManager {
     /// 4xx 的回應另外記下狀態碼（見 [`Self::probe_rejection`]）。
     fn probe_campus_network(&mut self) -> ProbeOutcome {
         if let Some((value, at)) = self.probe
-            && at.elapsed() < PROBE_TTL
+            && probe_is_fresh(at, Instant::now())
         {
             return value;
         }
@@ -553,15 +557,27 @@ impl SessionManager {
         outcome
     }
 
-    /// 探測時被明確拒絕的狀態碼（若探測沒被拒絕則為 `None`）。
+    /// 探測時被明確拒絕的狀態碼（若探測沒被拒絕或結果已過期則為 `None`）。
     ///
     /// 直連請求收到**與探測相同**的 4xx，代表請求與探測被同一層（很可能是
     /// 校外的限制）以相同方式拒絕：這種情況值得允許一次有限的 WebVPN 回退，
     /// 而單獨的業務 4xx（例如未選課）不會觸發回退。
+    ///
+    /// 與 [`Self::probe_campus_network`] 一致地遵守 [`PROBE_TTL`]：過期的探測
+    /// 結果不再代表目前的路由狀態，不能據此決定回退。
     pub fn probe_rejection(&self) -> Option<u16> {
-        match self.probe {
-            Some((ProbeOutcome::Reachable { rejection }, _)) => rejection,
-            _ => None,
+        self.probe_rejection_at(Instant::now())
+    }
+
+    /// [`Self::probe_rejection`] 的實際判斷（`now` 供測試注入）。
+    fn probe_rejection_at(&self, now: Instant) -> Option<u16> {
+        let (outcome, at) = self.probe.as_ref()?;
+        if !probe_is_fresh(*at, now) {
+            return None;
+        }
+        match outcome {
+            ProbeOutcome::Reachable { rejection } => *rejection,
+            ProbeOutcome::Unreachable => None,
         }
     }
 

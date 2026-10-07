@@ -1,6 +1,7 @@
 //! 會話管理測試：訪問策略解析、WebVPN 改寫與登入態失效偵測。
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::config::{AccessPolicy, Config};
 use crate::error::{AppError, AppResult};
@@ -8,7 +9,7 @@ use crate::http::fake::FakeClient;
 use crate::http::{HttpClient, HttpRequest, HttpResponse};
 
 use super::super::site::{PostLogin, SiteAdapter, SiteKind, SiteLogin, SitePolicy};
-use super::{AccessMode, CAMPUS_PROBE_URL, LoginStage, SessionManager};
+use super::{AccessMode, CAMPUS_PROBE_URL, LoginStage, PROBE_TTL, SessionManager, probe_is_fresh};
 
 /// 考勤站點策略：校外需經 WebVPN。
 struct TestAttendanceSite;
@@ -541,7 +542,7 @@ fn probe_treats_under_500_status_as_reachable() {
     assert_eq!(
         manager.probe_rejection(),
         Some(403),
-        "被拒絕的狀態碼要留下來，供直連失敗時判斷是否同源"
+        "被拒绝的状态码要留下来，供直连失败时判断是否同源"
     );
 }
 
@@ -590,6 +591,42 @@ fn probe_treats_server_error_as_unreachable() {
         AccessMode::WebVpn
     );
     assert_eq!(manager.probe_rejection(), None);
+}
+
+/// 探測結果過了 TTL 就不再代表「目前的路由狀態」：`probe_rejection` 與
+/// `probe_campus_network` 共用同一個新鮮度判斷，過期後不得再授權回退。
+#[test]
+fn probe_freshness_follows_the_ttl() {
+    let at = Instant::now();
+    assert!(
+        probe_is_fresh(at, at + PROBE_TTL - Duration::from_secs(1)),
+        "有效期内仍算新鲜"
+    );
+    assert!(!probe_is_fresh(at, at + PROBE_TTL), "到 TTL 即失效");
+    assert!(!probe_is_fresh(at, at + PROBE_TTL + Duration::from_secs(1)));
+}
+
+/// 過期的探測結果不得再授權 WebVPN 回退（時鐘由參數注入）。
+#[test]
+fn expired_probe_rejection_is_ignored() {
+    let (mut manager, _, _) = manager_with(AccessPolicy::Auto, |request| {
+        if request.url == CAMPUS_PROBE_URL {
+            return Ok(HttpResponse::new(403, request.url.clone(), b"".as_slice()));
+        }
+        ok_response()
+    });
+    assert_eq!(
+        manager.resolve_access_mode(SiteKind::Attendance).unwrap(),
+        AccessMode::Direct
+    );
+    assert_eq!(manager.probe_rejection(), Some(403));
+
+    let later = Instant::now() + PROBE_TTL + Duration::from_secs(1);
+    assert_eq!(
+        manager.probe_rejection_at(later),
+        None,
+        "过期的探测结果不得再触发回退"
+    );
 }
 
 /// 回退後探測結果被改寫為「不可直連」，先前的拒絕訊號一併清除。

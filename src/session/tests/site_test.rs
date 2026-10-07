@@ -6,6 +6,23 @@
 
 use super::*;
 
+/// 登入收尾結果的 `Debug` 只輸出標頭名稱，不輸出業務憑證。
+#[test]
+fn site_login_debug_hides_header_values() {
+    let login = SiteLogin {
+        headers: vec![("X-Business-Token".to_owned(), "secret-token".to_owned())],
+        user_id: Some("7788".to_owned()),
+    };
+    let text = format!("{login:?}");
+    assert!(
+        text.contains("X-Business-Token"),
+        "标头名称仍应可见：{text}"
+    );
+    assert!(!text.contains("secret-token"), "不得输出凭据：{text}");
+    assert!(!text.contains("7788"), "识别码只应显示有无：{text}");
+    assert!(text.contains("user_id: true"), "{text}");
+}
+
 /// 改址規則單一入口：只有 WebVPN 模式且校內網址才改寫。
 #[test]
 fn rewrite_for_mode_only_touches_school_urls_in_webvpn_mode() {

@@ -155,6 +155,12 @@ struct Parser<'a> {
 /// 走既有的「待核实」語意），不嘗試救援異常輸入。
 const MAX_DEPTH: usize = 64;
 
+/// 孤立代理（Unicode 代理對缺一半）的替代字元。
+///
+/// 見 [`Parser::parse_unicode_escape`]：這種字元無法還原成任何合法字元，
+/// 但也不能因此讓整段解析失敗。
+const REPLACEMENT: char = '\u{fffd}';
+
 impl<'a> Parser<'a> {
     /// 建立解析器。
     fn new(text: &'a str, pos: usize) -> Self {
@@ -331,12 +337,88 @@ impl<'a> Parser<'a> {
         None
     }
 
-    /// 解析 `\uXXXX` 的跳脫（呼叫時已消費 `u`）。
+    /// 解析 `\uXXXX`（或 ES6 的 `\u{XXXXXX}`）跳脫（呼叫時已消費 `u`）。
+    ///
+    /// JS 與 JSON 都以 UTF-16 表示字串，非 BMP 字元（emoji、罕用漢字…）是一對
+    /// 代理：`\uD83D\uDE00`。單獨看 `\uD83D` 時 `char::from_u32` 回 `None`，若
+    /// 就此讓整段解析失敗，頁面裡任何一個這類字元（例如使用者暱稱）都會連帶讓
+    /// `globalData` 讀不出來——`user_id` 取不到，個人作業全部退回「待核实」。
+    /// 因此這裡必須自己組合代理對。
+    ///
+    /// 孤立代理（另一半缺失）對應不到合法字元，以 U+FFFD 取代：它是「原字元
+    /// 不明」的標準表示，只損失一個字元，不該讓整個頁面解析失敗。語法本身錯誤
+    /// （`\uZZZZ`、未閉合的 `\u{…`）仍回 `None`——那代表解析器與頁面格式不符，
+    /// 應該看得見。
     fn parse_unicode_escape(&mut self) -> Option<char> {
-        let end = self.pos + 4;
-        let hex = self.text.get(self.pos..end)?;
-        self.pos = end;
-        u32::from_str_radix(hex, 16).ok().and_then(char::from_u32)
+        if self.peek() == Some(b'{') {
+            return self.parse_code_point_escape();
+        }
+        let first = self.parse_hex4()?;
+        if (0xD800..=0xDBFF).contains(&first) {
+            // 高位代理：配對緊接其後的低位代理 `\uDC00`–`\uDFFF`。
+            return match self.parse_low_surrogate() {
+                Some(low) => char::from_u32(0x1_0000 + ((first - 0xD800) << 10) + (low - 0xDC00)),
+                None => Some(REPLACEMENT),
+            };
+        }
+        if (0xDC00..=0xDFFF).contains(&first) {
+            // 低位代理在前：沒有可配對的高位。
+            return Some(REPLACEMENT);
+        }
+        char::from_u32(first)
+    }
+
+    /// 解析 ES6 的碼位跳脫 `{XXXXXX}`（呼叫時位於 `{`）。
+    ///
+    /// 代理區（`\u{D800}`）在 JavaScript 裡是合法的跳脫序列，但 Rust 的 `char`
+    /// 不接受：與 4 位形式一致地降級為 U+FFFD，而不是讓整段 `globalData` 解析
+    /// 失敗（那會讓個人作業全部退回「待核实」）。超出 Unicode 上限（`\u{110000}`
+    /// 以上）在 JS 本身就是語法錯誤，因此仍回 `None`。
+    ///
+    /// 大括號形式的代理對**不組合成一個字元**（每個跳脫各自降級）：真實頁面的
+    /// emoji 走的是 4 位形式（已組合），大括號形式只用於少數 ES6 寫法，為它多做
+    /// 一次向前探查並不值得。
+    fn parse_code_point_escape(&mut self) -> Option<char> {
+        self.pos += 1;
+        let start = self.pos;
+        while self.peek().is_some_and(|byte| byte.is_ascii_hexdigit()) {
+            self.pos += 1;
+        }
+        let hex = &self.text[start..self.pos];
+        if hex.is_empty() || hex.len() > 6 || self.peek() != Some(b'}') {
+            return None;
+        }
+        self.pos += 1;
+        let code = u32::from_str_radix(hex, 16).ok()?;
+        if (0xD800..=0xDFFF).contains(&code) {
+            return Some(REPLACEMENT);
+        }
+        char::from_u32(code)
+    }
+
+    /// 讀取 4 位十六進位（呼叫時位於第一位）；不是 4 位十六進位時回 `None`
+    /// 且不消費任何內容。
+    fn parse_hex4(&mut self) -> Option<u32> {
+        let hex = self.text.get(self.pos..self.pos + 4)?;
+        if !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return None;
+        }
+        self.pos += 4;
+        u32::from_str_radix(hex, 16).ok()
+    }
+
+    /// 讀取緊接其後的 `\uXXXX` 低位代理；不是時回 `None` 且不消費任何內容。
+    fn parse_low_surrogate(&mut self) -> Option<u32> {
+        let hex = self.text[self.pos..].strip_prefix("\\u")?.get(..4)?;
+        if !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return None;
+        }
+        let value = u32::from_str_radix(hex, 16).ok()?;
+        if !(0xDC00..=0xDFFF).contains(&value) {
+            return None;
+        }
+        self.pos += 6;
+        Some(value)
     }
 
     /// 解析數字（整數優先，超出範圍退為浮點）。

@@ -72,7 +72,8 @@ impl Vault {
         })
     }
 
-    /// 使用指定路徑（便於測試與未來的多設定檔支援）。
+    /// 使用指定路徑（僅供測試：生產一律用 [`Self::at_default_path`]）。
+    #[cfg(test)]
     pub fn at(path: impl Into<PathBuf>) -> Self {
         Self { path: path.into() }
     }
@@ -114,6 +115,10 @@ impl Vault {
     }
 
     /// 更換口令：先以舊口令解密（同時驗證舊口令），再以新口令重新加密寫入。
+    ///
+    /// 僅供測試：生產的換口令流程要與 `tasks.vault` 的重新加密保持順序一致，
+    /// 由 `task::worker::credentials::change_passphrase` 以信封直接重封。
+    #[cfg(test)]
     pub fn change_passphrase(&self, old: &str, new: &str) -> AppResult<Credentials> {
         let credentials = self.load(old)?;
         self.store(new, &credentials)?;

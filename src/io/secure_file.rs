@@ -13,13 +13,37 @@ pub fn read_private(path: &Path) -> AppResult<Vec<u8>> {
     Ok(fs::read(path)?)
 }
 
+/// 建立私有目錄（權限 0700）；目錄已存在時不變更其權限。
+///
+/// 目錄權限與檔案權限分開處理：檔案寫入會收緊為 0600（見
+/// [`ensure_private`]），目錄則只在「由本程式建立」時設定 0700——已存在的
+/// 目錄可能是使用者自己的安排，不由程式擅自修改。
+///
+/// 只設定**最終**目錄：上層目錄（例如 `~/.local/share`）不屬於本程式，不該
+/// 被一併收緊。
+pub fn create_private_dir(dir: &Path) -> AppResult<()> {
+    if dir.is_dir() {
+        return Ok(());
+    }
+    fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
 /// 原子地覆寫檔案，並將權限限制為僅擁有者可讀寫。
 ///
 /// 內容先寫入同目錄的暫存檔，`fsync` 後再 rename 覆蓋目標，
 /// 因此寫入過程中失敗時，原有檔案內容不會被破壞。
+///
+/// 目標目錄不存在時一併建立為 0700（見 [`create_private_dir`]）：任何呼叫端
+/// 都不會因為忘了先建目錄而留下權限過寬的目錄。
 pub fn write_private_atomic(path: &Path, bytes: &[u8]) -> AppResult<()> {
     let dir = parent_dir(path)?;
-    fs::create_dir_all(dir)?;
+    create_private_dir(dir)?;
 
     let mut tmp = NamedTempFile::new_in(dir)?;
     restrict_permissions(tmp.path())?;
@@ -77,3 +101,7 @@ fn parent_dir(path: &Path) -> AppResult<&Path> {
     path.parent()
         .ok_or_else(|| AppError::config(format!("路径缺少父目录：{}", path.display())))
 }
+
+#[cfg(test)]
+#[path = "tests/secure_file_test.rs"]
+mod secure_file_test;

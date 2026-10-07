@@ -1,6 +1,6 @@
 //! 以 `reqwest` 實作的 HTTP 客戶端。
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use reqwest::blocking::Client;
 use reqwest::redirect::Policy;
@@ -26,6 +26,13 @@ pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// 最多跟隨的重定向次數。
 const MAX_REDIRECTS: usize = 10;
 
+/// 單一請求逾時預算的上限。
+///
+/// 防禦用：`Instant + Duration` 溢位會直接 panic，而預算來自呼叫端可指定的
+/// `HttpRequest::timeout`。實際呼叫端只傳 15 秒（預設）與 5 秒（探測），這個
+/// 上限只是保證「不會有人傳進一個能讓行程崩潰的值」。
+const MAX_REQUEST_BUDGET: Duration = Duration::from_secs(600);
+
 /// 錯誤鏈摘要的最大長度（字元數）。
 const MAX_DETAIL_CHARS: usize = 320;
 
@@ -47,38 +54,47 @@ const CROSS_ORIGIN_SAFE_HEADERS: [&str; 3] = ["user-agent", "accept", "accept-la
 #[derive(Debug, Clone)]
 pub struct ReqwestClient {
     client: Client,
-    user_agent: String,
     /// 重定向目的主機的信任判斷（測試可放寬為本機假伺服器）。
     trusted_host: fn(&str) -> bool,
+    /// 未指定逾時時使用的預設值。
+    ///
+    /// 與套用在客戶端上的逾時是同一個值（見 [`build_client`]）：重定向鏈的
+    /// 預算必須以它為基準，否則「每跳各算一次預設逾時」的最壞情形又會回來。
+    default_timeout: Duration,
 }
 
 impl ReqwestClient {
     /// 建立客戶端。
     pub fn new(user_agent: impl Into<String>) -> AppResult<Self> {
-        Self::with_trusted_host(user_agent, is_trusted_redirect_host)
+        Self::with_trusted_host(user_agent, is_trusted_redirect_host, DEFAULT_TIMEOUT)
     }
 
     /// 建立客戶端並指定重定向目的主機的信任判斷（測試用：本機 TCP 假伺服器）。
     #[cfg(test)]
     pub fn new_insecure_for_tests(user_agent: impl Into<String>) -> AppResult<Self> {
-        Self::with_trusted_host(user_agent, |_| true)
+        Self::with_trusted_host(user_agent, |_| true, DEFAULT_TIMEOUT)
+    }
+
+    /// 建立客戶端並指定預設逾時（測試用：讓「未指定逾時」的情形也能在毫秒級驗證）。
+    #[cfg(test)]
+    pub fn new_insecure_with_timeout_for_tests(
+        user_agent: impl Into<String>,
+        default_timeout: Duration,
+    ) -> AppResult<Self> {
+        Self::with_trusted_host(user_agent, |_| true, default_timeout)
     }
 
     fn with_trusted_host(
         user_agent: impl Into<String>,
         trusted_host: fn(&str) -> bool,
+        default_timeout: Duration,
     ) -> AppResult<Self> {
         let user_agent = user_agent.into();
         Ok(Self {
-            client: build_client(&user_agent)?,
-            user_agent,
+            client: build_client(&user_agent, default_timeout)?,
             trusted_host,
+            default_timeout,
         })
-    }
-
-    /// 客戶端使用的 User-Agent。
-    pub fn user_agent(&self) -> &str {
-        &self.user_agent
     }
 
     /// 送出請求，並依需求逐跳跟隨重定向。
@@ -97,7 +113,6 @@ impl ReqwestClient {
         builder = match &request.body {
             Some(Body::Form(fields)) => builder.form(fields),
             Some(Body::Json(value)) => builder.json(value),
-            Some(Body::Bytes(bytes)) => builder.body(bytes.clone()),
             None => builder,
         };
 
@@ -138,14 +153,32 @@ impl ReqwestClient {
         let mut headers = request.headers.clone();
         let mut url = request.url.clone();
         let mut hops = 0_usize;
+        // 逾時是**整條請求**的預算，不是每一跳各算一次：逐跳各自吃滿逾時的話，
+        // 一條十跳的慢速重導鏈最壞會拖上「逾時 × 10」，而工作執行緒在這段期間
+        // 無法處理任何控制任務（取消登入、結束、設定），使用者看到的就是卡死。
+        //
+        // 基準必須是「請求逾時或**客戶端預設逾時**」：只有探測請求會顯式指定逾時
+        //（而且它不跟隨重定向），其餘請求一律為 `None`——只認 `request.timeout`
+        // 的話，這道預算在生產路徑根本不會成立。
+        let budget = request
+            .timeout
+            .unwrap_or(self.default_timeout)
+            .min(MAX_REQUEST_BUDGET);
+        let deadline = Instant::now() + budget;
 
         loop {
+            if Instant::now() >= deadline {
+                return Err(AppError::network_kind(
+                    NetworkKind::Timeout,
+                    "请求超时（重定向链未在时限内完成）",
+                ));
+            }
             let response = self.send_once(&HttpRequest {
                 method,
                 url: url.clone(),
                 headers: headers.clone(),
                 body: body.clone(),
-                timeout: request.timeout,
+                timeout: Some(remaining_timeout(deadline)),
                 follow_redirects: false,
             })?;
 
@@ -190,6 +223,14 @@ impl HttpClient for ReqwestClient {
 /// 重定向目的主機是否可接受。
 fn is_trusted_redirect_host(host: &str) -> bool {
     webvpn::is_school_host(host) || host.eq_ignore_ascii_case(webvpn::WEBVPN_HOST)
+}
+
+/// 下一跳還剩多少逾時預算。
+///
+/// 呼叫端已先確認「還沒到截止時間」，因此回傳值必定大於零；`saturating_*`
+/// 只是防禦（時鐘不會倒退，但沒必要讓這裡成為 panic 的來源）。
+fn remaining_timeout(deadline: Instant) -> Duration {
+    deadline.saturating_duration_since(Instant::now())
 }
 
 /// 跨來源重定向時可保留的標頭。
@@ -345,13 +386,13 @@ fn redirect_error(detail: &str) -> AppError {
     AppError::network_kind(NetworkKind::Redirect, detail.to_owned())
 }
 
-fn build_client(user_agent: &str) -> AppResult<Client> {
+fn build_client(user_agent: &str, timeout: Duration) -> AppResult<Client> {
     Client::builder()
         .user_agent(user_agent)
         .cookie_store(true)
         // 重定向一律由本層逐跳處理（見 `ReqwestClient::send_following`）。
         .redirect(Policy::none())
-        .timeout(DEFAULT_TIMEOUT)
+        .timeout(timeout)
         // 連線階段（DNS、TCP、TLS）另有較短的逾時：目標不可達時能更快回報，
         // 不必等滿總逾時（請求可在 [`HttpRequest::timeout`] 個別覆寫總逾時，
         // 但連線逾時一律以此為上限）。

@@ -17,6 +17,7 @@ use crate::session::{AccessMode, SiteKind};
 use crate::sites::lms::{LmsActivity, LmsCourse};
 use crate::task::{FailedTarget, HomeworkIssue};
 use crate::text::{MAX_INLINE_CHARS, sanitize_inline};
+use crate::tone::Tone;
 use crate::tui::text::{InputLine, TextArea};
 
 /// 訊息保留時間。
@@ -1200,8 +1201,11 @@ pub struct App {
     pub site_modes: HashMap<SiteKind, AccessMode>,
     /// 等待主迴圈以系統瀏覽器開啟的網址。
     pub pending_open: Option<String>,
-    /// 暫時訊息（自動過期）。
-    pub message: Option<(String, Instant)>,
+    /// 目前的暫時訊息（文字、建立時間、語意色；自動過期）。
+    ///
+    /// 語意色由 [`Self::set_message`]／[`Self::set_error_message`] 決定，底欄
+    /// 據此上色：一般提示不該長得像錯誤（見 `views::main_view::draw_footer`）。
+    pub message: Option<(String, Instant, Tone)>,
     /// 是否結束程式。
     pub quit: bool,
     /// 動畫影格計數（每幀遞增；供載入指示燈動畫使用）。
@@ -1414,6 +1418,9 @@ impl App {
             self.schedule_total = None;
             self.schedule_pending_week = None;
             self.homework = Page::Idle;
+            // 學期選擇器的選項來自舊帳號的作業清單：一併清空（否則換帳號後
+            // 立刻按 `s` 會看到上一個帳號的學期）。
+            self.term_options.clear();
             self.attendance = Page::Idle;
             self.flow_pending_page = None;
             // 自訂義任務屬於本機資料，與帳號無關：內容保留，只清掉任務頁的
@@ -1712,10 +1719,45 @@ impl App {
     ///
     /// 訊息可能內插伺服器回傳的文字（例如「…：{err}」）：一律經
     /// [`sanitize_inline`] 清理並限制長度，避免控制字元或超長文字進入畫面。
+    ///
+    /// 語意色預設為「一般提示」；**失敗與異常狀態**請用
+    /// [`Self::set_error_message`]，否則底欄會用一般提示色顯示錯誤訊息。
     pub fn set_message(&mut self, message: impl Into<String>) {
+        self.store_message(message, Tone::Info);
+    }
+
+    /// 顯示錯誤訊息（底欄以紅色粗體呈現）。
+    ///
+    /// 只用於「失敗／異常狀態」：登入失敗、載入失敗、憑證或任務保存失敗、
+    /// 會話停用、背景執行緒結束等。操作結果與一般提示走 [`Self::set_message`]。
+    pub fn set_error_message(&mut self, message: impl Into<String>) {
+        self.store_message(message, Tone::Danger);
+    }
+
+    /// 顯示警告訊息（底欄以警告色呈現）。
+    ///
+    /// 用於「需要注意但不影響繼續使用」的情形：功能降級、資料被跳過、某個
+    /// 子功能不可用。使用者要求的操作真的失敗時走 [`Self::set_error_message`]。
+    pub fn set_warning_message(&mut self, message: impl Into<String>) {
+        self.store_message(message, Tone::Warning);
+    }
+
+    /// 清理後存入訊息（唯一的寫入點）。
+    fn store_message(&mut self, message: impl Into<String>, tone: Tone) {
         let message: String = message.into();
         let message = sanitize_inline(&message, MAX_INLINE_CHARS);
-        self.message = Some((message, Instant::now()));
+        self.message = Some((message, Instant::now(), tone));
+    }
+
+    /// 回報瀏覽器開啟結果。
+    ///
+    /// 成功只是一則提示（使用者還要在瀏覽器裡自行登入），失敗則是真的失敗——
+    /// 兩者必須用不同的語意色，否則「打开网页失败」會長得像一般提示。
+    pub fn report_open_result(&mut self, error: Option<String>) {
+        match error {
+            None => self.set_message("已在浏览器打开：如需登录请在浏览器完成登录"),
+            Some(error) => self.set_error_message(format!("打开网页失败：{error}")),
+        }
     }
 
     /// 清除暫時訊息。
@@ -1733,7 +1775,7 @@ impl App {
 
     /// 清除過期的訊息。
     pub fn expire_message(&mut self) {
-        if let Some((_, at)) = &self.message
+        if let Some((_, at, _)) = &self.message
             && at.elapsed() >= MESSAGE_TTL
         {
             self.message = None;
@@ -1742,7 +1784,14 @@ impl App {
 
     /// 目前要顯示的訊息。
     pub fn message_text(&self) -> Option<&str> {
-        self.message.as_ref().map(|(message, _)| message.as_str())
+        self.message
+            .as_ref()
+            .map(|(message, _, _)| message.as_str())
+    }
+
+    /// 目前訊息的語意色（沒有訊息時為 `None`）。
+    pub fn message_tone(&self) -> Option<Tone> {
+        self.message.as_ref().map(|(_, _, tone)| *tone)
     }
 
     /// 切換到下一個頁面。

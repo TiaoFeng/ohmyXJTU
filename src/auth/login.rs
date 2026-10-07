@@ -22,6 +22,7 @@ use crate::credentials::Credentials;
 use crate::error::{AppError, AppResult};
 use crate::http::{HttpClient, HttpRequest, HttpResponse};
 use crate::json::split_envelope;
+use crate::text::{MAX_INLINE_CHARS, sanitize_inline};
 use crate::webvpn;
 
 use super::captcha;
@@ -29,8 +30,16 @@ use super::html;
 use super::rsa;
 use super::state::{AccountType, LoginReply, MfaFlow};
 
-/// 統一認證入口主機。
-pub const LOGIN_HOST: &str = "https://login.xjtu.edu.cn";
+/// 統一認證入口主機（**URL 前綴**，與 `session::site` 的同名常數不同：那裡是
+/// 裸主機名，用於比對 `final_url` 的主機）。
+pub const LOGIN_BASE_URL: &str = "https://login.xjtu.edu.cn";
+
+/// 統一認證的登入路徑。
+///
+/// 登入頁判定有兩處：這裡（`LoginDriver::new` 據此判斷「尚未登入」）與
+/// `session::site::is_login_path`（判斷登入態是否失效）。兩者必須一致，
+/// 因此共用同一個常數。
+pub const CAS_LOGIN_PATH: &str = "/cas/login";
 
 /// MFA 偵測端點。
 const MFA_DETECT_URL: &str = "https://login.xjtu.edu.cn/cas/mfa/detect";
@@ -47,13 +56,30 @@ const CAPTCHA_THRESHOLD: u32 = 3;
 const MFA_SUCCESS_CODE: i64 = 2;
 
 /// 簡訊驗證上下文。
-#[derive(Debug, Clone)]
+///
+/// 手寫 [`std::fmt::Debug`]：`phone` 是使用者的手機號、`state`／`gid` 是伺服器
+/// 的工作階段識別碼，任何 `{:?}` 都不得把它們印出來（與 `credentials::secret`
+/// 同一條規則）。
+#[derive(Clone)]
 struct MfaContext {
     flow: MfaFlow,
     state: String,
     required: bool,
     gid: Option<String>,
     phone: Option<String>,
+}
+
+impl std::fmt::Debug for MfaContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("MfaContext")
+            .field("flow", &self.flow)
+            .field("required", &self.required)
+            .field("state", &!self.state.is_empty())
+            .field("gid", &self.gid.is_some())
+            .field("phone", &self.phone.is_some())
+            .finish()
+    }
 }
 
 /// Safety Verify 二次認證的待處理狀態。
@@ -112,7 +138,7 @@ impl LoginDriver {
         let initial_safety_verify = html::is_safety_verify_page(&text);
         let already_authenticated = if !initial_safety_verify
             && execution.is_none()
-            && !response.final_url.contains("/cas/login")
+            && !response.final_url.contains(CAS_LOGIN_PATH)
         {
             Some(response.clone())
         } else {
@@ -159,6 +185,9 @@ impl LoginDriver {
     }
 
     /// 登入網址是否已具備登入態（不需要提交帳密）。
+    ///
+    /// 僅供測試斷言（生產碼用的是 [`Self::used_existing_session`]）。
+    #[cfg(test)]
     pub fn is_already_authenticated(&self) -> bool {
         self.already_authenticated.is_some()
     }
@@ -241,7 +270,7 @@ impl LoginDriver {
         let flow = context.flow;
         let state = context.state.clone();
         let mut url = Url::parse(&format!(
-            "{LOGIN_HOST}/cas/{}/initByType/securephone",
+            "{LOGIN_BASE_URL}/cas/{}/initByType/securephone",
             flow.path_segment()
         ))
         .map_err(|err| AppError::protocol(format!("无法构造手机号查询地址：{err}")))?;
@@ -435,24 +464,24 @@ impl LoginDriver {
 
     fn process_login_response(&mut self, response: HttpResponse) -> AppResult<LoginReply> {
         let text = response.text();
-        let alert = html::alert_message(&text);
+        // 登入頁的提示文字由伺服器提供（`el-alert`）：與其他伺服器文字走同一套
+        // 清理，避免控制字元或超長內容一路帶到介面（覆蓋層提示與底欄訊息）。
+        let alert = html::alert_message(&text)
+            .map(|alert| sanitize_inline(&alert.text(), MAX_INLINE_CHARS));
 
         if response.status == 401 {
             self.fail_count += 1;
             self.captcha_code.clear();
-            let message = alert.map_or_else(
-                || "登录失败，用户名或密码错误。".to_owned(),
-                |alert| alert.text(),
-            );
+            let message = alert.unwrap_or_else(|| "登录失败，用户名或密码错误。".to_owned());
             return Ok(LoginReply::Fail { message });
         }
         response.error_for_status()?;
 
-        if let Some(alert) = alert {
+        if let Some(message) = alert {
             self.fail_count += 1;
             self.captcha_code.clear();
             return Ok(LoginReply::Fail {
-                message: format!("登录失败：{}", alert.text()),
+                message: format!("登录失败：{message}"),
             });
         }
 

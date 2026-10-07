@@ -136,10 +136,10 @@ fn computes_week_numbers_and_windows() {
     );
 
     // 第 1 週（學期開始日為週一）與第 3 週的範圍。
-    let (monday, sunday) = week_bounds(start, 1).expect("第 1 週");
+    let (monday, sunday) = week_bounds(start, 1).expect("第 1 周");
     assert_eq!(monday, NaiveDate::from_ymd_opt(2026, 9, 7).unwrap());
     assert_eq!(sunday, NaiveDate::from_ymd_opt(2026, 9, 13).unwrap());
-    let (monday, sunday) = week_bounds(start, 3).expect("第 3 週");
+    let (monday, sunday) = week_bounds(start, 3).expect("第 3 周");
     assert_eq!(monday, NaiveDate::from_ymd_opt(2026, 9, 21).unwrap());
     assert_eq!(sunday, NaiveDate::from_ymd_opt(2026, 9, 27).unwrap());
 }
@@ -150,11 +150,11 @@ fn computes_week_numbers_and_windows() {
 fn anchors_week_bounds_to_semester_start() {
     // 2026-09-09 是週三。
     let start = NaiveDate::from_ymd_opt(2026, 9, 9).unwrap();
-    let (monday, sunday) = week_bounds(start, 1).expect("第 1 週");
+    let (monday, sunday) = week_bounds(start, 1).expect("第 1 周");
     assert_eq!(monday, start);
     assert_eq!(sunday, NaiveDate::from_ymd_opt(2026, 9, 15).unwrap());
     // 早於第 1 週的輸入視為第 1 週。
-    assert_eq!(week_bounds(start, 0).expect("第 1 週"), (monday, sunday));
+    assert_eq!(week_bounds(start, 0).expect("第 1 周"), (monday, sunday));
 }
 
 #[test]

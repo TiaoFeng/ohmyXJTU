@@ -171,3 +171,118 @@ fn optional_u64_lenient_accepts_numbers_and_numeric_strings() {
     assert_eq!(size(r#"{"size":{"n":1}}"#), None);
     assert_eq!(size(r#"{"size":null}"#), None);
 }
+
+/// 識別碼欄位的寬容解析：字串與數字都可，型別異常時視為空字串。
+#[test]
+fn string_lenient_accepts_strings_and_numbers() {
+    fn id(json: &str) -> String {
+        #[derive(serde::Deserialize)]
+        struct Target {
+            #[serde(default, deserialize_with = "string_lenient")]
+            id: String,
+        }
+        serde_json::from_str::<Target>(json)
+            .unwrap_or_else(|err| panic!("{json}: {err}"))
+            .id
+    }
+
+    assert_eq!(id(r#"{"id":"9001"}"#), "9001");
+    assert_eq!(id(r#"{"id":9001}"#), "9001", "数字识别码应转成字符串");
+    // 缺欄位、null 與其他型別一律視為空字串，不讓整筆記錄失敗。
+    assert_eq!(id("{}"), "");
+    assert_eq!(id(r#"{"id":null}"#), "");
+    assert_eq!(id(r#"{"id":{"a":1}}"#), "");
+    assert_eq!(id(r#"{"id":[1]}"#), "");
+}
+
+/// 不使用語意的數值欄位：讀不出來時回 0，不報錯。
+#[test]
+fn u32_lenient_falls_back_to_zero() {
+    fn week(json: &str) -> u32 {
+        #[derive(serde::Deserialize)]
+        struct Target {
+            #[serde(default, deserialize_with = "u32_lenient")]
+            week: u32,
+        }
+        serde_json::from_str::<Target>(json)
+            .unwrap_or_else(|err| panic!("{json}: {err}"))
+            .week
+    }
+
+    assert_eq!(week(r#"{"week":5}"#), 5);
+    assert_eq!(week(r#"{"week":"5"}"#), 5);
+    assert_eq!(week("{}"), 0);
+    assert_eq!(week(r#"{"week":null}"#), 0);
+    assert_eq!(week(r#"{"week":{"n":5}}"#), 0);
+    assert_eq!(week(r#"{"week":-3}"#), 0);
+}
+
+/// 日期欄位的形狀與正規化。
+///
+/// 形狀必須是 4-2-2 位數字：chrono 的 `%Y` 只要求「一位以上數字」，
+/// `09/01/26` 會被讀成公元 9 年——這種「看起來有效」的垃圾比讀不出來更危險
+///（它會參與比對、也可能讓學期起點跑到兩千年前）。
+#[test]
+fn date_string_requires_a_four_two_two_shape() {
+    /// 解析單一日期欄位；失敗（含型別不符與形狀不符）回 `None`。
+    fn date(json: &str) -> Option<String> {
+        #[derive(serde::Deserialize)]
+        struct Target {
+            #[serde(deserialize_with = "date_string")]
+            date: String,
+        }
+        serde_json::from_str::<Target>(json)
+            .ok()
+            .map(|target| target.date)
+    }
+
+    // 兩種分隔符都接受，一律輸出 `YYYY-MM-DD`。
+    assert_eq!(
+        date(r#"{"date":"2026-09-07"}"#).as_deref(),
+        Some("2026-09-07")
+    );
+    assert_eq!(
+        date(r#"{"date":"2026/09/07"}"#).as_deref(),
+        Some("2026-09-07")
+    );
+    assert_eq!(
+        date(r#"{"date":" 2026/9/7 "}"#),
+        None,
+        "月份与日期必须补满两位"
+    );
+    assert_eq!(date(r#"{"date":"09/01/26"}"#), None, "不得读成公元 9 年");
+    assert_eq!(
+        date(r#"{"date":"2026-13-45"}"#),
+        None,
+        "不得接受不存在的日期"
+    );
+    assert_eq!(date(r#"{"date":"2026-09"}"#), None);
+    assert_eq!(date(r#"{"date":"2026-09-07-01"}"#), None);
+    assert_eq!(date(r#"{"date":20260907}"#), None, "数字不是日期字符串");
+    assert_eq!(date(r#"{"date":null}"#), None);
+
+    // 無法解讀時回報錯誤（訊息只描述格式，不含欄位值）。
+    #[derive(serde::Deserialize, Debug)]
+    struct Strict {
+        #[serde(deserialize_with = "date_string")]
+        date: String,
+    }
+    let ok = serde_json::from_str::<Strict>(r#"{"date":"2026-09-07"}"#).expect("合法日期应解析");
+    assert_eq!(ok.date, "2026-09-07");
+    let err = serde_json::from_str::<Strict>(r#"{"date":"09/01/26"}"#).expect_err("应拒绝");
+    assert!(!err.to_string().contains("09/01/26"), "不得夹带原值：{err}");
+}
+
+/// 解析為日期的寬容入口：學期日期與考勤記錄共用同一套規則。
+#[test]
+fn parse_date_lenient_normalizes_separators() {
+    use chrono::NaiveDate;
+
+    let expected = NaiveDate::from_ymd_opt(2026, 9, 7).expect("日期");
+    assert_eq!(parse_date_lenient("2026-09-07"), Some(expected));
+    assert_eq!(parse_date_lenient("2026/09/07"), Some(expected));
+    assert_eq!(parse_date_lenient("  2026/09/07  "), Some(expected));
+    assert_eq!(parse_date_lenient("09/01/26"), None);
+    assert_eq!(parse_date_lenient("2026-9-7"), None);
+    assert_eq!(parse_date_lenient(""), None);
+}

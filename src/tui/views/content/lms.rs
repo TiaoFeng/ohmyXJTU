@@ -292,7 +292,17 @@ fn detail_lines(detail: &ActivityDetailView, width: usize) -> Vec<Line<'static>>
     // 提交狀態只適用於作業；其他類型不顯示「待核实」。
     if detail.kind == ActivityKind::Homework {
         match &detail.submissions {
-            Some(submissions) if submissions.is_empty() => {
+            // 一筆有效提交都沒確認到、卻有記錄讀不出來：不能說「視為未提交」
+            // （讀不出來的那筆可能才是有效提交）。
+            Some(list) if list.confirmed_effective_count().is_none() => {
+                push_wrapped(
+                    &mut lines,
+                    format!("提交记录：无法确认（{} 条记录无法解析）", list.skipped),
+                    THEME.status_style(Tone::Warning),
+                    width,
+                );
+            }
+            Some(list) if list.count() == 0 => {
                 push_wrapped(
                     &mut lines,
                     "提交记录：暂无（视为未提交）",
@@ -300,15 +310,12 @@ fn detail_lines(detail: &ActivityDetailView, width: usize) -> Vec<Line<'static>>
                     width,
                 );
             }
-            Some(submissions) => {
+            Some(list) => {
                 // 與作業清單的「有效提交」語義保持一致（單一判據
                 // `is_effective`）：計數只算有效記錄，歷史版本另計。
-                let effective = submissions
-                    .iter()
-                    .filter(|item| item.is_effective())
-                    .count();
-                let history = submissions.len() - effective;
-                let (label, tone) = if effective == 0 {
+                let effective = list.effective_count();
+                let history = list.count() - effective;
+                let (mut label, tone) = if effective == 0 {
                     (
                         format!("提交记录：暂无有效提交（另有 {history} 条历史版本）"),
                         Tone::Accent,
@@ -321,11 +328,16 @@ fn detail_lines(detail: &ActivityDetailView, width: usize) -> Vec<Line<'static>>
                 } else {
                     (format!("提交记录：{effective} 条有效"), Tone::Success)
                 };
+                // 有讀不出來的記錄時補一句：上面的數字可能偏低。
+                if list.skipped > 0 {
+                    label.push_str(&format!("，另有 {} 条无法解析", list.skipped));
+                }
                 push_wrapped(&mut lines, label, THEME.status_style(tone), width);
-                for submission in submissions.iter().take(DETAIL_SUBMISSION_LIMIT) {
+                for submission in list.list.iter().take(DETAIL_SUBMISSION_LIMIT) {
                     let score = submission
                         .score
                         .as_ref()
+                        .and_then(display_value)
                         .map_or(String::new(), |score| format!("　分数：{score}"));
                     push_wrapped(
                         &mut lines,
@@ -358,4 +370,20 @@ fn detail_lines(detail: &ActivityDetailView, width: usize) -> Vec<Line<'static>>
         push_wrapped(&mut lines, note.clone(), THEME.error_style(), width);
     }
     lines
+}
+
+/// JSON 值的顯示文字：字串不加引號，`null` 與空字串視為沒有值。
+///
+/// 伺服器對分數的型別並不統一（`90`、`"90"`、`90.5`、`null`）。直接以
+/// `Display` 輸出 `serde_json::Value` 會讓字串型分數連引號一起顯示（`"90"`），
+/// 看起來像是資料壞掉；這裡只取出使用者看得懂的部分。
+fn display_value(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(text) => {
+            let text = text.trim();
+            (!text.is_empty()).then(|| text.to_owned())
+        }
+        other => Some(other.to_string()),
+    }
 }

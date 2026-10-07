@@ -127,6 +127,10 @@ pub fn to_webvpn_url(url: &str) -> AppResult<String> {
 }
 
 /// 將 WebVPN 網址還原為一般網址。
+///
+/// 僅供測試驗證 [`to_webvpn_url`] 的往返（生產碼用的是 [`proxied_target`]）：
+/// 標記為 `cfg(test)` 以免讓人以為有生產呼叫端。
+#[cfg(test)]
 pub fn from_webvpn_url(url: &str) -> AppResult<String> {
     let parsed =
         Url::parse(url).map_err(|err| AppError::protocol(format!("无法解析 URL：{err}")))?;

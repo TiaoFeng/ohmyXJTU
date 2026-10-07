@@ -489,8 +489,17 @@ pub enum Event {
     AccessPolicyUpdated(AccessPolicy),
     /// 使用者已同意本版用户协议（版本已寫入設定檔）。
     AgreementAccepted,
-    /// 提示訊息（例如有資料因格式問題被跳過）。
+    /// 提示訊息（操作結果、進度、診斷）。
+    ///
+    /// 介面以**提示色**顯示。需要使用者注意但不影響繼續使用的訊息（功能降級、
+    /// 資料被跳過、某個子功能不可用）請用 [`Event::Warning`]；使用者要求的操作
+    /// 真的失敗時用 [`Event::Failed`]（錯誤色並標記受影響頁面）。
     Notice(String),
+    /// 需要注意但不影響繼續使用（降級、跳過資料、子功能不可用）。
+    ///
+    /// 介面以**警告色**顯示：與 [`Event::Notice`] 的提示色、[`Event::Failed`]
+    /// 的錯誤色一起構成「藍＝正常回報、黃＝有事但還能用、紅＝出事了」。
+    Warning(String),
     /// 會話已停用（無法建立乾淨的新會話）：介面應回到解鎖畫面。
     SessionDisabled(String),
     /// 互動驗證（圖片驗證碼或簡訊驗證碼）未通過。
@@ -608,6 +617,14 @@ pub(super) fn is_account_switch_step(job: &Job) -> bool {
             | Job::SendMfaCode
             | Job::VerifyMfaCode(_)
     )
+}
+
+/// 這次失敗之後，登入流程是否已經不可能再繼續。
+///
+/// 除了送簡訊驗證碼：那只是「那一次發送」失敗，驅動器與流程都還在，使用者
+/// 再按一次就能重送，因此不算流程結束。
+pub(super) fn login_step_breaks_the_flow(job: &Job) -> bool {
+    is_account_switch_step(job) && !matches!(job, Job::SendMfaCode)
 }
 
 /// 任務所屬站點。

@@ -81,6 +81,9 @@ impl Worker {
         // 課表快取與選定週次都屬於舊帳號。
         self.schedule_cache = None;
         self.schedule_week = None;
+        // 「當前學期」是上一次查考勤系統的結果，同樣屬於舊帳號（`chosen_term`
+        // 是使用者自己的選擇，保留）。
+        self.known_term = None;
         // 失敗計數以 (帳號, 後端) 為鍵保存：換了帳號自然從 0 起算，
         // 同一帳號重試則保留——否則伺服器要求的驗證碼永遠不會出現。
         self.login_failure_key = None;
@@ -179,6 +182,9 @@ impl Worker {
         // 課表快取與選定週次都屬於舊帳號：一併作廢（介面也會清除頁面資料）。
         self.schedule_cache = None;
         self.schedule_week = None;
+        // 「當前學期」是上一次查考勤系統的結果，同樣屬於舊帳號：作廢後由下一次
+        // 載入重新確認。`chosen_term` 是使用者自己的選擇，保留。
+        self.known_term = None;
         // 舊帳號的站點登入狀態與頁面資料已失效：介面應清除。
         self.emit(Event::SessionsCleared {
             account_changed: true,

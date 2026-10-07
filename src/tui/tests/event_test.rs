@@ -181,6 +181,36 @@ fn schedule_event_tracks_the_week_and_account_change_clears_it() {
     assert!(app.schedule.is_idle());
 }
 
+/// 換帳號必須清掉學期選擇器殘留的選項（它們來自舊帳號的作業清單）。
+#[test]
+fn account_change_clears_the_term_picker_options() {
+    let mut app = app();
+    app.term_options = vec![TermCode::parse("2025-2026-2").expect("学期")];
+
+    apply_event(
+        &mut app,
+        Event::SessionsCleared {
+            account_changed: false,
+        },
+    );
+    assert_eq!(
+        app.term_options.len(),
+        1,
+        "切换访问模式时资料仍有效，选项应保留"
+    );
+
+    apply_event(
+        &mut app,
+        Event::SessionsCleared {
+            account_changed: true,
+        },
+    );
+    assert!(
+        app.term_options.is_empty(),
+        "换账号后不得留下旧账号的学期选项"
+    );
+}
+
 /// 套用一筆課表事件（`label` 用來辨識是哪一週的資料）。
 fn apply_schedule_event(app: &mut App, week: u32, label: &str) {
     apply_event(

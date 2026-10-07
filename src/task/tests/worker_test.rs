@@ -5633,6 +5633,54 @@ fn rollback_uses_the_vault_credentials_not_an_unverified_pending_account() {
     assert_eq!(stored.username, "3120000001", "保险库内容不得被更动");
 }
 
+/// 換帳號後不得沿用舊帳號查到的「當前學期」。
+///
+/// `known_term` 是上一次查考勤系統的結果，屬於舊帳號；不清掉的話，課程分區與
+/// 學期判定會先沿用舊資料（考勤剛好不可用時甚至會一直沿用）。使用者自己選的
+/// `chosen_term` 則必須保留。
+#[test]
+fn account_switch_clears_the_remembered_term() {
+    let mut harness = harness(|request: &HttpRequest| {
+        let url = request.url.as_str();
+        if url == rsa::PUBLIC_KEY_URL {
+            return Ok(HttpResponse::new(
+                200,
+                rsa::PUBLIC_KEY_URL,
+                public_key_pem(),
+            ));
+        }
+        if url == attendance::LOGIN_URL {
+            return Ok(HttpResponse::new(200, ATTENDANCE_POST, login_page()));
+        }
+        if request.form_field("failN").is_some() {
+            // 帳密被拒：本次切換注定失敗，但 session 重建與清理已經發生。
+            return Ok(HttpResponse::new(401, ATTENDANCE_POST, "<html></html>"));
+        }
+        Err(AppError::network_kind(
+            NetworkKind::Connect,
+            "连接失败".to_owned(),
+        ))
+    });
+
+    harness.worker.known_term = TermCode::parse("2025-2026-2");
+    harness.worker.chosen_term = TermCode::parse("2025-2026-1");
+
+    let _ = harness.dispatch(Job::ChangeAccount {
+        passphrase: "secret123".into(),
+        credentials: Credentials::new("3120000001", "wrong-password"),
+    });
+
+    assert!(
+        harness.worker.known_term.is_none(),
+        "换账号后不得沿用旧账号查到的学期"
+    );
+    assert_eq!(
+        harness.worker.chosen_term,
+        TermCode::parse("2025-2026-1"),
+        "使用者自己选的学期应保留"
+    );
+}
+
 /// 設定表單重複輸入**同一帳號**的錯誤密碼時，失敗計數必須累積。
 ///
 /// 修復前每次嘗試都無條件清零，`failN` 恆為 0，伺服器要求的圖片驗證碼

@@ -1418,6 +1418,9 @@ impl App {
             self.schedule_total = None;
             self.schedule_pending_week = None;
             self.homework = Page::Idle;
+            // 學期選擇器的選項來自舊帳號的作業清單：一併清空（否則換帳號後
+            // 立刻按 `s` 會看到上一個帳號的學期）。
+            self.term_options.clear();
             self.attendance = Page::Idle;
             self.flow_pending_page = None;
             // 自訂義任務屬於本機資料，與帳號無關：內容保留，只清掉任務頁的

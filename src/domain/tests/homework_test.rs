@@ -180,3 +180,37 @@ fn normalizes_utc_lms_times_to_school_offset() {
         parse_time(Some("2026-10-12T15:59:59.000Z")).map(|time| time.timestamp())
     );
 }
+
+/// 分鐘精度與未帶時區的小數秒都要能解析。
+///
+/// 解析失敗會讓作業被當成「沒有截止時間」——不標逾期、排到最後，是錯得很安靜
+/// 的結論；格式涵蓋範圍因此與 `todo::parse_deadline_input` 對齊。
+#[test]
+fn parses_minute_precision_and_fractional_seconds() {
+    let expected = parse_time(Some("2026-10-12 15:59:00")).expect("基准时间");
+
+    for value in [
+        "2026-10-12 15:59",
+        "2026-10-12T15:59",
+        "2026-10-12 15:59:00.000",
+        "2026-10-12T15:59:00.000",
+        "2026-10-12T15:59:00.123456789",
+    ] {
+        assert_eq!(
+            parse_time(Some(value)).map(|time| time.timestamp()),
+            Some(expected.timestamp()),
+            "{value}"
+        );
+        assert_eq!(
+            parse_time(Some(value)).map(|time| time.offset().local_minus_utc()),
+            Some(CAMPUS_UTC_OFFSET_SECS),
+            "未带时区者视为校园时区：{value}"
+        );
+    }
+
+    // 分鐘精度的截止時間在逾時後仍必須判為「逾期」（否則會顯示成「待提交」）。
+    assert_eq!(
+        judge(Some(0), Some("2026-01-01 23:59"), now()),
+        HomeworkState::Overdue
+    );
+}

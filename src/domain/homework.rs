@@ -219,10 +219,15 @@ fn sort_key(item: &HomeworkItem) -> (HomeworkGroup, u8, i64, &str, &str, &str) {
 
 /// 解析思源學堂的時間字串。
 ///
-/// 支援帶時區的 RFC3339、`YYYY-MM-DD HH:MM:SS` 與 `YYYY-MM-DDTHH:MM:SS`。
+/// 支援帶時區的 RFC3339、`YYYY-MM-DD HH:MM[:SS]`、`YYYY-MM-DDTHH:MM[:SS]`，
+/// 以及未帶時區但含小數秒的形態（`…:59.000`）。
 /// 回傳的瞬間一律以校園時區（中國標準時間，+08:00）表示：帶時區者（如 API 的
 /// UTC `Z`／`+00:00`）先換算，未帶時區者視為 +08:00。排序與逾期判定使用絕對
 /// 瞬間（`timestamp()`／比較），不受顯示時區影響。
+///
+/// 格式涵蓋範圍刻意與 [`crate::domain::todo::parse_deadline_input`] 對齊：截止
+/// 時間解析失敗會讓作業被當成「沒有截止時間」（不標逾期、排到最後），是不可見
+/// 的錯誤結論，因此寧可多接受幾種寫法。解析失敗仍回 `None`。
 pub fn parse_time(value: Option<&str>) -> Option<DateTime<FixedOffset>> {
     let value = value?.trim();
     if value.is_empty() {
@@ -233,7 +238,14 @@ pub fn parse_time(value: Option<&str>) -> Option<DateTime<FixedOffset>> {
         return Some(time.with_timezone(&offset));
     }
 
-    for format in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"] {
+    for format in [
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M:%S%.f",
+        "%Y-%m-%dT%H:%M:%S%.f",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%dT%H:%M",
+    ] {
         if let Ok(naive) = NaiveDateTime::parse_from_str(value, format) {
             return offset.from_local_datetime(&naive).single();
         }

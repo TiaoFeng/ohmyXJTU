@@ -76,3 +76,19 @@ fn url_without_query_is_shown_as_is() {
     );
     assert_eq!(redacted_url("not a url"), "<url>");
 }
+
+/// userinfo（`https://token@host/`）也是憑證，同樣不得出現在 `Debug` 輸出裡。
+#[test]
+fn url_userinfo_is_redacted() {
+    let userinfo = redacted_url("https://token@lms.xjtu.edu.cn/user/index");
+    assert!(!userinfo.contains("token"), "不得输出 userinfo：{userinfo}");
+    assert!(
+        userinfo.contains("lms.xjtu.edu.cn/user/index"),
+        "{userinfo}"
+    );
+
+    let both = redacted_url("https://user:pass@host/path?q=1");
+    assert!(!both.contains("user"), "不得输出账号：{both}");
+    assert!(!both.contains("pass"), "不得输出密码：{both}");
+    assert!(both.contains("?<redacted>"), "查询串仍应遮蔽：{both}");
+}

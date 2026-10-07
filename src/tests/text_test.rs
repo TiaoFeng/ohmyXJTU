@@ -37,7 +37,7 @@ fn sanitize_truncates_with_ellipsis() {
     let cleaned = sanitize_inline(&long, 10);
     assert_eq!(cleaned, "说明说明说明说明说…");
     assert_eq!(cleaned.chars().count(), 10);
-    assert_eq!(sanitize_inline("abc", 3), "abc", "刚好等於上限不截断");
+    assert_eq!(sanitize_inline("abc", 3), "abc", "刚好等于上限不截断");
     assert_eq!(sanitize_inline("abcd", 3), "ab…");
     assert_eq!(sanitize_inline("abcd", 0), "", "上限 0 回空字串");
 

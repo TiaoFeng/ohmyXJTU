@@ -24,6 +24,11 @@ fn panic_message_without_location_is_single_line() {
 /// 行程再跑一次這個測試（帶上 `CHILD_ENV`），由子行程觸發 panic 後檢查暫存檔
 /// 是否已被刪除。`exit(101)` 同時也是 panic 的預設結束碼，因此另外斷言 stderr
 /// 是 hook 的訊息（而不是 panic payload），確保真的是 hook 跑過。
+///
+/// 只在 Linux 執行：暫存檔路徑由 `dirs::data_dir()` 決定，而這個測試靠
+/// `XDG_DATA_HOME` 把它指向暫存目錄；macOS／Windows 的資料目錄不認這個環境
+/// 變數，子行程會去動使用者真實資料目錄裡的檔案（而且斷言一定失敗）。
+#[cfg(target_os = "linux")]
 #[test]
 fn panic_hook_removes_the_captcha_file() {
     use std::process::Command;

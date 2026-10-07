@@ -56,13 +56,30 @@ const CAPTCHA_THRESHOLD: u32 = 3;
 const MFA_SUCCESS_CODE: i64 = 2;
 
 /// 簡訊驗證上下文。
-#[derive(Debug, Clone)]
+///
+/// 手寫 [`std::fmt::Debug`]：`phone` 是使用者的手機號、`state`／`gid` 是伺服器
+/// 的工作階段識別碼，任何 `{:?}` 都不得把它們印出來（與 `credentials::secret`
+/// 同一條規則）。
+#[derive(Clone)]
 struct MfaContext {
     flow: MfaFlow,
     state: String,
     required: bool,
     gid: Option<String>,
     phone: Option<String>,
+}
+
+impl std::fmt::Debug for MfaContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("MfaContext")
+            .field("flow", &self.flow)
+            .field("required", &self.required)
+            .field("state", &!self.state.is_empty())
+            .field("gid", &self.gid.is_some())
+            .field("phone", &self.phone.is_some())
+            .finish()
+    }
 }
 
 /// Safety Verify 二次認證的待處理狀態。

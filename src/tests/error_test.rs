@@ -21,7 +21,7 @@ fn connection_level_errors_are_retryable() {
         NetworkKind::Timeout,
     ] {
         let err = AppError::network_kind(kind, "x");
-        assert!(err.is_connection_error(), "{kind:?} 属於连线层");
+        assert!(err.is_connection_error(), "{kind:?} 属于连线层");
         assert!(!err.needs_relogin(), "{kind:?} 不是登录态失效");
     }
 }

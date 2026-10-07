@@ -15,6 +15,23 @@ use crate::text::MAX_INLINE_CHARS;
 
 use super::*;
 
+/// 簡訊驗證上下文的 `Debug` 不得印出手機號與工作階段識別碼。
+#[test]
+fn mfa_context_debug_hides_phone_and_state() {
+    let context = MfaContext {
+        flow: MfaFlow::Detect,
+        state: "state-token".to_owned(),
+        required: true,
+        gid: Some("gid-1".to_owned()),
+        phone: Some("13800000000".to_owned()),
+    };
+    let text = format!("{context:?}");
+    assert!(!text.contains("13800000000"), "不得输出手机号：{text}");
+    assert!(!text.contains("state-token"), "不得输出会话识别码：{text}");
+    assert!(!text.contains("gid-1"), "不得输出 gid：{text}");
+    assert!(text.contains("phone: true"), "只应显示有无：{text}");
+}
+
 const LOGIN_URL: &str = "https://lms.xjtu.edu.cn";
 const POST_URL: &str = "https://login.xjtu.edu.cn/cas/login?service=lms";
 const TARGET_URL: &str = "https://lms.xjtu.edu.cn/user/index";

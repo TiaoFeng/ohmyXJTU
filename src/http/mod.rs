@@ -57,20 +57,29 @@ pub(crate) fn field_names(fields: &[(String, String)]) -> Vec<&str> {
     fields.iter().map(|(name, _)| name.as_str()).collect()
 }
 
-/// 去掉查詢字串的網址（供遮罩後的 `Debug` 使用）。
+/// 去掉查詢字串與 userinfo 的網址（供遮罩後的 `Debug` 使用）。
 ///
 /// 查詢字串可能帶著一次性 ticket 或業務憑證（登入回跳位址就是這樣傳遞的），
-/// 因此只保留協定、主機與路徑——與網路錯誤訊息一貫的處理方式相同。
+/// userinfo（`https://token@host/`）同樣是憑證：兩者都只保留協定、主機與路徑，
+/// 與網路錯誤訊息一貫的處理方式相同。
 pub(crate) fn redacted_url(url: &str) -> String {
     let Ok(mut parsed) = url::Url::parse(url) else {
         return "<url>".to_owned();
     };
-    if parsed.query().is_none() && parsed.fragment().is_none() {
+    let has_userinfo = !parsed.username().is_empty() || parsed.password().is_some();
+    let has_query = parsed.query().is_some() || parsed.fragment().is_some();
+    if !has_userinfo && !has_query {
         return url.to_owned();
     }
+    parsed.set_username("").ok();
+    parsed.set_password(None).ok();
     parsed.set_query(None);
     parsed.set_fragment(None);
-    format!("{}?<redacted>", parsed.as_str())
+    if has_query {
+        format!("{}?<redacted>", parsed.as_str())
+    } else {
+        parsed.to_string()
+    }
 }
 
 /// 一次 HTTP 請求。

@@ -510,6 +510,98 @@ fn effective_count_excludes_old_versions() {
     );
 }
 
+/// 提交記錄的欄位讀不出來時只損失該欄位，整筆記錄必須保留。
+///
+/// 丟棄整筆會讓「已完成」被誤判成「未提交／逾期」（`domain::homework::judge`）；
+/// 參考實作對這些欄位也採寬容讀取（`safeInt`／`safeString`）。
+#[test]
+fn incomplete_submission_records_are_still_counted() {
+    let value = json!({
+        "list": [
+            {"submitted_at": "2026-09-20 10:00:00", "is_latest_version": true},
+            {"id": null, "is_latest_version": true},
+            {"id": {"nested": 1}, "is_latest_version": true},
+            {"id": 4, "submitted_at": 1758333600, "comment": {"text": "好"}}
+        ],
+    });
+
+    let submissions: LmsSubmissionList =
+        crate::sites::deserialize_value(value, "查询作业提交记录").expect("应可解析");
+    assert_eq!(submissions.count(), 4, "字段缺漏或类型异常不得丢弃整笔记录");
+    assert_eq!(submissions.skipped, 0);
+    assert_eq!(submissions.confirmed_effective_count(), Some(4));
+    assert_eq!(submissions.list[0].id, None, "缺字段的 id 视为缺漏");
+    assert_eq!(submissions.list[1].id, None, "null 的 id 视为缺漏");
+    assert_eq!(submissions.list[3].id.as_deref(), Some("4"));
+    assert_eq!(
+        submissions.list[0].timestamp(),
+        Some("2026-09-20 10:00:00"),
+        "时间为字符串时照常显示"
+    );
+    assert_eq!(
+        submissions.list[3].timestamp(),
+        None,
+        "时间不是字符串时视为未知，不伪造时间"
+    );
+}
+
+/// 提交記錄整批讀不出來時必須回報「無法確認」，不可當成「零筆提交」。
+#[test]
+fn unreadable_submission_records_are_reported_as_unknown() {
+    use std::sync::Arc;
+
+    use crate::config::{AccessPolicy, Config};
+    use crate::http::HttpClient;
+    use crate::http::fake::FakeClient;
+    use crate::session::{AccessMode, SessionManager, SiteKind};
+
+    let payload = serde_json::to_vec(&json!({"list": [7, null, "x"]})).expect("序列化固定回应");
+    let client = Arc::new(FakeClient::with_responder(move |_request: &HttpRequest| {
+        Ok(HttpResponse::new(
+            200,
+            "https://lms.xjtu.edu.cn/api/activities/9001/groups/42/submission_list",
+            payload.clone(),
+        ))
+    }));
+    let direct: Arc<dyn HttpClient> = client.clone();
+    let webvpn: Arc<dyn HttpClient> = client;
+    let config = Config {
+        access_policy: AccessPolicy::Direct,
+        ..Config::default()
+    };
+    let mut session = SessionManager::with_clients(&config, direct, webvpn);
+    session.register(Box::new(LmsSite));
+    session.mark_logged_in(SiteKind::Lms, AccessMode::Direct, Vec::new());
+    let mut api = LmsApi::new(&mut session);
+
+    let list = api
+        .submissions("9001", true, Some("42"))
+        .expect("查询本身应当成功");
+    assert_eq!(list.count(), 0, "没有任何记录能解析");
+    assert_eq!(list.skipped, 3, "无法解析的记录数必须保留");
+    assert_eq!(
+        list.confirmed_effective_count(),
+        None,
+        "有记录读不出来时不得当成零笔提交"
+    );
+
+    // 摘要必須顯示「待核实」而不是「未提交」。
+    let detail: LmsActivity = crate::sites::deserialize_value(
+        json!({
+            "id": "9001",
+            "type": "homework",
+            "submit_by_group": true,
+            "group_id": "42"
+        }),
+        "查询活动详情",
+    )
+    .expect("活动详情");
+    let summary = api.submission_summary_for(&detail).expect("摘要");
+    assert_eq!(summary.count, None, "无法确认时提交数必须为未知");
+    let note = summary.note.expect("应说明无法确认的原因");
+    assert!(note.contains("3 条提交记录无法解析"), "{note}");
+}
+
 /// 課程識別碼不合法時必須回報協定錯誤，且不得發出任何請求。
 #[test]
 fn course_activities_rejects_unsafe_identifiers_without_requests() {

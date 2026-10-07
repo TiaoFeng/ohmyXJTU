@@ -273,7 +273,7 @@ impl Worker {
             description,
             end_time: detail.activity.end_time,
             submit_by_group: detail.activity.submit_by_group,
-            submissions: detail.submissions.map(|list| list.list),
+            submissions: detail.submissions,
             note: detail.note,
         })
     }

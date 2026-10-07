@@ -150,6 +150,26 @@ where
     }
 }
 
+/// 缺欄位或型別不符時回傳 `None` 的字串或數字欄位（**不報錯**）。
+///
+/// 與 [`optional_string_or_number`] 的差別是型別異常一律視為缺漏，而不是讓整筆
+/// 記錄失敗。用於不參與語意判斷的識別碼欄位（例如提交記錄的 `id`）：讀不出來時
+/// 只損失該欄位，不該讓整筆記錄被 [`parse_lenient`] 丟棄——提交記錄被丟棄會讓
+/// 「已完成」被誤判成「未提交／逾期」（參考實作對 `id` 也採寬容讀取）。
+pub(crate) fn optional_string_or_number_lenient<'de, D>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    match value {
+        Some(serde_json::Value::String(text)) => Ok(Some(text)),
+        Some(serde_json::Value::Number(number)) => Ok(Some(number.to_string())),
+        _ => Ok(None),
+    }
+}
+
 /// 缺欄位或型別不符時回傳 `None` 的可選字串。
 ///
 /// 只接受字串：非字串（數字、物件、陣列…）一律視為「沒有這段內容」。用於純展示

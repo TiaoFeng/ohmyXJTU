@@ -663,7 +663,7 @@ fn activity_detail_converts_submission_times_to_school_time() {
         description: None,
         end_time: Some("2026-09-25T15:59:59.000Z".to_owned()),
         submit_by_group: Some(false),
-        submissions: Some(list.list),
+        submissions: Some(list),
         note: None,
     });
 
@@ -1980,7 +1980,7 @@ fn activity_detail_counts_effective_submissions_consistently() {
         description: None,
         end_time: None,
         submit_by_group: Some(false),
-        submissions: Some(list.list),
+        submissions: Some(list),
         note: None,
     });
 
@@ -2020,7 +2020,7 @@ fn activity_detail_reports_no_effective_submissions() {
         description: None,
         end_time: None,
         submit_by_group: Some(false),
-        submissions: Some(list.list),
+        submissions: Some(list),
         note: None,
     });
 
@@ -2031,6 +2031,64 @@ fn activity_detail_reports_no_effective_submissions() {
     assert!(
         text.contains("提交记录：暂无有效提交（另有 2 条历史版本）"),
         "全为旧版本时不得显示为有效提交：\n{text}"
+    );
+}
+
+/// 有提交記錄讀不出來時不得宣稱「視為未提交」（讀不出來的那筆可能才是有效提交）。
+#[test]
+fn activity_detail_reports_unreadable_submissions() {
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Lms;
+    app.lms.level = LmsLevel::Detail;
+    app.lms.detail = Page::Ready(ActivityDetailView {
+        id: "1".to_owned(),
+        title: "作业A".to_owned(),
+        kind: ActivityKind::Homework,
+        description: None,
+        end_time: None,
+        submit_by_group: Some(false),
+        submissions: Some(LmsSubmissionList {
+            list: Vec::new(),
+            skipped: 2,
+        }),
+        note: None,
+    });
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(
+        text.contains("提交记录：无法确认（2 条记录无法解析）"),
+        "读不出记录时应显示无法确认：\n{text}"
+    );
+    assert!(
+        !text.contains("视为未提交"),
+        "有记录读不出来时不得说视为未提交：\n{text}"
+    );
+
+    // 已確認有有效提交時，額外說明讀不出來的筆數（上面的數字可能偏低）。
+    let list: LmsSubmissionList =
+        serde_json::from_str(r#"{"list":[{"id":1,"is_latest_version":true}]}"#).expect("脱敏样本");
+    app.lms.detail = Page::Ready(ActivityDetailView {
+        id: "1".to_owned(),
+        title: "作业A".to_owned(),
+        kind: ActivityKind::Homework,
+        description: None,
+        end_time: None,
+        submit_by_group: Some(false),
+        submissions: Some(LmsSubmissionList { skipped: 1, ..list }),
+        note: None,
+    });
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(
+        text.contains("提交记录：1 条有效，另有 1 条无法解析"),
+        "已确认时应保留无法解析的说明：\n{text}"
     );
 }
 

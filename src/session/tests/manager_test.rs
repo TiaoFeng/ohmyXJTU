@@ -542,7 +542,7 @@ fn probe_treats_under_500_status_as_reachable() {
     assert_eq!(
         manager.probe_rejection(),
         Some(403),
-        "被拒絕的狀態碼要留下來，供直連失敗時判斷是否同源"
+        "被拒绝的状态码要留下来，供直连失败时判断是否同源"
     );
 }
 

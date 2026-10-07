@@ -2455,7 +2455,7 @@ fn footer_colors_messages_by_tone() {
         (0..WIDTH)
             .map(|x| &buffer[(x, row)])
             .find(|cell| cell.symbol() != " ")
-            .expect("底栏应有訊息")
+            .expect("底栏应有讯息")
             .clone()
     }
 
@@ -3335,7 +3335,7 @@ fn task_page_hides_the_search_box_when_no_search_is_open() {
         crate::tui::views::draw(frame, &mut app)
     });
     let text = screen_text(terminal.backend());
-    assert!(!text.contains("搜索："), "未搜尋時不應出现搜尋框：\n{text}");
+    assert!(!text.contains("搜索："), "未搜寻时不应出现搜寻框：\n{text}");
 }
 
 #[test]

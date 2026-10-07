@@ -908,7 +908,7 @@ fn harness_in_auto_with_probe(probe_status: u16) -> Harness {
     assert_eq!(
         session.resolve_access_mode(SiteKind::Attendance).unwrap(),
         AccessMode::Direct,
-        "探測有回應時先走直連"
+        "探测有回应时先走直连"
     );
     session.mark_logged_in(SiteKind::Attendance, AccessMode::Direct, Vec::new());
     harness
@@ -926,7 +926,7 @@ fn a_rejection_matching_the_probe_falls_back_to_webvpn() {
             .expect("会话已建立")
             .probe_rejection(),
         Some(403),
-        "探測被 403 拒絕時應留下訊號"
+        "探测被 403 拒绝时应留下讯号"
     );
 
     let _ = harness.dispatch(Job::LoadSchedule { force: true });
@@ -937,14 +937,14 @@ fn a_rejection_matching_the_probe_falls_back_to_webvpn() {
             event,
             Event::Notice(message) if message.contains("已改用 WebVPN 重试")
         )),
-        "應提示已改走 WebVPN：{events:?}"
+        "应提示已改走 WebVPN：{events:?}"
     );
     assert!(
         events.iter().all(|event| !matches!(
             event,
             Event::Failed { message, .. } if message.contains("异常状态码")
         )),
-        "回退後不應直接回報狀態碼錯誤：{events:?}"
+        "回退后不应直接回报状态码错误：{events:?}"
     );
 }
 
@@ -981,7 +981,7 @@ fn a_business_rejection_without_a_probe_signal_does_not_fall_back() {
                 ..
             } if message.contains("异常状态码")
         )),
-        "應直接回報業務失敗：{events:?}"
+        "应直接回报业务失败：{events:?}"
     );
 }
 
@@ -1302,13 +1302,13 @@ fn finishing_a_login_resumes_tasks_from_both_sources() {
         )
         .expect("收尾应成功");
 
-    assert!(harness.worker.retry.is_none(), "等待中的任務不应被遗留");
+    assert!(harness.worker.retry.is_none(), "等待中的任务不应被遗留");
     let mut queued: Vec<String> = harness.worker.pending_data.iter().map(Job::label).collect();
     queued.sort();
     assert_eq!(
         queued,
         vec!["作业", "课表"],
-        "兩邊的等待任務都應續跑：{queued:?}"
+        "两边的等待任务都应续跑：{queued:?}"
     );
 }
 
@@ -2600,7 +2600,7 @@ fn homework_fetches_activity_lists_in_batches_without_repeating_requests() {
     assert_eq!(
         titles,
         ["作业A", "作业B", "作业C", "作业D", "作业E"],
-        "结果应依课程顺序彙總"
+        "结果应依课程顺序汇总"
     );
 
     let seen = site.urls();
@@ -4668,7 +4668,7 @@ fn only_the_sms_send_is_not_replayable() {
             kind: lms::ActivityKind::Homework,
         },
     ] {
-        assert!(job.is_replayable(), "{job:?} 可以原樣重送");
+        assert!(job.is_replayable(), "{job:?} 可以原样重送");
     }
 }
 
@@ -6924,7 +6924,7 @@ fn attempt_budget_is_kept_per_task() {
     assert_eq!(
         budget.try_consume(&open),
         Some(2),
-        "首次消耗回報即將進行的嘗試序號"
+        "首次消耗回报即将进行的尝试序号"
     );
     assert_eq!(
         budget.try_consume(&open),
@@ -6950,9 +6950,9 @@ fn connection_retry_budget_counts_up_to_its_own_limit() {
     let mut budget = AttemptBudgets::new(MAX_ATTEMPTS);
     let key = DataKey::Courses;
 
-    assert_eq!(budget.try_consume(&key), Some(2), "首次重試是第 2 次嘗試");
-    assert_eq!(budget.try_consume(&key), Some(3), "再下一次是第 3 次嘗試");
-    assert_eq!(budget.try_consume(&key), None, "達到上限後不得再消耗");
+    assert_eq!(budget.try_consume(&key), Some(2), "首次重试是第 2 次尝试");
+    assert_eq!(budget.try_consume(&key), Some(3), "再下一次是第 3 次尝试");
+    assert_eq!(budget.try_consume(&key), None, "达到上限后不得再消耗");
 }
 
 // ── 自訂義任務（任務服務） ──────────────────────────────

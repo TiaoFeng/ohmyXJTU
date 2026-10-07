@@ -195,7 +195,7 @@ fn unreadable_task_file_is_reported_without_blocking() {
     // 先以別的口令建立任務檔，再以另一個口令「解鎖」：內容無法解開。
     {
         let mut store = TaskStore::at(service.tasks_path());
-        store.init("other-passphrase").expect("建立旧的任務檔");
+        store.init("other-passphrase").expect("建立旧的任务档");
         store.add(task("旧任务")).expect("写入");
     }
     let before = std::fs::read(service.tasks_path()).expect("读取旧档");

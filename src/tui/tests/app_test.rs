@@ -411,7 +411,7 @@ fn task_page_combines_tasks_and_homework_in_one_list() {
     assert_eq!(
         app.task_page_group_counts().get(HomeworkGroup::Completed),
         1,
-        "分组计数应包含自訂義任务"
+        "分组计数应包含自订义任务"
     );
 
     let rows = app.task_page_rows();
@@ -600,7 +600,7 @@ fn sorted_entries_follow_the_selection_and_keep_filtering() {
     assert_eq!(
         app.selected_entry().map(entry_label),
         None,
-        "清單變短後越界的索引不應指向別的項目"
+        "清单变短后越界的索引不应指向别的项目"
     );
 }
 
@@ -612,7 +612,7 @@ fn set_message_cleans_and_bounds_the_text() {
     assert_eq!(app.message_text(), Some("查询失败[31m 请重试"));
 
     app.set_message("x".repeat(500));
-    let text = app.message_text().expect("应有訊息");
+    let text = app.message_text().expect("应有讯息");
     assert_eq!(text.chars().count(), crate::text::MAX_INLINE_CHARS);
     assert!(text.ends_with('…'), "截断应加省略号：{text}");
 }

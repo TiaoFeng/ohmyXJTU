@@ -740,6 +740,6 @@ fn timeouts_stay_short_and_ordered() {
     assert_eq!(super::CONNECT_TIMEOUT, Duration::from_secs(10));
     assert!(
         super::CONNECT_TIMEOUT < super::DEFAULT_TIMEOUT,
-        "连線階段必須先於總逾時結束"
+        "连线阶段必须先於总逾时结束"
     );
 }

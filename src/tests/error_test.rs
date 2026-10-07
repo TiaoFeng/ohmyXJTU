@@ -21,7 +21,7 @@ fn connection_level_errors_are_retryable() {
         NetworkKind::Timeout,
     ] {
         let err = AppError::network_kind(kind, "x");
-        assert!(err.is_connection_error(), "{kind:?} 屬於連線層");
+        assert!(err.is_connection_error(), "{kind:?} 属於连线层");
         assert!(!err.needs_relogin(), "{kind:?} 不是登录态失效");
     }
 }
@@ -62,13 +62,13 @@ fn non_connection_errors_are_not_retryable() {
 fn untrusted_url_reports_only_the_host() {
     let err = AppError::untrusted_url("evil.example", "非校内网域");
     let message = err.to_string();
-    assert!(message.contains("evil.example"), "应指出主機：{message}");
+    assert!(message.contains("evil.example"), "应指出主机：{message}");
     assert!(message.contains("非校内网域"), "应说明原因：{message}");
 
     let err = AppError::untrusted_url("", "必须使用 https");
     assert!(
         err.to_string().contains("（无主机名）"),
-        "缺少主機名时应有占位：{err}"
+        "缺少主机名时应有占位：{err}"
     );
 }
 

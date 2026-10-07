@@ -193,7 +193,7 @@ fn text_area_splits_and_joins_lines() {
         area.insert(character);
     }
     assert_eq!(area.value(), "第一行");
-    assert_eq!(area.row(), 0, "單行時游標在第一行");
+    assert_eq!(area.row(), 0, "单行时游标在第一行");
 
     // 在游標處（尾端）換行，游標移到新的一行。
     area.insert('\n');
@@ -231,7 +231,7 @@ fn text_area_edits_across_lines_with_arrows() {
     // 上移：游標回到第一行的同一欄位（越界時夾取）。
     area.move_up();
     assert_eq!(area.row(), 0);
-    assert_eq!(area.focused_line().cursor(), 1, "應夾到該行長度");
+    assert_eq!(area.focused_line().cursor(), 1, "应夹到该行长度");
     area.move_down();
     assert_eq!(area.row(), 1);
 
@@ -271,7 +271,7 @@ fn text_area_window_follows_the_cursor() {
     assert_eq!(area.row(), 4);
     // 三行視窗、游標在最後一行：視窗往下移，讓游標行可見。
     let start = area.window_start(3);
-    assert_eq!(start, 2, "視窗应滚动到游标所在行");
+    assert_eq!(start, 2, "视窗应滚动到游标所在行");
 
     // 空行（只有換行）也算一行，仍能取到值。
     let empty = TextArea::new("\n");

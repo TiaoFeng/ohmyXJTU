@@ -1010,7 +1010,7 @@ fn login_error_message_is_sanitized() {
     assert!(!error.contains('\u{7}'), "控制字元应被移除：{error:?}");
     assert!(
         error.chars().count() <= MAX_INLINE_CHARS,
-        "超长訊息应被截断：{} 字元",
+        "超长讯息应被截断：{} 字元",
         error.chars().count()
     );
 
@@ -1032,7 +1032,7 @@ fn login_error_message_is_sanitized() {
             assert!(!message.contains('\u{1b}'), "控制字元应被移除：{message:?}");
             assert!(
                 message.chars().count() <= MAX_INLINE_CHARS,
-                "超长訊息应被截断：{} 字元",
+                "超长讯息应被截断：{} 字元",
                 message.chars().count()
             );
         }
@@ -1984,7 +1984,7 @@ fn tasks_event_replaces_the_list_and_anchors_the_selection() {
     assert_eq!(
         app.task_page_group_counts().get(HomeworkGroup::Completed),
         1,
-        "分组计数应包含自訂義任务"
+        "分组计数应包含自订义任务"
     );
 }
 

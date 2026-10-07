@@ -2034,6 +2034,51 @@ fn activity_detail_reports_no_effective_submissions() {
     );
 }
 
+/// 分數以 JSON 字串回傳時不得連引號一起顯示。
+///
+/// 伺服器對分數的型別並不統一（`90`、`"90"`、`null`）：直接 `Display` 一個
+/// `serde_json::Value` 會印出 `"90"`，看起來像資料壞掉。
+#[test]
+fn activity_detail_shows_scores_without_json_quotes() {
+    let list: LmsSubmissionList = serde_json::from_str(
+        r#"{"list":[
+            {"id":1,"is_latest_version":true,"submitted_at":"2026-09-20T02:00:00Z","score":"90"},
+            {"id":2,"is_latest_version":true,"submitted_at":"2026-09-21T02:00:00Z","score":88.5},
+            {"id":3,"is_latest_version":true,"submitted_at":"2026-09-22T02:00:00Z","score":null},
+            {"id":4,"is_latest_version":true,"submitted_at":"2026-09-23T02:00:00Z"}
+        ]}"#,
+    )
+    .expect("脱敏样本");
+
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Lms;
+    app.lms.level = LmsLevel::Detail;
+    app.lms.detail = Page::Ready(ActivityDetailView {
+        id: "1".to_owned(),
+        title: "作业A".to_owned(),
+        kind: ActivityKind::Homework,
+        description: None,
+        end_time: None,
+        submit_by_group: Some(false),
+        submissions: Some(list),
+        note: None,
+    });
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(text.contains("分数：90"), "字符串分数不应带引号：\n{text}");
+    assert!(!text.contains("\"90\""), "不得显示 JSON 引号：\n{text}");
+    assert!(text.contains("分数：88.5"), "数字分数应原样显示：\n{text}");
+    assert_eq!(
+        text.matches("分数：").count(),
+        2,
+        "null 与缺字段不应显示分数：\n{text}"
+    );
+}
+
 /// 有提交記錄讀不出來時不得宣稱「視為未提交」（讀不出來的那筆可能才是有效提交）。
 #[test]
 fn activity_detail_reports_unreadable_submissions() {

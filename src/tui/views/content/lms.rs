@@ -337,6 +337,7 @@ fn detail_lines(detail: &ActivityDetailView, width: usize) -> Vec<Line<'static>>
                     let score = submission
                         .score
                         .as_ref()
+                        .and_then(display_value)
                         .map_or(String::new(), |score| format!("　分数：{score}"));
                     push_wrapped(
                         &mut lines,
@@ -369,4 +370,20 @@ fn detail_lines(detail: &ActivityDetailView, width: usize) -> Vec<Line<'static>>
         push_wrapped(&mut lines, note.clone(), THEME.error_style(), width);
     }
     lines
+}
+
+/// JSON 值的顯示文字：字串不加引號，`null` 與空字串視為沒有值。
+///
+/// 伺服器對分數的型別並不統一（`90`、`"90"`、`90.5`、`null`）。直接以
+/// `Display` 輸出 `serde_json::Value` 會讓字串型分數連引號一起顯示（`"90"`），
+/// 看起來像是資料壞掉；這裡只取出使用者看得懂的部分。
+fn display_value(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(text) => {
+            let text = text.trim();
+            (!text.is_empty()).then(|| text.to_owned())
+        }
+        other => Some(other.to_string()),
+    }
 }

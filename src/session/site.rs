@@ -55,12 +55,25 @@ pub struct SitePolicy {
 }
 
 /// 站點登入成功後的回傳值。
-#[derive(Debug, Clone, Default)]
+///
+/// 手寫 [`fmt::Debug`]：標頭帶著站點業務憑證（例如考勤的 `X-Business-Token`），
+/// 任何 `{:?}` 只輸出標頭**名稱**與「有沒有取到站點識別碼」，不輸出內容。
+#[derive(Clone, Default)]
 pub struct SiteLogin {
     /// 之後每個請求都要附帶的標頭（例如考勤系統的 `X-Business-Token`）。
     pub headers: Vec<(String, String)>,
     /// 站點內的識別碼（例如思源學堂的使用者 ID）。
     pub user_id: Option<String>,
+}
+
+impl fmt::Debug for SiteLogin {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SiteLogin")
+            .field("headers", &crate::http::field_names(&self.headers))
+            .field("user_id", &self.user_id.is_some())
+            .finish()
+    }
 }
 
 /// 站點登入收尾時可用的請求工具：自動依訪問方式改寫網址。

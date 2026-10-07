@@ -369,6 +369,15 @@ impl<'a> Parser<'a> {
     }
 
     /// 解析 ES6 的碼位跳脫 `{XXXXXX}`（呼叫時位於 `{`）。
+    ///
+    /// 代理區（`\u{D800}`）在 JavaScript 裡是合法的跳脫序列，但 Rust 的 `char`
+    /// 不接受：與 4 位形式一致地降級為 U+FFFD，而不是讓整段 `globalData` 解析
+    /// 失敗（那會讓個人作業全部退回「待核实」）。超出 Unicode 上限（`\u{110000}`
+    /// 以上）在 JS 本身就是語法錯誤，因此仍回 `None`。
+    ///
+    /// 大括號形式的代理對**不組合成一個字元**（每個跳脫各自降級）：真實頁面的
+    /// emoji 走的是 4 位形式（已組合），大括號形式只用於少數 ES6 寫法，為它多做
+    /// 一次向前探查並不值得。
     fn parse_code_point_escape(&mut self) -> Option<char> {
         self.pos += 1;
         let start = self.pos;
@@ -380,7 +389,11 @@ impl<'a> Parser<'a> {
             return None;
         }
         self.pos += 1;
-        u32::from_str_radix(hex, 16).ok().and_then(char::from_u32)
+        let code = u32::from_str_radix(hex, 16).ok()?;
+        if (0xD800..=0xDFFF).contains(&code) {
+            return Some(REPLACEMENT);
+        }
+        char::from_u32(code)
     }
 
     /// 讀取 4 位十六進位（呼叫時位於第一位）；不是 4 位十六進位時回 `None`

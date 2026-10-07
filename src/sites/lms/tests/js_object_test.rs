@@ -121,6 +121,29 @@ fn replaces_lone_surrogates_instead_of_failing() {
     assert_eq!(user["a"], json!("x\u{fffd}y"), "高位代理后接普通字元");
     assert_eq!(user["b"], json!("\u{fffd}"), "只有低位代理");
     assert_eq!(user["c"], json!("\u{fffd}z"), "高位代理在字串结尾");
+
+    // 大括號形式同一套政策：降級而不是讓整段解析失敗。
+    let page = "{ user: { a: \"x\\u{D800}y\", b: \"\\u{DFFF}\" }, dept: {} }";
+    let user = parse_js_object(page, "user", "dept").expect("应解析");
+    assert_eq!(user["a"], json!("x\u{fffd}y"), "大括号形式的孤立代理");
+    assert_eq!(user["b"], json!("\u{fffd}"));
+}
+
+/// 代理對的邊界碼位：`\uD800\uDC00`（最低）與 `\uDBFF\uDFFF`（最高）。
+#[test]
+fn combines_surrogate_pairs_at_both_ends() {
+    let page = "{ user: { low: \"\\uD800\\uDC00\", high: \"\\uDBFF\\uDFFF\" }, dept: {} }";
+    let user = parse_js_object(page, "user", "dept").expect("应解析");
+    assert_eq!(
+        user["low"],
+        json!("\u{10000}"),
+        "最低的代理对应组成 U+10000"
+    );
+    assert_eq!(
+        user["high"],
+        json!("\u{10FFFF}"),
+        "最高的代理对应组成 U+10FFFF"
+    );
 }
 
 /// `\u{…}` 的語法錯誤仍回 `None`（解析器與頁面格式不符應該看得見）。

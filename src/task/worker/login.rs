@@ -415,6 +415,9 @@ impl Worker {
         // 課表快取與選定週次都屬於舊帳號。
         self.schedule_cache = None;
         self.schedule_week = None;
+        // 「當前學期」是上一次查考勤系統的結果，同樣屬於舊帳號（與
+        // `change_account` 同一組清理；`chosen_term` 是使用者的選擇，保留）。
+        self.known_term = None;
         self.emit(Event::SessionsCleared {
             account_changed: true,
         });

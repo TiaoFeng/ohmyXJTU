@@ -5635,6 +5635,38 @@ fn rollback_uses_the_vault_credentials_not_an_unverified_pending_account() {
     assert_eq!(stored.username, "3120000001", "保险库内容不得被更动");
 }
 
+/// 「當前學期」的清理矩陣：所有換帳號路徑都必須作廢，切換訪問模式則保留。
+///
+/// `retry_with_account`（登入失敗畫面按 `e` 重輸帳密）與 `change_account` 是同一種
+/// 帳號切換：它同樣清了 generation、快取、課表快取與選定週次，唯獨漏掉
+/// `known_term`，於是舊帳號查到的學期會繼續分區新帳號的課程。
+#[test]
+fn account_switch_paths_clear_the_remembered_term_but_policy_change_keeps_it() {
+    let mut harness = harness(fake_flow(0));
+    harness.worker.known_term = TermCode::parse("2025-2026-2");
+
+    let _ = harness.dispatch(Job::RetryWithAccount {
+        site: SiteKind::Attendance,
+        credentials: Credentials::new("3120000002", "new-password"),
+        passphrase: "secret123".into(),
+    });
+    assert!(
+        harness.worker.known_term.is_none(),
+        "重输帐密换帐号后不得沿用旧学期"
+    );
+
+    // 切換訪問模式不是換帳號：資料仍有效，學期提示保留。
+    harness.worker.known_term = TermCode::parse("2025-2026-2");
+    harness
+        .dispatch(Job::SetAccessPolicy(AccessPolicy::WebVpn))
+        .expect("保存访问模式");
+    assert_eq!(
+        harness.worker.known_term,
+        TermCode::parse("2025-2026-2"),
+        "切换访问模式时资料仍有效，学期应保留"
+    );
+}
+
 /// 換帳號後不得沿用舊帳號查到的「當前學期」。
 ///
 /// `known_term` 是上一次查考勤系統的結果，屬於舊帳號；不清掉的話，課程分區與

@@ -109,6 +109,7 @@ fn computes_total_pages_for_flow_page() {
         total: 21,
         page: 1,
         page_size: 10,
+        skipped: 0,
     };
     assert_eq!(page.total_pages(), 3);
 
@@ -117,6 +118,7 @@ fn computes_total_pages_for_flow_page() {
         total: 0,
         page: 1,
         page_size: 10,
+        skipped: 0,
     };
     assert_eq!(empty.total_pages(), 1);
 }
@@ -129,6 +131,7 @@ fn clamps_total_pages_for_hostile_totals() {
         total: 100,
         page: 1,
         page_size: 0,
+        skipped: 0,
     };
     assert_eq!(zero_size.total_pages(), 1);
 
@@ -138,6 +141,7 @@ fn clamps_total_pages_for_hostile_totals() {
         total: u64::MAX,
         page: 1,
         page_size: 20,
+        skipped: 0,
     };
     assert_eq!(huge.total_pages(), u32::MAX);
 
@@ -147,6 +151,7 @@ fn clamps_total_pages_for_hostile_totals() {
         total: 1_000_000,
         page: 1,
         page_size: 20,
+        skipped: 0,
     };
     assert_eq!(large.total_pages(), 50_000);
 }
@@ -349,4 +354,179 @@ fn parses_the_effective_flag_leniently() {
     assert!(records[3].effective, "isEffective 别名应被接受");
     assert!(!records[4].effective, "缺字段保守视为无效");
     assert!(!records[5].effective, "无法解读的型别视为无效");
+}
+
+/// 只用來建立一個已登入的考勤工作階段與假客戶端。
+fn attendance_api_with(
+    responder: impl Fn(&HttpRequest) -> crate::error::AppResult<crate::http::HttpResponse>
+    + Send
+    + Sync
+    + 'static,
+) -> (
+    SessionManager,
+    std::sync::Arc<std::sync::atomic::AtomicUsize>,
+) {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
+
+    use crate::config::{AccessPolicy, Config};
+    use crate::http::HttpClient;
+    use crate::http::fake::FakeClient;
+    use crate::session::{AccessMode, SessionManager, SiteKind};
+
+    let requests = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&requests);
+    let client = Arc::new(FakeClient::with_responder(move |request: &HttpRequest| {
+        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        responder(request)
+    }));
+    let direct: Arc<dyn HttpClient> = client.clone();
+    let webvpn: Arc<dyn HttpClient> = client;
+    let config = Config {
+        access_policy: AccessPolicy::Direct,
+        ..Config::default()
+    };
+    let mut session = SessionManager::with_clients(&config, direct, webvpn);
+    session.register(Box::new(AttendanceSite));
+    session.mark_logged_in(SiteKind::Attendance, AccessMode::Direct, Vec::new());
+    (session, requests)
+}
+
+/// 課程考勤記錄逐項寬容：讀不出來的記錄只跳過該筆，不得讓整頁失敗。
+///
+/// 修復前是整批嚴格解析（`deserialize_value`），而 `resultId` 原本還是必填的
+/// 嚴格欄位：任何一筆型別異常都會讓課表頁直接顯示失敗，連帶所有課程都沒有考勤
+/// 狀態。`resultId` 與 `courseWeek` 目前不參與比對，讀不出來也不該丟棄記錄。
+#[test]
+fn records_tolerate_loosely_typed_and_unused_fields() {
+    use crate::http::fake::json;
+
+    let (mut session, requests) = attendance_api_with(|_request| {
+        Ok(json(serde_json::json!({
+            "code": 0,
+            "message": "ok",
+            "data": {
+                "total": 4,
+                "rows": [
+                    // `resultId` 是物件、`courseWeek` 缺失：仍保留這筆記錄。
+                    {
+                        "resultId": {"unexpected": true},
+                        "startSection": 1,
+                        "endSection": 2,
+                        "attendanceStatus": "NORMAL",
+                        "attendanceDate": "2026-09-01"
+                    },
+                    // 參與比對的欄位是字串形式：接受。
+                    {
+                        "resultId": "9001",
+                        "startSection": "3",
+                        "endSection": "4",
+                        "courseWeek": "5",
+                        "attendanceStatus": "LATE",
+                        "attendanceDate": "2026-09-02"
+                    },
+                    // 缺 `attendanceStatus`：無法比對，跳過。
+                    {
+                        "resultId": 9002,
+                        "startSection": 1,
+                        "endSection": 2,
+                        "attendanceDate": "2026-09-03"
+                    },
+                    // 根本不是物件：跳過。
+                    "not an object"
+                ]
+            }
+        })))
+    });
+    let mut api = AttendanceApi::new(&mut session);
+
+    let start = chrono::NaiveDate::from_ymd_opt(2026, 9, 1).expect("日期");
+    let end = chrono::NaiveDate::from_ymd_opt(2026, 9, 7).expect("日期");
+    let batch = api
+        .records_between(start, end)
+        .expect("单笔异常不得让整页失败");
+
+    assert_eq!(batch.records.len(), 2, "只有能用于比对的记录被保留");
+    assert_eq!(batch.skipped, 2, "无法解析的笔数必须保留");
+    assert!(!batch.truncated, "取满 total 就不该标记截断");
+    assert_eq!(
+        requests.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "跳过的记录不应造成额外翻页"
+    );
+    assert_eq!(batch.records[0].result_id, "", "读不出来的识别码视为空");
+    assert_eq!(batch.records[0].course_week, 0, "读不出来的周次视为 0");
+    assert_eq!(batch.records[1].result_id, "9001");
+    assert_eq!(batch.records[1].start_section, 3);
+    assert_eq!(batch.records[1].course_week, 5);
+}
+
+/// 流水逐項寬容：讀不出來的流水只跳過該筆，並回報筆數。
+#[test]
+fn flow_page_tolerates_loosely_typed_and_unused_fields() {
+    use crate::http::fake::json;
+
+    let (mut session, requests) = attendance_api_with(|_request| {
+        Ok(json(serde_json::json!({
+            "code": 0,
+            "message": "ok",
+            "data": {
+                "total": 3,
+                "rows": [
+                    {"id": 1, "effective": true, "classroomName": "主楼A101"},
+                    // `id` 是物件：本程式不以識別碼判斷任何事，仍保留這筆。
+                    {"id": {"unexpected": true}, "effective": "yes"},
+                    "not an object"
+                ]
+            }
+        })))
+    });
+    let mut api = AttendanceApi::new(&mut session);
+
+    let page = api.flow_page(1, 100).expect("单笔异常不得让整页失败");
+    assert_eq!(page.records.len(), 2);
+    assert_eq!(page.skipped, 1);
+    assert_eq!(page.total, 3);
+    assert_eq!(page.records[0].id, "1");
+    assert_eq!(page.records[1].id, "", "读不出来的识别码视为空");
+    assert!(page.records[1].effective, "isEffective 之外的字段不受影响");
+    assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+/// 課表逐項寬容：讀不出來的課程只跳過該門，不得讓整份課表失敗。
+#[test]
+fn weekly_courses_skips_unparsable_items() {
+    use crate::http::fake::json;
+
+    let (mut session, _requests) = attendance_api_with(|_request| {
+        Ok(json(serde_json::json!({
+            "code": 0,
+            "message": "ok",
+            "data": {
+                "courses": [
+                    {
+                        "courseName": "编译原理",
+                        "teacherName": "李老师",
+                        "classroomName": "主楼A101",
+                        "dayOfWeek": 1,
+                        "startSection": 1,
+                        "endSection": 2,
+                        "weekRanges": "1-16"
+                    },
+                    // 缺 `dayOfWeek`（參與比對）：跳過這門課。
+                    {"courseName": "缺星期", "startSection": 3, "endSection": 4},
+                    {"courseName": "上课时间不是数字", "dayOfWeek": "x", "startSection": 3, "endSection": 4}
+                ]
+            }
+        })))
+    });
+    let mut api = AttendanceApi::new(&mut session);
+
+    let (courses, skipped) = api
+        .weekly_courses("9")
+        .expect("单门课程异常不得让整份课表失败");
+    assert_eq!(courses.len(), 1);
+    assert_eq!(skipped, 2, "无法解析的课程数必须保留");
+    assert_eq!(courses[0].course_name, "编译原理");
+    assert_eq!(courses[0].day_of_week, 1);
 }

@@ -3289,6 +3289,91 @@ fn schedule_in_session_matches_attendance_without_notice() {
     );
 }
 
+/// 讀不出來的考勤記錄與課程只跳過該筆，並在課表頁提示筆數。
+///
+/// 修復前是整批嚴格解析：一筆 `resultId` 型別異常的記錄或一門缺 `dayOfWeek`
+/// 的課程都會讓整個課表頁失敗，連帶所有課程都沒有考勤狀態。
+#[test]
+fn schedule_reports_skipped_records_and_courses() {
+    let today = chrono::Local::now().date_naive();
+    let (start, day_of_week) = semester_fixture_meeting_today(today, 3);
+    let end = (today + chrono::Duration::days(90)).to_string();
+    let attendance_date = today.to_string();
+    let mut harness = harness(move |request: &HttpRequest| {
+        let url = request.url.clone();
+        if url.ends_with("/timetable/semesters") {
+            return Ok(json(serde_json::json!({ "code": 0, "data": [{
+                "semesterId": "s-1",
+                "academicYear": "2026-2027",
+                "semesterName": "第一学期",
+                "startDate": start.clone(),
+                "endDate": end.clone(),
+            }]})));
+        }
+        if url.contains("/timetable/weekly") {
+            return Ok(json(serde_json::json!({ "code": 0, "data": { "courses": [
+                {
+                    "courseName": "线性代数",
+                    "teacherName": "张老师",
+                    "classroomName": "主楼A101",
+                    "dayOfWeek": day_of_week,
+                    "startSection": 1,
+                    "endSection": 2,
+                    "weekRanges": "1-30",
+                },
+                // 缺 `dayOfWeek`：无法比对，跳過這門課。
+                {"courseName": "缺星期", "startSection": 3, "endSection": 4}
+            ]}})));
+        }
+        if url.contains("attendance-records") {
+            return Ok(json(serde_json::json!({ "code": 0, "data": {
+                "rows": [
+                    {
+                        "resultId": 1,
+                        "startSection": 1,
+                        "endSection": 2,
+                        "courseWeek": 3,
+                        "classroomName": "主楼A101",
+                        "teacherName": "张老师",
+                        "attendanceStatus": "NORMAL",
+                        "attendanceDate": attendance_date.clone(),
+                    },
+                    // 缺 `attendanceStatus`：无法比对，跳過這筆。
+                    {"resultId": 2, "startSection": 1, "endSection": 2}
+                ],
+                "total": 2,
+            }})));
+        }
+        panic!("未预期的请求：{url}");
+    });
+    harness.login_both_sites();
+
+    harness
+        .dispatch(Job::LoadSchedule { force: false })
+        .expect("单笔异常不得让课表加载失败");
+
+    let schedule = harness
+        .drain_events()
+        .into_iter()
+        .find_map(|event| match event {
+            Event::Schedule(data) => Some(*data),
+            _ => None,
+        })
+        .expect("应发出课表事件");
+    assert_eq!(schedule.skipped, 1, "读不出来的课程数应计入提示");
+    let notice = schedule.notice.as_deref().unwrap_or_default();
+    assert!(
+        notice.contains("已跳过 1 条无法解析的考勤记录"),
+        "应提示被跳过的记录：{notice}"
+    );
+    assert_eq!(schedule.lessons.len(), 1, "能解析的课程仍应显示");
+    assert_eq!(
+        schedule.lessons[0].attendance,
+        LessonAttendance::Recorded(AttendanceStatus::Normal),
+        "能解析的记录仍应正常比对"
+    );
+}
+
 /// 第 23 週（超出假設的 22 個教學週、仍在學期內）不得回退顯示第 22 週
 /// 的舊課程：舊碼會夾取週次，讓已結課課程以錯位日期重新出現。
 #[test]

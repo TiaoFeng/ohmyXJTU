@@ -4,7 +4,10 @@ use serde::Deserialize;
 
 use crate::tone::Tone;
 
-use super::super::{lenient_flag, optional_string_or_number, string_or_number, u32_or_string};
+use super::super::{
+    lenient_flag, optional_string_or_number, string_lenient, string_or_number, u32_lenient,
+    u32_or_string,
+};
 
 /// 考勤狀態。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -154,11 +157,16 @@ pub struct TimetableCourse {
 }
 
 /// 一筆課程考勤記錄。
+///
+/// 除了參與比對的欄位（節次、日期、地點與教師、狀態），其餘欄位一律寬容讀取：
+/// `records_between` 逐項解析、跳過讀不出來的記錄（見
+/// [`crate::sites::parse_lenient`]），因此「本程式沒有用到的欄位」不該成為整筆
+/// 記錄被丟棄的理由。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WaterRecord {
-    /// 記錄識別碼。
-    #[serde(deserialize_with = "string_or_number")]
+    /// 記錄識別碼（本程式不以此欄位判斷任何事；讀不出來時為空字串）。
+    #[serde(default, deserialize_with = "string_lenient")]
     pub result_id: String,
     /// 開始節次。
     #[serde(deserialize_with = "u32_or_string")]
@@ -166,8 +174,8 @@ pub struct WaterRecord {
     /// 結束節次。
     #[serde(deserialize_with = "u32_or_string")]
     pub end_section: u32,
-    /// 第幾週。
-    #[serde(deserialize_with = "u32_or_string")]
+    /// 第幾週（比對不使用它；讀不出來時為 0）。
+    #[serde(default, deserialize_with = "u32_lenient")]
     pub course_week: u32,
     /// 上課地點。
     #[serde(default)]
@@ -195,8 +203,8 @@ impl WaterRecord {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FlowRecord {
-    /// 流水識別碼。
-    #[serde(deserialize_with = "string_or_number")]
+    /// 流水識別碼（本程式不以此欄位判斷任何事；讀不出來時為空字串）。
+    #[serde(default, deserialize_with = "string_lenient")]
     pub id: String,
     /// 打卡地點。
     #[serde(default)]
@@ -225,6 +233,8 @@ pub struct FlowPage {
     pub page: u32,
     /// 每頁筆數。
     pub page_size: u32,
+    /// 本頁中無法解析而被跳過的筆數。
+    pub skipped: usize,
 }
 
 impl FlowPage {
@@ -246,4 +256,6 @@ pub struct RecordBatch {
     pub records: Vec<WaterRecord>,
     /// 是否因分頁上限而未取完全部記錄。
     pub truncated: bool,
+    /// 無法解析而被跳過的筆數（對應課程會顯示「待核实」）。
+    pub skipped: usize,
 }

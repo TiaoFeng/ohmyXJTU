@@ -77,15 +77,18 @@ impl Worker {
                 }
             }
 
-            let courses = {
+            let (courses, skipped_unparsed) = {
                 let session = self.session_mut()?;
                 AttendanceApi::new(session).weekly_courses(&semester.semester_id)?
             };
             let slots = schedule::merge_courses(&courses);
-            let skipped = courses
-                .iter()
-                .filter(|course| schedule::parse_weeks(&course.week_ranges).is_empty())
-                .count();
+            // 兩種「跳過」都要回報：整門課讀不出來，以及週次欄位無法解析
+            // （後者仍算一門課，只是無法判斷它出現在哪幾週）。
+            let skipped = skipped_unparsed
+                + courses
+                    .iter()
+                    .filter(|course| schedule::parse_weeks(&course.week_ranges).is_empty())
+                    .count();
             let max_week = slots
                 .iter()
                 .flat_map(|slot| slot.weeks.iter().copied())
@@ -112,7 +115,11 @@ impl Worker {
             return Err(AppError::protocol("周次超出可表示的日期范围"));
         };
 
-        let RecordBatch { records, truncated } = {
+        let RecordBatch {
+            records,
+            truncated,
+            skipped: skipped_records,
+        } = {
             let session = self.session_mut()?;
             AttendanceApi::new(session).records_between(monday, sunday)?
         };
@@ -141,12 +148,7 @@ impl Worker {
         // `merge_courses` 的課名順序。
         lessons.sort_by_key(|lesson| (lesson.date, lesson.start_section, lesson.end_section));
 
-        let notice = truncated.then(|| {
-            format!(
-                "考勤记录超过分页上限，仅比对前 {} 条，部分课程可能显示「待核实」",
-                records.len()
-            )
-        });
+        let notice = schedule_notice(truncated, records.len(), skipped_records);
 
         Ok(ScheduleData {
             semester: cache.label,
@@ -210,9 +212,19 @@ impl Worker {
 
     /// 考勤流水（一頁）。
     pub(super) fn load_flow(&mut self, page: u32) -> AppResult<FlowData> {
-        let session = self.session_mut()?;
-        let mut api = AttendanceApi::new(session);
-        let page_data = api.flow_page(page.max(1), FLOW_PAGE_SIZE)?;
+        let page_data = {
+            let session = self.session_mut()?;
+            let mut api = AttendanceApi::new(session);
+            api.flow_page(page.max(1), FLOW_PAGE_SIZE)?
+        };
+        // 跳過的流水不會出現在清單裡，但 `total` 仍含它們：不提示的話，使用者
+        // 只會看到頁碼對不上而不知原因。
+        if page_data.skipped > 0 {
+            self.emit(Event::Notice(format!(
+                "已跳过 {} 条无法解析的考勤流水",
+                page_data.skipped
+            )));
+        }
 
         Ok(FlowData {
             total: page_data.total,
@@ -343,6 +355,25 @@ fn off_session_schedule(
         skipped: 0,
         notice: Some(notice),
     }
+}
+
+/// 課表頁提示列：資料不完整（分頁上限）或無法解析時都必須明說。
+///
+/// 兩種情形都不該靜默：使用者看到的考勤狀態是「比對後的結果」，資料少了就會
+/// 有課程顯示「待核实」，沒有提示的話會被誤認為真的沒有記錄。
+fn schedule_notice(truncated: bool, kept: usize, skipped: usize) -> Option<String> {
+    let mut parts = Vec::new();
+    if truncated {
+        parts.push(format!(
+            "考勤记录超过分页上限，仅比对前 {kept} 条，部分课程可能显示「待核实」"
+        ));
+    }
+    if skipped > 0 {
+        parts.push(format!(
+            "已跳过 {skipped} 条无法解析的考勤记录，相关课程可能显示「待核实」"
+        ));
+    }
+    (!parts.is_empty()).then(|| parts.join("；"))
 }
 
 /// 考勤學期的開始日期（`YYYY-MM-DD`）。

@@ -197,6 +197,25 @@ where
     }
 }
 
+/// 缺欄位或型別不符時回傳空字串的字串欄位（**不報錯**）。
+///
+/// 接受字串與數字（與 [`string_or_number`] 同一組型別，識別碼偶爾以數字回傳），
+/// 其餘型別一律視為空字串。用於「整項資料不該因為這一個欄位而消失」的欄位
+/// （例如活動的類型 `type`）：型別異常時只損失該欄位的內容，項目本身仍保留，
+/// 由呼叫端以預設值呈現。相對地 `optional_string_lenient` 用於「沒有內容」等同
+/// 缺漏的欄位（例如活動說明）。
+pub(crate) fn string_lenient<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(match value {
+        Some(serde_json::Value::String(text)) => text,
+        Some(serde_json::Value::Number(number)) => number.to_string(),
+        _ => String::new(),
+    })
+}
+
 /// 缺欄位或型別不符時回傳 `None` 的非負整數（接受數字與可解析的數字字串）。
 ///
 /// 用於純展示用的數量欄位（例如附件大小）：型別異常時只損失這個數字，不讓整份

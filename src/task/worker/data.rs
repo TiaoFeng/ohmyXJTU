@@ -164,22 +164,28 @@ impl Worker {
         })
     }
 
-    /// 記住使用者選擇的週次並重新載入課表（`[`／`]`）。
+    /// 記住使用者選擇的週次（`[`／`]`）；`reload` 為真時重新載入該週。
     ///
     /// 週次保存在工作者狀態（如同作業的學期選擇）：任務本身只是觸發，因此
     /// 佇列中至多保留一筆載入，連續切週只會執行最後一週（新值在該筆執行時
     /// 才被讀取）。
     ///
+    /// `reload` 為假＝介面已從自己的週快取顯示該週（見 `App::schedule_weeks`）：
+    /// 只更新週次，不重查考勤。週次仍必須更新，否則之後按 `r`（`LoadSchedule`）
+    /// 會載入上一次真正載入過的週次，而不是畫面上顯示的那一週。
+    ///
     /// 進行中的載入**不會**被作廢：單步任務只在執行前排空控制任務，因此切週
     /// 指令要等該筆載入回報後才生效。使用者在載入途中又按了 `[`／`]` 時，介面
     /// 會先收到前一週（真實資料）再收到最後選定的一週；最終狀態必為最後選定
     /// 的週次。
-    pub(super) fn set_schedule_week(&mut self, week: u32) -> AppResult<()> {
+    pub(super) fn set_schedule_week(&mut self, week: u32, reload: bool) -> AppResult<()> {
         if self.schedule_week == Some(week) {
             return Ok(());
         }
         self.schedule_week = Some(week);
-        self.merge_data_job(Job::LoadSchedule { force: false }, None);
+        if reload {
+            self.merge_data_job(Job::LoadSchedule { force: false }, None);
+        }
         Ok(())
     }
 

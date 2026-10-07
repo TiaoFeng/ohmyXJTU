@@ -1294,7 +1294,10 @@ fn finishing_a_login_resumes_tasks_from_both_sources() {
     harness.login_both_sites();
     // `self.retry`：等待重登的資料任務（此處以會排入載入的控制任務代替，
     // 以免測試真的發出請求）。
-    harness.worker.retry = Some(Job::SetScheduleWeek { week: 3 });
+    harness.worker.retry = Some(Job::SetScheduleWeek {
+        week: 3,
+        reload: true,
+    });
 
     harness
         .worker
@@ -3752,7 +3755,10 @@ fn schedule_week_switch_reuses_the_semester_cache() {
     seen.lock().expect("lock").clear();
 
     harness
-        .dispatch(Job::SetScheduleWeek { week: 5 })
+        .dispatch(Job::SetScheduleWeek {
+            week: 5,
+            reload: true,
+        })
         .expect("切换周次应当成功");
     run_queued(&mut harness);
     let switched = schedule_event(&mut harness);
@@ -3786,7 +3792,10 @@ fn schedule_week_switch_before_first_load_fetches_everything() {
     harness.login_both_sites();
 
     harness
-        .dispatch(Job::SetScheduleWeek { week: 2 })
+        .dispatch(Job::SetScheduleWeek {
+            week: 2,
+            reload: true,
+        })
         .expect("切换周次应当成功");
     run_queued(&mut harness);
 
@@ -3825,10 +3834,16 @@ fn consecutive_week_switches_only_load_the_last_week() {
     seen.lock().expect("lock").clear();
 
     harness
-        .dispatch(Job::SetScheduleWeek { week: 4 })
+        .dispatch(Job::SetScheduleWeek {
+            week: 4,
+            reload: true,
+        })
         .expect("切换周次应当成功");
     harness
-        .dispatch(Job::SetScheduleWeek { week: 6 })
+        .dispatch(Job::SetScheduleWeek {
+            week: 6,
+            reload: true,
+        })
         .expect("再次切换应当成功");
     assert_eq!(harness.worker.pending_data.len(), 1, "同键触发至多保留一笔");
 
@@ -3857,7 +3872,10 @@ fn forced_refresh_keeps_the_selected_week() {
     let mut harness = harness(schedule_site(Arc::clone(&seen), start, end, day_of_week));
     harness.login_both_sites();
     harness
-        .dispatch(Job::SetScheduleWeek { week: 5 })
+        .dispatch(Job::SetScheduleWeek {
+            week: 5,
+            reload: true,
+        })
         .expect("切换周次应当成功");
     run_queued(&mut harness);
     let _ = schedule_event(&mut harness);
@@ -3914,7 +3932,10 @@ fn explicit_week_after_semester_end_loads_that_week() {
     );
 
     harness
-        .dispatch(Job::SetScheduleWeek { week: 3 })
+        .dispatch(Job::SetScheduleWeek {
+            week: 3,
+            reload: true,
+        })
         .expect("切换周次应当成功");
     run_queued(&mut harness);
     let schedule = schedule_event(&mut harness);
@@ -3965,14 +3986,20 @@ fn set_schedule_week_same_value_is_a_no_op() {
     let mut harness = harness(schedule_site(Arc::clone(&seen), start, end, day_of_week));
     harness.login_both_sites();
     harness
-        .dispatch(Job::SetScheduleWeek { week: 5 })
+        .dispatch(Job::SetScheduleWeek {
+            week: 5,
+            reload: true,
+        })
         .expect("切换周次应当成功");
     run_queued(&mut harness);
     let _ = schedule_event(&mut harness);
     seen.lock().expect("lock").clear();
 
     harness
-        .dispatch(Job::SetScheduleWeek { week: 5 })
+        .dispatch(Job::SetScheduleWeek {
+            week: 5,
+            reload: true,
+        })
         .expect("同值切换应当成功");
     assert!(
         harness.worker.pending_data.is_empty(),
@@ -3982,6 +4009,47 @@ fn set_schedule_week_same_value_is_a_no_op() {
         seen.lock().expect("lock").is_empty(),
         "同值切换不应发出请求"
     );
+}
+
+/// `reload: false`（介面已有該週快取）：只記住週次，不排隊也不發請求。
+///
+/// 週次仍必須更新：之後的 `LoadSchedule`（使用者按 `r`）要載入畫面上顯示的
+/// 那一週，而不是上一次真正查詢過的週次。
+#[test]
+fn set_schedule_week_without_reload_only_remembers_the_week() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let today = chrono::Local::now().date_naive();
+    let (start, day_of_week) = semester_fixture_meeting_today(today, 3);
+    let end = (today + chrono::Duration::days(90)).to_string();
+    let mut harness = harness(schedule_site(Arc::clone(&seen), start, end, day_of_week));
+    harness.login_both_sites();
+    harness
+        .dispatch(Job::LoadSchedule { force: false })
+        .expect("首次载入应当成功");
+    let first = schedule_event(&mut harness);
+    assert_eq!(first.week, 3, "默认显示当前周");
+    seen.lock().expect("lock").clear();
+
+    harness
+        .dispatch(Job::SetScheduleWeek {
+            week: 5,
+            reload: false,
+        })
+        .expect("记住周次应当成功");
+    assert!(harness.worker.pending_data.is_empty(), "不应排队载入");
+    assert!(seen.lock().expect("lock").is_empty(), "不应发出请求");
+    assert!(
+        harness.drain_events().is_empty(),
+        "只记周次不应发出任何事件"
+    );
+
+    // 之後的重載必須針對介面顯示的第 5 週。
+    harness
+        .dispatch(Job::LoadSchedule { force: false })
+        .expect("重新载入应当成功");
+    let reloaded = schedule_event(&mut harness);
+    assert_eq!(reloaded.week, 5, "重载应针对介面显示的周次");
+    assert_eq!(reloaded.total_weeks, 30);
 }
 
 /// 學期結束日涵蓋考試週與假期（考勤入口實測可到第 23 週）時，週次上限仍以
@@ -4043,7 +4111,10 @@ fn week_bound_does_not_shrink_when_paging_back_from_an_exam_week() {
 
     // 往回翻到最後一堂教學週：上限必須維持不變。
     harness
-        .dispatch(Job::SetScheduleWeek { week: 19 })
+        .dispatch(Job::SetScheduleWeek {
+            week: 19,
+            reload: true,
+        })
         .expect("切换周次应当成功");
     run_queued(&mut harness);
     let back = schedule_event(&mut harness);
@@ -4053,7 +4124,10 @@ fn week_bound_does_not_shrink_when_paging_back_from_an_exam_week() {
 
     // 上限未變，因此可以再翻回本週。
     harness
-        .dispatch(Job::SetScheduleWeek { week: 21 })
+        .dispatch(Job::SetScheduleWeek {
+            week: 21,
+            reload: true,
+        })
         .expect("切回本周应当成功");
     run_queued(&mut harness);
     let again = schedule_event(&mut harness);

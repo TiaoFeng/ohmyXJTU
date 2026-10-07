@@ -11,7 +11,7 @@
 //! 時間排序：同組內較早截止者在前、無截止時間者在最後，同鍵值再按課程、
 //! 標題、活動 ID 穩定排序。
 
-use chrono::{DateTime, FixedOffset, NaiveDateTime, TimeZone as _};
+use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, TimeZone as _};
 
 use crate::sites::lms::ActivityContent;
 use crate::tone::Tone;
@@ -219,8 +219,9 @@ fn sort_key(item: &HomeworkItem) -> (HomeworkGroup, u8, i64, &str, &str, &str) {
 
 /// 解析思源學堂的時間字串。
 ///
-/// 支援帶時區的 RFC3339、`YYYY-MM-DD HH:MM[:SS]`、`YYYY-MM-DDTHH:MM[:SS]`，
-/// 以及未帶時區但含小數秒的形態（`…:59.000`）。
+/// 支援帶時區的 RFC3339、`YYYY-MM-DD HH:MM[:SS]`、`YYYY-MM-DDTHH:MM[:SS]`、
+/// 只給日期的 `YYYY-MM-DD`（視為當日結束）以及未帶時區但含小數秒的形態
+/// （`…:59.000`）。
 /// 回傳的瞬間一律以校園時區（中國標準時間，+08:00）表示：帶時區者（如 API 的
 /// UTC `Z`／`+00:00`）先換算，未帶時區者視為 +08:00。排序與逾期判定使用絕對
 /// 瞬間（`timestamp()`／比較），不受顯示時區影響。
@@ -250,7 +251,13 @@ pub fn parse_time(value: Option<&str>) -> Option<DateTime<FixedOffset>> {
             return offset.from_local_datetime(&naive).single();
         }
     }
-    None
+    // 只給日期時視為當日結束（與 [`crate::domain::todo::parse_deadline_input`]
+    // 一致）。截止時間解析失敗會讓作業被當成「沒有截止時間」（不標逾期、排到
+    // 最後），是不可見的錯誤結論，因此寧可多接受一種寫法。
+    let date = NaiveDate::parse_from_str(value, "%Y-%m-%d").ok()?;
+    offset
+        .from_local_datetime(&date.and_hms_opt(23, 59, 59)?)
+        .single()
 }
 
 #[cfg(test)]

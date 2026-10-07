@@ -153,6 +153,11 @@ fn parses_lms_time_formats() {
         Some(offset)
     );
     assert!(parse_time(Some("2026-09-28T23:59:00")).is_some());
+    // 只給日期時視為當日結束（與 `todo::parse_deadline_input` 一致）。
+    assert_eq!(
+        parse_time(Some("2026-10-12")).map(|time| time.format("%Y-%m-%d %H:%M:%S").to_string()),
+        Some("2026-10-12 23:59:59".to_owned())
+    );
     assert_eq!(parse_time(Some("  ")), None);
     assert_eq!(parse_time(None), None);
     assert_eq!(parse_time(Some("看不懂的时间")), None);

@@ -76,7 +76,7 @@ pub fn run() -> AppResult<()> {
     loop_result.and(restore_result)
 }
 
-/// 安裝 panic hook：還原終端、輸出單行錯誤訊息後結束行程。
+/// 安裝 panic hook：還原終端、清掉暫存檔、輸出單行錯誤訊息後結束行程。
 ///
 /// 訊息不含 panic 內容（避免任何潛在敏感資料外洩），只保留發生位置；
 /// 任何執行緒 panic 都會終止行程，避免背景執行緒死亡後介面卡死。
@@ -91,6 +91,10 @@ pub fn install_panic_hook() {
             crossterm::event::DisableBracketedPaste,
             crossterm::cursor::Show
         );
+        // `exit` 會跳過 `main` 收尾的清理，因此在這裡補做一次：登入流程若正停在
+        // 驗證碼，磁碟上會留著 captcha.png，而 `PRIVACY.md` 承諾登入終態與結束時
+        // 一律刪除它。清理是 best-effort（不建立目錄、失敗忽略）。
+        crate::auth::captcha::cleanup_on_exit();
         let location = info
             .location()
             .map(|location| (location.file(), location.line()));

@@ -384,6 +384,23 @@ fn parses_user_id_from_loose_javascript_page() {
     assert_eq!(user_id_from_page(html), None);
 }
 
+/// 使用者資訊含代理對（emoji）時仍必須取得到 `user.id`。
+///
+/// 頁面以 UTF-16 跳脫表示非 BMP 字元（`\uD83D\uDE00`）；若解析器不組合代理對，
+/// 整段 `globalData` 會解析失敗，`user_id` 取不到，個人作業的提交查詢全部失敗
+/// 而顯示「待核实」。
+#[test]
+fn parses_user_id_when_the_page_contains_surrogate_pairs() {
+    let html = r#"<html><script>
+        var globalData = { user: { id: 5150, name: "\uD83D\uDE00 张三" }, dept: {} };
+    </script></html>"#;
+    assert_eq!(user_id_from_page(html).as_deref(), Some("5150"));
+
+    // 整段無法解析時改按 user/dept 邊界擷取：該路徑同樣要看得到代理對。
+    let html = r#"<script>var globalData = { flag: getFlag(), user: { id: 6, tag: "\uDE00" }, dept: {} };</script>"#;
+    assert_eq!(user_id_from_page(html).as_deref(), Some("6"));
+}
+
 #[test]
 fn post_login_rejects_maintenance_and_login_pages() {
     use std::sync::Arc;

@@ -291,7 +291,7 @@ fn refresh_keeps_flow_page() {
 /// 連續翻頁：目標頁以「使用者最後選定的頁碼」計算，而不是畫面上的舊頁。
 ///
 /// `Page::start_loading` 會保留舊資料，所以載入期間 `ready()` 仍是上一頁；
-/// 拿它計算會讓連按兩次 `n` 都算成同一頁，只前進一頁。
+/// 拿它計算會讓連按兩次 `]` 都算成同一頁，只前進一頁。
 #[test]
 fn flow_paging_counts_from_the_pending_page() {
     let (jobs, rx) = channel();
@@ -305,17 +305,17 @@ fn flow_paging_counts_from_the_pending_page() {
         total: 0,
     });
 
-    press(&mut app, &jobs, KeyCode::Char('n'));
+    press(&mut app, &jobs, KeyCode::Char(']'));
     assert!(matches!(rx.try_recv(), Ok(Job::LoadFlow { page: 2 })));
     assert_eq!(app.flow_pending_page, Some(2), "应记下待回的目标页码");
 
     // 第 2 頁還沒回來就再按一次：應以第 2 頁為基準前進到第 3 頁。
-    press(&mut app, &jobs, KeyCode::Char('n'));
+    press(&mut app, &jobs, KeyCode::Char(']'));
     assert!(matches!(rx.try_recv(), Ok(Job::LoadFlow { page: 3 })));
     assert_eq!(app.flow_pending_page, Some(3));
 
     // 往回一頁同樣以最後選定的頁碼為基準。
-    press(&mut app, &jobs, KeyCode::Char('p'));
+    press(&mut app, &jobs, KeyCode::Char('['));
     assert!(matches!(rx.try_recv(), Ok(Job::LoadFlow { page: 2 })));
 }
 
@@ -333,11 +333,41 @@ fn flow_paging_respects_bounds() {
     });
 
     // 已在第一頁，往上一頁不應送出任務。
-    press(&mut app, &jobs, KeyCode::Char('p'));
+    press(&mut app, &jobs, KeyCode::Char('['));
     assert!(rx.try_recv().is_err());
 
-    press(&mut app, &jobs, KeyCode::Char('n'));
+    press(&mut app, &jobs, KeyCode::Char(']'));
     assert!(matches!(rx.try_recv(), Ok(Job::LoadFlow { page: 2 })));
+}
+
+/// 考勤流水頁的 `[`／`]` 翻頁（與其他頁面統一）；`n`／`p` 已不再是翻頁鍵。
+#[test]
+fn bracket_keys_page_the_flow_on_attendance_page() {
+    use crate::domain::homework::HomeworkGroup;
+
+    let (jobs, rx) = channel();
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Attendance;
+    app.attendance = Page::Ready(crate::model::FlowData {
+        records: Vec::new(),
+        page: 1,
+        total_pages: 3,
+        total: 0,
+    });
+
+    press(&mut app, &jobs, KeyCode::Char(']'));
+    assert!(matches!(rx.try_recv(), Ok(Job::LoadFlow { page: 2 })));
+
+    // 翻頁不應動到作業分組（同一組按鍵在不同頁面有不同作用）。
+    assert_eq!(app.homework_group, HomeworkGroup::Unfinished);
+
+    // 舊的翻頁鍵不再作用：不翻頁、不改分組、不送任務。
+    press(&mut app, &jobs, KeyCode::Char('n'));
+    press(&mut app, &jobs, KeyCode::Char('p'));
+    assert!(rx.try_recv().is_err(), "n/p 不应再送出翻页任务");
+    assert_eq!(app.flow_pending_page, Some(2), "n/p 不应改变待回页码");
+    assert_eq!(app.homework_group, HomeworkGroup::Unfinished);
 }
 
 #[test]
@@ -783,7 +813,7 @@ fn bracket_keys_switch_homework_group_only_on_homework_page() {
 
 /// 課表頁的 `[`／`]` 切換週次：標題立即顯示目標週、內容進入載入中，
 /// 記下待回的目標週次（供 `event::apply_schedule` 丟棄遲到的舊週結果），
-/// 並送出 `SetScheduleWeek`；到邊界不動作。
+/// 並送出 `SetScheduleWeek`（`reload` 表示介面還需要該週資料）；到邊界不動作。
 #[test]
 fn bracket_keys_switch_schedule_week_on_schedule_page() {
     let (jobs, rx) = channel();
@@ -803,7 +833,10 @@ fn bracket_keys_switch_schedule_week_on_schedule_page() {
     assert!(app.schedule.is_loading(), "内容应进入加载中");
     assert!(matches!(
         rx.try_recv(),
-        Ok(Job::SetScheduleWeek { week: 4 })
+        Ok(Job::SetScheduleWeek {
+            week: 4,
+            reload: true
+        })
     ));
 
     press(&mut app, &jobs, KeyCode::Char('['));
@@ -811,7 +844,10 @@ fn bracket_keys_switch_schedule_week_on_schedule_page() {
     assert_eq!(app.schedule_pending_week, Some(3));
     assert!(matches!(
         rx.try_recv(),
-        Ok(Job::SetScheduleWeek { week: 3 })
+        Ok(Job::SetScheduleWeek {
+            week: 3,
+            reload: true
+        })
     ));
 
     // 邊界：第 1 週不再往前，最後一週不再往後。
@@ -822,6 +858,83 @@ fn bracket_keys_switch_schedule_week_on_schedule_page() {
     press(&mut app, &jobs, KeyCode::Char(']'));
     assert_eq!(app.schedule_week, Some(5), "最后一周不应再往后");
     assert!(rx.try_recv().is_err(), "边界不应送出任务");
+}
+
+/// 看過的週次：翻回去時直接顯示記憶體中的課表（不進載入中、不重查考勤），
+/// 但仍要通知工作者目前的週次（`reload: false`）——按 `r` 時送的是
+/// `LoadSchedule`，工作者只依自己的週次狀態決定要載入哪一週，不同步就會載入
+/// 上一次真正查詢過的那一週。
+#[test]
+fn switching_back_to_a_cached_week_shows_it_without_reloading() {
+    let (jobs, rx) = channel();
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Schedule;
+    app.schedule_week = Some(4);
+    app.schedule_total = Some(5);
+    app.schedule = Page::Ready(ScheduleData {
+        semester: "2026-2027-1".to_owned(),
+        week: 4,
+        total_weeks: 5,
+        ..ScheduleData::default()
+    });
+    app.store_schedule_week(&ScheduleData {
+        semester: "2026-2027-1".to_owned(),
+        week: 3,
+        total_weeks: 5,
+        notice: Some("第三周资料".to_owned()),
+        ..ScheduleData::default()
+    });
+
+    press(&mut app, &jobs, KeyCode::Char('['));
+    assert_eq!(app.schedule_week, Some(3));
+    assert_eq!(app.schedule_pending_week, Some(3));
+    assert!(!app.schedule.is_loading(), "命中快取不应进入加载中");
+    assert_eq!(
+        app.schedule.ready().and_then(|data| data.notice.as_deref()),
+        Some("第三周资料"),
+        "应直接显示该周的快取资料"
+    );
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(Job::SetScheduleWeek {
+            week: 3,
+            reload: false
+        })
+    ));
+}
+
+/// `r` 強制刷新：週快取作廢，之後翻回任何一週都會重新查詢。
+#[test]
+fn refresh_clears_the_schedule_week_cache() {
+    let (jobs, rx) = channel();
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.nav = NavItem::Schedule;
+    app.schedule_week = Some(4);
+    app.schedule_total = Some(5);
+    app.store_schedule_week(&ScheduleData {
+        week: 3,
+        total_weeks: 5,
+        ..ScheduleData::default()
+    });
+
+    press(&mut app, &jobs, KeyCode::Char('r'));
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(Job::LoadSchedule { force: true })
+    ));
+
+    // 快取已作廢：翻到第 3 週必須重新查詢。
+    press(&mut app, &jobs, KeyCode::Char('['));
+    assert!(app.schedule.is_loading(), "过期快取不应直接显示");
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(Job::SetScheduleWeek {
+            week: 3,
+            reload: true
+        })
+    ));
 }
 
 /// 思源學堂測試用活動。

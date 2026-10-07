@@ -40,6 +40,10 @@ pub(super) fn ensure_page(app: &mut App, jobs: &Sender<Job>) {
 pub(super) fn request(app: &mut App, jobs: &Sender<Job>, nav: NavItem, force: bool) {
     match nav {
         NavItem::Schedule => {
+            if force {
+                // 強制刷新：週快取一律作廢（之後翻回任何一週都會重新查詢）。
+                app.clear_schedule_weeks();
+            }
             app.schedule.start_loading("正在加载课表与考勤记录…");
             let _ = jobs.send(Job::LoadSchedule { force });
         }
@@ -206,6 +210,18 @@ pub(super) fn escape(app: &mut App) {
     }
 }
 
+/// `[`／`]`：依目前頁面切換課表週次、考勤流水頁碼或分組。
+///
+/// 這三個動作在各頁面上都是「上一頁／下一頁」，因此共用同一組按鍵；分派由
+/// 這裡負責（handler 只把按鍵轉成這個呼叫）。
+pub(super) fn bracket(app: &mut App, jobs: &Sender<Job>, delta: i32) {
+    match app.nav {
+        NavItem::Schedule => change_schedule_week(app, jobs, delta),
+        NavItem::Attendance => change_flow_page(app, jobs, delta),
+        NavItem::Homework | NavItem::Lms => change_group(app, delta),
+    }
+}
+
 /// 切換分組（`[`／`]`）：作業頁切作業分組、思源學堂活動頁切活動分組。
 pub(super) fn change_group(app: &mut App, delta: i32) {
     if app.nav == NavItem::Homework {
@@ -244,15 +260,22 @@ pub(super) fn set_task_sort(app: &mut App, mode: SortMode) {
     });
 }
 
-/// 切換課表週次（`[`／`]`）：標題立即顯示目標週，內容待新資料抵達。
+/// 切換課表週次（`[`／`]`）。
 ///
-/// 與切換課程／活動同理，舊週的課程不屬於目標週：清空內容（`reset_loading`）
-/// 而不是保留顯示，避免使用者以為看到的是目標週的課表。到邊界（第 1 週、
-/// 最後一週）時不動作。
+/// 該週已載入過（`App::schedule_weeks`）時直接顯示快取：翻週不再重查考勤，
+/// 也不會再閃一次「載入中」——使用者要重新查詢時按 `r`（那時整個週快取作廢）。
+/// 沒有快取時與切換課程／活動同理，舊週的課程不屬於目標週：清空內容
+/// （`reset_loading`）而不是保留顯示，避免使用者以為看到的是目標週的課表。
+/// 到邊界（第 1 週、最後一週）時不動作。
 ///
 /// 目標週次另記在 `schedule_pending_week`：已在執行中的舊週載入不會被作廢
 /// （切週指令要等它回報後才生效），其結果必須由 `event::apply_schedule`
 /// 依此欄位丟棄。
+///
+/// 兩種情況都要把週次告訴工作者（`SetScheduleWeek`）：按 `r` 時送的是
+/// `LoadSchedule`——工作者只能依自己的週次狀態決定要載入哪一週，快取命中的
+/// 翻週若不同步，`r` 就會載入上一次真正查詢過的那一週。`reload` 指出介面是否
+/// 還需要該週資料（快取命中時不需要）。
 pub(super) fn change_schedule_week(app: &mut App, jobs: &Sender<Job>, delta: i32) {
     if app.nav != NavItem::Schedule {
         return;
@@ -268,9 +291,15 @@ pub(super) fn change_schedule_week(app: &mut App, jobs: &Sender<Job>, delta: i32
     let target = u32::try_from(target).unwrap_or(1);
     app.schedule_week = Some(target);
     app.schedule_pending_week = Some(target);
-    app.schedule
-        .reset_loading(format!("正在加载第 {target} 周…"));
-    let _ = jobs.send(Job::SetScheduleWeek { week: target });
+    let reload = !app.show_cached_schedule_week(target);
+    if reload {
+        app.schedule
+            .reset_loading(format!("正在加载第 {target} 周…"));
+    }
+    let _ = jobs.send(Job::SetScheduleWeek {
+        week: target,
+        reload,
+    });
 }
 
 /// 詳情內容的捲動指令（PgUp／PgDn／Home／End）。
@@ -313,10 +342,10 @@ fn flow_page(app: &App) -> u32 {
         .unwrap_or(1)
 }
 
-/// 考勤流水分頁（`n`／`p`）；超出頁數範圍時不動作。
+/// 考勤流水分頁（`[`／`]`）；超出頁數範圍時不動作。
 ///
 /// 目標頁以 [`flow_page`] 為準：載入期間 `ready()` 仍是上一頁，拿它計算會讓
-/// 連續按鍵（例如連按兩次 `n`）都算成同一頁而只前進一次。目標頁另記在
+/// 連續按鍵（例如連按兩次 `]`）都算成同一頁而只前進一次。目標頁另記在
 /// `App::flow_pending_page`：已在執行中的舊頁載入不會被作廢（翻頁指令要等它
 /// 回報後才生效），其結果必須由 `event::apply_flow` 依此欄位丟棄。
 pub(super) fn change_flow_page(app: &mut App, jobs: &Sender<Job>, delta: i32) {

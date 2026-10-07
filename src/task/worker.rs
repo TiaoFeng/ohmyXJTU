@@ -547,7 +547,7 @@ impl Worker {
             Job::ChangePassphrase { old, new } => self.change_passphrase(&old, &new),
             Job::SetAccessPolicy(policy) => self.set_access_policy(policy),
             Job::SetHomeworkTerm { term } => self.set_homework_term(&term),
-            Job::SetScheduleWeek { week } => self.set_schedule_week(week),
+            Job::SetScheduleWeek { week, reload } => self.set_schedule_week(week, reload),
             Job::AcceptAgreement => self.accept_agreement(),
             Job::CancelLogin => self.cancel_login(),
             Job::Shutdown => Ok(()),

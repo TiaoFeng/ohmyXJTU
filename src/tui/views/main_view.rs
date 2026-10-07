@@ -219,7 +219,7 @@ fn scrollable_panel(app: &App) -> bool {
 fn page_hints(app: &App) -> Vec<String> {
     let mut hints = Vec::new();
     match app.nav {
-        NavItem::Attendance => hints.push("n/p 翻页".to_owned()),
+        NavItem::Attendance => hints.push("[ ] 翻页".to_owned()),
         NavItem::Homework => {
             // 任務頁的互動模式（搜尋／多選）會接管大部分按鍵，提示以當下可用者為主。
             if app.task_page.search.is_some() {

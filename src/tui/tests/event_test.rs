@@ -246,7 +246,10 @@ fn stale_schedule_event_is_discarded_while_a_week_switch_is_pending() {
     assert_eq!(app.schedule_pending_week, Some(6));
     assert!(matches!(
         rx.try_recv(),
-        Ok(Job::SetScheduleWeek { week: 6 })
+        Ok(Job::SetScheduleWeek {
+            week: 6,
+            reload: true
+        })
     ));
     assert!(app.schedule.is_loading());
 
@@ -265,6 +268,33 @@ fn stale_schedule_event_is_discarded_while_a_week_switch_is_pending() {
         app.schedule.ready().map(|data| data.semester.as_str()),
         Some("目标周资料")
     );
+}
+
+/// 套用的課表事件會存入週快取：翻回同一週時直接顯示、不重查考勤。
+#[test]
+fn applied_schedule_event_fills_the_week_cache() {
+    let mut app = app();
+    app.nav = NavItem::Schedule;
+    apply_schedule_event(&mut app, 5, "第五周资料");
+    apply_schedule_event(&mut app, 6, "第六周资料");
+    assert_eq!(app.schedule_week, Some(6));
+
+    // 翻回第 5 週：內容直接來自快取（不進載入中），只通知工作者週次已改變。
+    let (jobs, rx) = channel();
+    controller::change_schedule_week(&mut app, &jobs, -1);
+    assert_eq!(app.schedule_week, Some(5));
+    assert!(!app.schedule.is_loading(), "命中快取不应进入加载中");
+    assert_eq!(
+        app.schedule.ready().map(|data| data.semester.as_str()),
+        Some("第五周资料")
+    );
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(Job::SetScheduleWeek {
+            week: 5,
+            reload: false
+        })
+    ));
 }
 
 /// 沒有待回週次時，週次與上次顯示不同仍必須套用。
@@ -344,7 +374,7 @@ fn stale_flow_event_is_discarded_while_a_page_switch_is_pending() {
     apply_flow_event(&mut app, 1);
     assert!(app.attendance.ready().is_some());
 
-    // 使用者按 `n`：送出翻頁任務並記下目標頁。
+    // 使用者按 `]`：送出翻頁任務並記下目標頁。
     let (jobs, rx) = channel();
     controller::change_flow_page(&mut app, &jobs, 1);
     assert_eq!(app.flow_pending_page, Some(2));

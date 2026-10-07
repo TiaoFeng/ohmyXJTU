@@ -837,7 +837,7 @@ fn handle_main(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
         }
     }
     // 其餘組合鍵一律忽略：以下都是主畫面的單鍵操作（`o` 開網頁、`r` 刷新、
-    // `s` 選學期、`n`／`p` 翻頁、`h`／`l`／`j`／`k` 移動…），帶 Ctrl／Alt 的
+    // `s` 選學期、`[`／`]` 翻頁、`h`／`l`／`j`／`k` 移動…），帶 Ctrl／Alt 的
     // 誤觸會造成意外副作用（`Ctrl+O` 會開啟瀏覽器）。
     if has_command_modifier(&key) {
         return;
@@ -886,25 +886,11 @@ fn handle_main(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
             let nav = app.nav;
             controller::request(app, jobs, nav, true);
         }
-        // 課表頁切換週次；作業頁與思源學堂活動層切換分組。
-        KeyCode::Char('[') => {
-            if app.nav == NavItem::Schedule {
-                controller::change_schedule_week(app, jobs, -1);
-            } else {
-                controller::change_group(app, -1);
-            }
-        }
-        KeyCode::Char(']') => {
-            if app.nav == NavItem::Schedule {
-                controller::change_schedule_week(app, jobs, 1);
-            } else {
-                controller::change_group(app, 1);
-            }
-        }
+        // 課表頁切換週次、考勤流水頁翻頁；作業頁與思源學堂活動層切換分組。
+        KeyCode::Char('[') => controller::bracket(app, jobs, -1),
+        KeyCode::Char(']') => controller::bracket(app, jobs, 1),
         KeyCode::Char('o') => controller::open_activity(app, jobs),
         KeyCode::Char('s') => controller::open_term_picker(app),
-        KeyCode::Char('n') => controller::change_flow_page(app, jobs, 1),
-        KeyCode::Char('p') => controller::change_flow_page(app, jobs, -1),
         // 詳情內容偏長時可捲動（作業頁詳情與思源學堂活動詳情）。
         KeyCode::PageUp => controller::scroll_detail(app, controller::DetailScroll::PageUp),
         KeyCode::PageDown => controller::scroll_detail(app, controller::DetailScroll::PageDown),

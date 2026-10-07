@@ -1174,6 +1174,12 @@ pub struct App {
     /// 使用者從未切週且學期已結束／尚未開始時會回應正規化後的週次（與上次顯示
     /// 的週次不同），拿它比對會誤丟合法結果。收到相符的資料後即清空。
     pub schedule_pending_week: Option<u32>,
+    /// 已載入過的各週課表（記憶體快取）。
+    ///
+    /// 翻週時直接顯示，不重複查詢該週考勤，也不再閃一次「載入中」（使用者要
+    /// 重新查詢按 `r`，那時整個快取作廢）。以學期為界：換帳號時清空，切換訪問
+    /// 模式則保留（資料仍屬於同一份課表）。
+    schedule_weeks: HashMap<u32, ScheduleData>,
     /// 作業頁。
     pub homework: Page<HomeworkData>,
     /// 作業頁目前分組。
@@ -1184,7 +1190,7 @@ pub struct App {
     pub term_options: Vec<TermCode>,
     /// 考勤流水頁。
     pub attendance: Page<FlowData>,
-    /// 使用者以 `n`／`p` 指定、但尚未收到該頁資料的目標頁碼。
+    /// 使用者以 `[`／`]` 指定、但尚未收到該頁資料的目標頁碼。
     ///
     /// 與課表的 [`Self::schedule_pending_week`] 同理，但有兩個用途：翻頁指令
     /// 要等已在執行中的舊頁載入回報後才生效，那筆結果必須據此丟棄；而翻頁的
@@ -1247,6 +1253,7 @@ impl App {
             schedule_week: None,
             schedule_total: None,
             schedule_pending_week: None,
+            schedule_weeks: HashMap::new(),
             homework: Page::Idle,
             homework_group: HomeworkGroup::Unfinished,
             task_page: TaskPageState::default(),
@@ -1417,6 +1424,7 @@ impl App {
             self.schedule_week = None;
             self.schedule_total = None;
             self.schedule_pending_week = None;
+            self.schedule_weeks.clear();
             self.homework = Page::Idle;
             // 學期選擇器的選項來自舊帳號的作業清單：一併清空（否則換帳號後
             // 立刻按 `s` 會看到上一個帳號的學期）。
@@ -1619,6 +1627,31 @@ impl App {
                 _ => *self.course_state.selected_mut() = Some(index),
             },
         }
+    }
+
+    /// 記住一週的課表（由課表事件寫入），供之後翻回該週時直接顯示。
+    pub fn store_schedule_week(&mut self, data: &ScheduleData) {
+        self.schedule_weeks.insert(data.week, data.clone());
+    }
+
+    /// 顯示記憶體中該週的課表並回到第一列；回傳是否命中快取。
+    ///
+    /// 未命中時呼叫端要清空內容並請工作者載入該週（見
+    /// `controller::change_schedule_week`）。更新時間刻意不動：這份資料是先前
+    /// 抓回來的，標題上的「更新于」仍必須是那一次的結果。
+    pub fn show_cached_schedule_week(&mut self, week: u32) -> bool {
+        let Some(data) = self.schedule_weeks.get(&week).cloned() else {
+            return false;
+        };
+        self.schedule_total = Some(data.total_weeks);
+        self.schedule = Page::Ready(data);
+        self.schedule_state.select(Some(0));
+        true
+    }
+
+    /// 丟棄所有週快取（使用者按 `r` 強制重新查詢時）。
+    pub fn clear_schedule_weeks(&mut self) {
+        self.schedule_weeks.clear();
     }
 
     /// 將指定位置標記為失敗（錯誤只影響對應頁面）。

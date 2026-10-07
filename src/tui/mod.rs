@@ -145,7 +145,7 @@ fn main_loop(
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     // 背景工作執行緒已結束：之後不會再有任何事件，頁面會永遠停在
                     // 「載入中」且按鍵無效。明確提示使用者退出重啟，而不是靜默停滯。
-                    app.set_message("后台任务已停止，请按 q 退出后重新启动");
+                    app.set_error_message("后台任务已停止，请按 q 退出后重新启动");
                     break;
                 }
             }

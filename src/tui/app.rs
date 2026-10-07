@@ -17,6 +17,7 @@ use crate::session::{AccessMode, SiteKind};
 use crate::sites::lms::{LmsActivity, LmsCourse};
 use crate::task::{FailedTarget, HomeworkIssue};
 use crate::text::{MAX_INLINE_CHARS, sanitize_inline};
+use crate::tone::Tone;
 use crate::tui::text::{InputLine, TextArea};
 
 /// 訊息保留時間。
@@ -1200,8 +1201,11 @@ pub struct App {
     pub site_modes: HashMap<SiteKind, AccessMode>,
     /// 等待主迴圈以系統瀏覽器開啟的網址。
     pub pending_open: Option<String>,
-    /// 暫時訊息（自動過期）。
-    pub message: Option<(String, Instant)>,
+    /// 目前的暫時訊息（文字、建立時間、語意色；自動過期）。
+    ///
+    /// 語意色由 [`Self::set_message`]／[`Self::set_error_message`] 決定，底欄
+    /// 據此上色：一般提示不該長得像錯誤（見 `views::main_view::draw_footer`）。
+    pub message: Option<(String, Instant, Tone)>,
     /// 是否結束程式。
     pub quit: bool,
     /// 動畫影格計數（每幀遞增；供載入指示燈動畫使用）。
@@ -1712,10 +1716,26 @@ impl App {
     ///
     /// 訊息可能內插伺服器回傳的文字（例如「…：{err}」）：一律經
     /// [`sanitize_inline`] 清理並限制長度，避免控制字元或超長文字進入畫面。
+    ///
+    /// 語意色預設為「一般提示」；**失敗與異常狀態**請用
+    /// [`Self::set_error_message`]，否則底欄會用一般提示色顯示錯誤訊息。
     pub fn set_message(&mut self, message: impl Into<String>) {
+        self.store_message(message, Tone::Info);
+    }
+
+    /// 顯示錯誤訊息（底欄以紅色粗體呈現）。
+    ///
+    /// 只用於「失敗／異常狀態」：登入失敗、載入失敗、憑證或任務保存失敗、
+    /// 會話停用、背景執行緒結束等。操作結果與一般提示走 [`Self::set_message`]。
+    pub fn set_error_message(&mut self, message: impl Into<String>) {
+        self.store_message(message, Tone::Danger);
+    }
+
+    /// 清理後存入訊息（唯一的寫入點）。
+    fn store_message(&mut self, message: impl Into<String>, tone: Tone) {
         let message: String = message.into();
         let message = sanitize_inline(&message, MAX_INLINE_CHARS);
-        self.message = Some((message, Instant::now()));
+        self.message = Some((message, Instant::now(), tone));
     }
 
     /// 清除暫時訊息。
@@ -1733,7 +1753,7 @@ impl App {
 
     /// 清除過期的訊息。
     pub fn expire_message(&mut self) {
-        if let Some((_, at)) = &self.message
+        if let Some((_, at, _)) = &self.message
             && at.elapsed() >= MESSAGE_TTL
         {
             self.message = None;
@@ -1742,7 +1762,14 @@ impl App {
 
     /// 目前要顯示的訊息。
     pub fn message_text(&self) -> Option<&str> {
-        self.message.as_ref().map(|(message, _)| message.as_str())
+        self.message
+            .as_ref()
+            .map(|(message, _, _)| message.as_str())
+    }
+
+    /// 目前訊息的語意色（沒有訊息時為 `None`）。
+    pub fn message_tone(&self) -> Option<Tone> {
+        self.message.as_ref().map(|(_, _, tone)| *tone)
     }
 
     /// 切換到下一個頁面。

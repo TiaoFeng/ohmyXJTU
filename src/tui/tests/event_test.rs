@@ -1174,9 +1174,14 @@ fn disabled_session_returns_to_the_unlock_screen() {
     assert!(
         app.message
             .as_ref()
-            .is_some_and(|(text, _)| text.contains("会话已停用")),
+            .is_some_and(|(text, _, _)| text.contains("会话已停用")),
         "应提示用户重新解锁：{:?}",
         app.message
+    );
+    assert_eq!(
+        app.message_tone(),
+        Some(crate::tone::Tone::Danger),
+        "停用会话属于异常状态，应以错误色呈现"
     );
 }
 

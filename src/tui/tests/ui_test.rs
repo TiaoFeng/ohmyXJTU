@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
-use ratatui::style::Color;
+use ratatui::style::{Color, Modifier};
 
 use crate::config::AccessPolicy;
 use crate::domain::attendance_match::LessonAttendance;
@@ -2400,6 +2400,46 @@ fn homework_detail_combines_media_and_link_hint() {
 }
 
 /// 底欄在詳情可捲動時提示捲動鍵（終端夠寬時才看得見完整提示）。
+/// 底欄訊息依語意上色：一般提示（例如「登录成功」）不該長得像錯誤。
+#[test]
+fn footer_colors_messages_by_tone() {
+    /// 底欄第一個非空白格（訊息一律以一個空白起頭）。
+    fn footer_cell(terminal: &TestBackend) -> ratatui::buffer::Cell {
+        let buffer = terminal.buffer();
+        let row = HEIGHT - 1;
+        (0..WIDTH)
+            .map(|x| &buffer[(x, row)])
+            .find(|cell| cell.symbol() != " ")
+            .expect("底栏应有訊息")
+            .clone()
+    }
+
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+
+    // 一般提示：提示色、不是紅色。
+    app.set_message("登录成功");
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let cell = footer_cell(terminal.backend());
+    assert_eq!(cell.symbol(), "登");
+    assert_eq!(cell.fg, THEME.blue, "一般提示应为提示色：{cell:?}");
+    assert_ne!(cell.fg, THEME.red, "一般提示不得显示为错误色");
+
+    // 錯誤訊息：紅色粗體。
+    app.set_error_message("作业失败：网络连接失败");
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let cell = footer_cell(terminal.backend());
+    assert_eq!(cell.fg, THEME.red, "错误应以错误色呈现：{cell:?}");
+    assert!(
+        cell.modifier.contains(Modifier::BOLD),
+        "错误应加粗强调：{cell:?}"
+    );
+}
+
 #[test]
 fn footer_hints_scrolling_when_detail_is_scrollable() {
     let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00+08:00").expect("固定时间");

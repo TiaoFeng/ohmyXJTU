@@ -214,7 +214,7 @@ fn apply_session_disabled(app: &mut App, message: String) {
     let mut form = FormState::unlock();
     form.error = Some(message);
     app.set_screen(Screen::Unlock(form));
-    app.set_message("会话已停用：请输入加密口令重新解锁");
+    app.set_error_message("会话已停用：请输入加密口令重新解锁");
 }
 
 fn apply_schedule(app: &mut App, data: ScheduleData) {
@@ -448,7 +448,7 @@ fn apply_credential_save_failed(app: &mut App, message: String) {
         form.busy = false;
         form.error = Some(message.clone());
     }
-    app.set_message(message);
+    app.set_error_message(message);
 }
 
 /// 修改口令成功：離開處理中狀態並回到設定選單。
@@ -535,7 +535,7 @@ fn apply_failure(
                 // 資料任務失敗：只標記對應頁面，不影響根畫面。
             }
         }
-        app.set_message(text);
+        app.set_error_message(text);
     }
     // 登入嘗試若以失敗收場（包含自動重登連開始都做不到，例如離線），
     // 覆蓋層必須離開「正在登入」：進度畫面只接受 q，否則使用者會被

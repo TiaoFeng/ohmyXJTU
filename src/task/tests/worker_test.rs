@@ -861,7 +861,9 @@ fn connection_errors_are_retried_before_reporting_failure() {
     assert_eq!(
         events
             .iter()
-            .filter(|event| matches!(event, Event::Notice(message) if message.contains("正在重试")))
+            .filter(
+                |event| matches!(event, Event::Warning(message) if message.contains("正在重试"))
+            )
             .count(),
         MAX_ATTEMPTS as usize - 1,
         "每次重试都应有提示"
@@ -935,7 +937,7 @@ fn a_rejection_matching_the_probe_falls_back_to_webvpn() {
     assert!(
         events.iter().any(|event| matches!(
             event,
-            Event::Notice(message) if message.contains("已改用 WebVPN 重试")
+            Event::Warning(message) if message.contains("已改用 WebVPN 重试")
         )),
         "应提示已改走 WebVPN：{events:?}"
     );
@@ -968,7 +970,7 @@ fn a_business_rejection_without_a_probe_signal_does_not_fall_back() {
     assert!(
         events.iter().all(|event| !matches!(
             event,
-            Event::Notice(message) if message.contains("已改用 WebVPN")
+            Event::Warning(message) if message.contains("已改用 WebVPN")
         )),
         "不得回退：{events:?}"
     );
@@ -1123,7 +1125,9 @@ fn preload_login_failure_reports_without_queueing_any_load() {
     assert_eq!(
         events
             .iter()
-            .filter(|event| matches!(event, Event::Notice(message) if message.contains("正在重试")))
+            .filter(
+                |event| matches!(event, Event::Warning(message) if message.contains("正在重试"))
+            )
             .count(),
         MAX_ATTEMPTS as usize - 1,
         "登入失败也应有自动重试提示"
@@ -3882,9 +3886,14 @@ fn forced_refresh_keeps_the_selected_week() {
 /// 學期已結束時明確切週：補查該週課表與考勤（預設載入仍不查詢）。
 #[test]
 fn explicit_week_after_semester_end_loads_that_week() {
+    use chrono::Datelike as _;
+
     let seen = Arc::new(Mutex::new(Vec::new()));
     let today = chrono::Local::now().date_naive();
-    let start = (today - chrono::Duration::days(90)).to_string();
+    // 開始日取週一（校曆常態）：非週一會多出一句「週次可能整體偏移」的提示，
+    // 那不是本測試要驗的東西（另見 `schedule_warns_when_the_semester_starts_mid_week`）。
+    let monday = today - chrono::Duration::days(i64::from(today.weekday().num_days_from_monday()));
+    let start = (monday - chrono::Duration::days(13 * 7)).to_string();
     let end = (today - chrono::Duration::days(3)).to_string();
     let mut harness = harness(schedule_site(Arc::clone(&seen), start, end, 1));
     harness.login_both_sites();
@@ -3913,6 +3922,37 @@ fn explicit_week_after_semester_end_loads_that_week() {
     assert!(schedule.notice.is_none(), "明确切周不再提示学期已结束");
     assert_eq!(schedule.lessons.len(), 1, "补查的课表应有第 3 周的课程");
     assert_eq!(schedule.total_weeks, 30);
+}
+
+/// 學期開始日不是週一時，課表頁必須明說「週次與日期可能整體偏移」。
+///
+/// 週次與日期都以學期開始日為第 1 週第 1 天錨定（參考實作錨定週一）；校曆從
+/// 週一開始時兩者等價。若不是，偏移是無聲的系統性錯誤（每堂課的日期與週次
+/// 一起位移），因此在提示列明說——不改錨點語意（改了會讓所有既有日期位移），
+/// 只讓不對勁看得見。
+#[test]
+fn schedule_warns_when_the_semester_starts_mid_week() {
+    use chrono::Datelike as _;
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let today = chrono::Local::now().date_naive();
+    // 刻意用非週一的開始日（本週週一的前一天）。
+    let monday = today - chrono::Duration::days(i64::from(today.weekday().num_days_from_monday()));
+    let start = (monday - chrono::Duration::days(1)).to_string();
+    let end = (today + chrono::Duration::days(90)).to_string();
+    let mut harness = harness(schedule_site(Arc::clone(&seen), start, end, 1));
+    harness.login_both_sites();
+
+    harness
+        .dispatch(Job::LoadSchedule { force: false })
+        .expect("课表加载应当成功");
+
+    let schedule = schedule_event(&mut harness);
+    let notice = schedule.notice.as_deref().unwrap_or_default();
+    assert!(
+        notice.contains("不是周一"),
+        "开始日非周一时必须提示偏移风险：{notice}"
+    );
 }
 
 /// 同一週次重複切換不重複查詢。
@@ -4525,7 +4565,7 @@ fn opening_homework_activity_without_usable_course_falls_back_to_home() {
             .iter()
             .filter(|event| matches!(
                 event,
-                Event::Notice(message) if message.contains("无法确定作业所属课程")
+                Event::Warning(message) if message.contains("无法确定作业所属课程")
             ))
             .count(),
         2,
@@ -4608,7 +4648,7 @@ fn opening_lesson_without_player_url_falls_back_to_home() {
     assert!(
         events.iter().any(|event| matches!(
             event,
-            Event::Notice(message) if message.contains("无法获取播放地址")
+            Event::Warning(message) if message.contains("无法获取播放地址")
         )),
         "取不到播放地址时应告知用户"
     );
@@ -4647,7 +4687,7 @@ fn opening_lesson_with_an_external_player_url_falls_back_to_home() {
     assert!(
         events.iter().any(|event| matches!(
             event,
-            Event::Notice(message)
+            Event::Warning(message)
                 if message.contains("无法获取播放地址") && message.contains("example.com")
         )),
         "应说明被拒绝的主机：{events:?}"
@@ -4794,7 +4834,7 @@ fn connection_errors_do_not_replay_the_sms_send() {
     assert!(
         !events
             .iter()
-            .any(|event| matches!(event, Event::Notice(message) if message.contains("正在重试"))),
+            .any(|event| matches!(event, Event::Warning(message) if message.contains("正在重试"))),
         "不应有自动重试提示：{events:?}"
     );
     assert!(
@@ -5533,7 +5573,7 @@ fn unlock_tightens_loose_vault_permissions() {
     assert!(
         harness.saw(|event| matches!(
             event,
-            Event::Notice(message) if message.contains("权限")
+            Event::Warning(message) if message.contains("权限")
         )),
         "应提示凭证文件权限过宽"
     );
@@ -6804,7 +6844,7 @@ fn homework_continues_with_the_remembered_term_when_attendance_times_out() {
     assert!(
         events.iter().any(|event| matches!(
             event,
-            Event::Notice(text) if text.contains("考勤系统暂时不可用")
+            Event::Warning(text) if text.contains("考勤系统暂时不可用")
         )),
         "应提示考勤故障与学期来源"
     );
@@ -7124,7 +7164,7 @@ fn config_rebuild_notice_is_emitted_after_unlock() {
     let notice = events
         .iter()
         .position(|event| {
-            matches!(event, Event::Notice(message) if message.contains("配置文件已损坏并重建"))
+            matches!(event, Event::Warning(message) if message.contains("配置文件已损坏并重建"))
         })
         .expect("重建提示应在解锁后送达");
     assert!(notice > ready, "提示必须晚于 VaultReady 才有底栏可显示");
@@ -7145,7 +7185,7 @@ fn config_rebuild_notice_is_absent_without_a_rebuild() {
 
     assert!(
         !events.iter().any(|event| {
-            matches!(event, Event::Notice(message) if message.contains("配置文件已损坏并重建"))
+            matches!(event, Event::Warning(message) if message.contains("配置文件已损坏并重建"))
         }),
         "未发生重建时不应出现提示"
     );
@@ -7301,7 +7341,7 @@ fn changing_the_passphrase_is_refused_when_the_task_file_is_unreadable() {
     assert!(
         events.iter().any(|event| matches!(
             event,
-            Event::Notice(message) if message.contains("任务文件无法读取")
+            Event::Warning(message) if message.contains("任务文件无法读取")
         )),
         "解锁应提示任务文件无法读取：{events:?}"
     );

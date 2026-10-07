@@ -255,7 +255,7 @@ impl Worker {
                     Ok(phone) => Some(phone),
                     Err(err) => {
                         // 取不到手機號時明確告知，不靜默顯示成「沒有手機號」。
-                        self.emit(Event::Notice(format!("无法获取短信验证手机号：{err}")));
+                        self.emit(Event::Warning(format!("无法获取短信验证手机号：{err}")));
                         None
                     }
                 };

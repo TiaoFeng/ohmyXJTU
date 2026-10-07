@@ -205,7 +205,7 @@ fn unreadable_task_file_is_reported_without_blocking() {
     assert!(
         events.iter().any(|event| matches!(
             event,
-            Event::Notice(message) if message.contains("任务文件无法读取")
+            Event::Warning(message) if message.contains("任务文件无法读取")
         )),
         "应提示任务文件无法读取：{events:?}"
     );
@@ -234,7 +234,7 @@ fn a_second_init_that_fails_does_not_let_later_saves_overwrite_the_file() {
     assert!(
         events.iter().any(|event| matches!(
             event,
-            Event::Notice(message) if message.contains("任务文件无法读取")
+            Event::Warning(message) if message.contains("任务文件无法读取")
         )),
         "再次初始化应提示任务文件无法读取：{events:?}"
     );

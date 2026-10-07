@@ -929,14 +929,29 @@ fn access_policy_event_updates_state() {
 #[test]
 fn notice_event_only_sets_message() {
     let mut app = app();
+    apply_event(&mut app, Event::Notice("已记住学期 2026-2027-1".to_owned()));
+    assert_eq!(app.message_text(), Some("已记住学期 2026-2027-1"));
+    assert_eq!(
+        app.message_tone(),
+        Some(crate::tone::Tone::Info),
+        "一般回报应用提示色"
+    );
+    assert!(app.homework.is_idle());
+}
+
+/// 警告事件：以警告色呈現（與提示色、錯誤色區分），同樣不動任何頁面。
+#[test]
+fn warning_event_sets_message_with_warning_tone() {
+    let mut app = app();
     apply_event(
         &mut app,
-        Event::Notice("已跳过 2 项无法解析的思源学堂数据".to_owned()),
+        Event::Warning("已跳过 2 项无法解析的思源学堂数据".to_owned()),
     );
     assert_eq!(
         app.message_text(),
         Some("已跳过 2 项无法解析的思源学堂数据")
     );
+    assert_eq!(app.message_tone(), Some(crate::tone::Tone::Warning));
     assert!(app.homework.is_idle());
 }
 
@@ -1010,7 +1025,7 @@ fn login_error_message_is_sanitized() {
     assert!(!error.contains('\u{7}'), "控制字元应被移除：{error:?}");
     assert!(
         error.chars().count() <= MAX_INLINE_CHARS,
-        "超长讯息应被截断：{} 字元",
+        "超长訊息应被截断：{} 字元",
         error.chars().count()
     );
 
@@ -1032,7 +1047,7 @@ fn login_error_message_is_sanitized() {
             assert!(!message.contains('\u{1b}'), "控制字元应被移除：{message:?}");
             assert!(
                 message.chars().count() <= MAX_INLINE_CHARS,
-                "超长讯息应被截断：{} 字元",
+                "超长訊息应被截断：{} 字元",
                 message.chars().count()
             );
         }
@@ -1984,7 +1999,7 @@ fn tasks_event_replaces_the_list_and_anchors_the_selection() {
     assert_eq!(
         app.task_page_group_counts().get(HomeworkGroup::Completed),
         1,
-        "分组计数应包含自订义任务"
+        "分组计数应包含自訂義任务"
     );
 }
 

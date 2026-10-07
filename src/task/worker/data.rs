@@ -4,7 +4,7 @@
 //! API 取資料並轉成介面模型。學期判定所需的考勤查詢（`Worker::attendance_term`）
 //! 也在這裡，供作業載入共用。
 
-use chrono::{Local, NaiveDate};
+use chrono::{Datelike as _, Local, NaiveDate, Weekday};
 
 use crate::domain::semester::TermCode;
 use crate::domain::{attendance_match, schedule};
@@ -152,7 +152,7 @@ impl Worker {
         // `merge_courses` 的課名順序。
         lessons.sort_by_key(|lesson| (lesson.date, lesson.start_section, lesson.end_section));
 
-        let notice = schedule_notice(truncated, records.len(), skipped_records);
+        let notice = schedule_notice(truncated, records.len(), skipped_records, cache.start);
 
         Ok(ScheduleData {
             semester: cache.label,
@@ -224,7 +224,7 @@ impl Worker {
         // 跳過的流水不會出現在清單裡，但 `total` 仍含它們：不提示的話，使用者
         // 只會看到頁碼對不上而不知原因。
         if page_data.skipped > 0 {
-            self.emit(Event::Notice(format!(
+            self.emit(Event::Warning(format!(
                 "已跳过 {} 条无法解析的考勤流水",
                 page_data.skipped
             )));
@@ -312,7 +312,7 @@ impl Worker {
                     Ok(player_url) => url = player_url,
                     Err(err) if err.needs_relogin() => return Err(err),
                     Err(err) => {
-                        self.emit(Event::Notice(format!(
+                        self.emit(Event::Warning(format!(
                             "无法获取播放地址，已改为打开思源学堂首页：{err}"
                         )));
                     }
@@ -320,7 +320,7 @@ impl Worker {
             }
             ActivityKind::Homework => match course_id.and_then(lms::course_homework_url) {
                 Some(homework_url) => url = homework_url,
-                None => self.emit(Event::Notice(
+                None => self.emit(Event::Warning(
                     "无法确定作业所属课程，已改为打开思源学堂首页".to_owned(),
                 )),
             },
@@ -365,8 +365,21 @@ fn off_session_schedule(
 ///
 /// 兩種情形都不該靜默：使用者看到的考勤狀態是「比對後的結果」，資料少了就會
 /// 有課程顯示「待核实」，沒有提示的話會被誤認為真的沒有記錄。
-fn schedule_notice(truncated: bool, kept: usize, skipped: usize) -> Option<String> {
+fn schedule_notice(
+    truncated: bool,
+    kept: usize,
+    skipped: usize,
+    start: NaiveDate,
+) -> Option<String> {
     let mut parts = Vec::new();
+    // 週次與日期都以「學期開始日」為第 1 週第 1 天錨定（與參考實作不同，它錨定
+    // 週一）。校曆從週一開始時兩者等價；若不是，日期與週次會整體偏移——這是
+    // 無聲的系統性錯誤，所以在提示列明說，讓使用者一眼看出不對勁。
+    if start.weekday() != Weekday::Mon {
+        parts.push(format!(
+            "学期开始日（{start}）不是周一：周次与日期可能整体偏移，请反馈"
+        ));
+    }
     if truncated {
         parts.push(format!(
             "考勤记录超过分页上限，仅比对前 {kept} 条，部分课程可能显示「待核实」"

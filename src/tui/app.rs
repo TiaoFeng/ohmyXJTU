@@ -1734,6 +1734,14 @@ impl App {
         self.store_message(message, Tone::Danger);
     }
 
+    /// 顯示警告訊息（底欄以警告色呈現）。
+    ///
+    /// 用於「需要注意但不影響繼續使用」的情形：功能降級、資料被跳過、某個
+    /// 子功能不可用。使用者要求的操作真的失敗時走 [`Self::set_error_message`]。
+    pub fn set_warning_message(&mut self, message: impl Into<String>) {
+        self.store_message(message, Tone::Warning);
+    }
+
     /// 清理後存入訊息（唯一的寫入點）。
     fn store_message(&mut self, message: impl Into<String>, tone: Tone) {
         let message: String = message.into();

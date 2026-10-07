@@ -473,7 +473,7 @@ impl Worker {
                         && err.is_connection_error() =>
                 {
                     attempt += 1;
-                    self.emit(Event::Notice(retry_notice(&what, attempt)));
+                    self.emit(Event::Warning(retry_notice(&what, attempt)));
                 }
                 Err(err) => {
                     // 登入步驟重試到最後仍失敗：流程不可能再有進展，作廢它，否則
@@ -772,7 +772,7 @@ impl Worker {
                 .as_mut()
                 .is_some_and(|session| session.fallback_to_webvpn(site));
         if switched {
-            self.emit(Event::Notice(format!(
+            self.emit(Event::Warning(format!(
                 "直连不可用，已改用 WebVPN 重试：{site}"
             )));
         }
@@ -823,7 +823,7 @@ impl Worker {
             && let Some(key) = job.data_key()
             && let Some(attempt) = self.retries.try_consume(&key)
         {
-            self.emit(Event::Notice(retry_notice(&job_what(&job), attempt)));
+            self.emit(Event::Warning(retry_notice(&job_what(&job), attempt)));
             self.run_data_job(job);
             return;
         }

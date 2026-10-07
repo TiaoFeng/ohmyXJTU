@@ -90,6 +90,7 @@ pub(crate) fn apply_event(app: &mut App, event: Event, jobs: &Sender<Job>) {
         Event::PassphraseUpdated => apply_passphrase_updated(app),
         Event::AccessPolicyUpdated(policy) => apply_access_policy_updated(app, policy),
         Event::Notice(message) => app.set_message(message),
+        Event::Warning(message) => app.set_warning_message(message),
         Event::Failed {
             what,
             message,

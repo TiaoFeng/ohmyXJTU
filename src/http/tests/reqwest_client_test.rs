@@ -145,6 +145,47 @@ fn redirect_chain_shares_a_single_timeout_budget() {
     );
 }
 
+/// 未指定逾時的請求同樣受整條鏈的預算約束。
+///
+/// 這是修復前真正失效的情形：生產碼只有探測請求會顯式指定逾時（而且它不跟隨
+/// 重定向），其餘請求的 `timeout` 都是 `None`。若預算只認 `request.timeout`，
+/// 慢速重導鏈仍會「每跳各吃一次預設逾時」。這裡把客戶端預設逾時縮到 400ms，
+/// 讓這個情形也能在毫秒級驗證。
+#[test]
+fn redirect_chain_budget_applies_without_an_explicit_timeout() {
+    const DELAY: Duration = Duration::from_millis(120);
+    const DEFAULT: Duration = Duration::from_millis(400);
+
+    let (base, hits) = serve(12, |_index, base| {
+        thread::sleep(DELAY);
+        redirect_response(302, &format!("{base}/next"))
+    });
+
+    let started = Instant::now();
+    let err = ReqwestClient::new_insecure_with_timeout_for_tests("ohmyXJTU-test", DEFAULT)
+        .expect("建立 HTTP 客户端")
+        .send(HttpRequest::get(format!("{base}/start")))
+        .expect_err("整条链超出默认逾时预算时必须逾时");
+    let elapsed = started.elapsed();
+
+    assert!(
+        matches!(
+            err,
+            AppError::Network {
+                kind: NetworkKind::Timeout,
+                ..
+            }
+        ),
+        "应是逾时而非重定向次数过多：{err:?}"
+    );
+    assert!(elapsed < DELAY * 4, "不应跟完整条链：{elapsed:?}");
+    assert!(
+        hits.load(Ordering::SeqCst) < 6,
+        "超出预算后不应继续送请求：{}",
+        hits.load(Ordering::SeqCst)
+    );
+}
+
 /// 不檢查重定向目的地的客戶端（本機假伺服器用；信任規則由純函式測試涵蓋）。
 fn insecure_client() -> ReqwestClient {
     ReqwestClient::new_insecure_for_tests("ohmyXJTU-test").expect("建立 HTTP 客户端")

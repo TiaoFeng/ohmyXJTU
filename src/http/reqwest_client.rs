@@ -47,7 +47,6 @@ const CROSS_ORIGIN_SAFE_HEADERS: [&str; 3] = ["user-agent", "accept", "accept-la
 #[derive(Debug, Clone)]
 pub struct ReqwestClient {
     client: Client,
-    user_agent: String,
     /// 重定向目的主機的信任判斷（測試可放寬為本機假伺服器）。
     trusted_host: fn(&str) -> bool,
 }
@@ -71,14 +70,8 @@ impl ReqwestClient {
         let user_agent = user_agent.into();
         Ok(Self {
             client: build_client(&user_agent)?,
-            user_agent,
             trusted_host,
         })
-    }
-
-    /// 客戶端使用的 User-Agent。
-    pub fn user_agent(&self) -> &str {
-        &self.user_agent
     }
 
     /// 送出請求，並依需求逐跳跟隨重定向。
@@ -97,7 +90,6 @@ impl ReqwestClient {
         builder = match &request.body {
             Some(Body::Form(fields)) => builder.form(fields),
             Some(Body::Json(value)) => builder.json(value),
-            Some(Body::Bytes(bytes)) => builder.body(bytes.clone()),
             None => builder,
         };
 

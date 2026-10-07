@@ -145,15 +145,6 @@ impl Config {
         io::write_private_atomic(&path, &bytes)
     }
 
-    /// 更新訪問策略並寫回檔案。
-    pub fn set_access_policy(&mut self, policy: AccessPolicy) -> AppResult<()> {
-        if self.access_policy != policy {
-            self.access_policy = policy;
-            self.save()?;
-        }
-        Ok(())
-    }
-
     /// 是否已同意指定版本的协议（版本字串需完全一致）。
     pub fn privacy_accepted(&self, version: &str) -> bool {
         self.privacy_version.as_deref() == Some(version)

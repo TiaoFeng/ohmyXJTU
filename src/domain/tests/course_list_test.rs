@@ -108,7 +108,6 @@ fn no_current_term_keeps_flat_original_order() {
             row,
             CourseRow::Course {
                 historical: false,
-                unknown: false,
                 ..
             }
         )),

@@ -33,8 +33,6 @@ pub enum Body {
     Form(Vec<(String, String)>),
     /// `application/json`。
     Json(serde_json::Value),
-    /// 原始位元組。
-    Bytes(Vec<u8>),
 }
 
 /// 一次 HTTP 請求。
@@ -130,6 +128,9 @@ impl HttpRequest {
     }
 
     /// 讀取表單欄位（僅 `Body::Form`）。
+    ///
+    /// 僅供測試斷言送出的欄位。
+    #[cfg(test)]
     pub fn form_field(&self, name: &str) -> Option<&str> {
         match &self.body {
             Some(Body::Form(fields)) => fields
@@ -163,7 +164,8 @@ pub struct HttpResponse {
 }
 
 impl HttpResponse {
-    /// 建立回應（主要供測試使用）。
+    /// 建立回應（僅供測試：生產回應一律來自客戶端）。
+    #[cfg(test)]
     pub fn new(status: u16, final_url: impl Into<String>, body: impl Into<Vec<u8>>) -> Self {
         Self {
             status,

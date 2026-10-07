@@ -18,8 +18,6 @@ pub enum CourseRow<'a> {
         course: &'a LmsCourse,
         /// 是否為非當前學期的歷史課程。
         historical: bool,
-        /// 是否無法解析學期。
-        unknown: bool,
     },
 }
 
@@ -44,7 +42,6 @@ pub fn course_rows(courses: &[LmsCourse], current: Option<TermCode>) -> Vec<Cour
                 course_index,
                 course,
                 historical: false,
-                unknown: false,
             })
             .collect();
     };
@@ -65,7 +62,6 @@ pub fn course_rows(courses: &[LmsCourse], current: Option<TermCode>) -> Vec<Cour
                     course_index,
                     course,
                     historical: false,
-                    unknown: false,
                 }),
         );
     }
@@ -89,7 +85,6 @@ pub fn course_rows(courses: &[LmsCourse], current: Option<TermCode>) -> Vec<Cour
                     course_index,
                     course,
                     historical: true,
-                    unknown: false,
                 }),
         );
     }
@@ -108,7 +103,6 @@ pub fn course_rows(courses: &[LmsCourse], current: Option<TermCode>) -> Vec<Cour
                     course_index,
                     course,
                     historical: true,
-                    unknown: true,
                 }),
         );
     }

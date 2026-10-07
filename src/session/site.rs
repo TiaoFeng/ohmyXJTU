@@ -247,7 +247,8 @@ fn is_login_host(host: &str) -> bool {
 
 /// 路徑與查詢是否指向登入入口。
 fn is_login_path(path: &str, query: Option<&str>) -> bool {
-    path.contains("/cas/login")
+    // 路徑常數與 `auth::login` 共用：兩處判定（登入頁、登入態失效）必須一致。
+    path.contains(crate::auth::login::CAS_LOGIN_PATH)
         || path == "/login"
         || path.starts_with("/login/")
         || query.is_some_and(|query| query.contains("cas_login"))

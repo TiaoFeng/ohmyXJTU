@@ -13,6 +13,8 @@
 //! - `data`：課表、考勤流水與思源學堂瀏覽。
 //! - `homework`：作業載入的步進狀態機。
 //! - `cache`：思源學堂課程／活動快取。
+//! - `preload`：解鎖後的主動登入與四頁預載。
+//! - `timing`：載入分階段計時（`OHMYXJTU_TIMING=1` 時才輸出報告）。
 //!
 //! 自訂義任務不在這裡：它們在專屬的任務服務執行緒上（見 `crate::task::tasks`），
 //! 否則網路請求會把「新增任務」這種純本機操作也拖慢。
@@ -374,7 +376,8 @@ impl Worker {
     /// 執行控制任務；回傳是否收到結束指令。
     fn handle_control(&mut self, job: Job) -> bool {
         let shutdown = matches!(job, Job::Shutdown);
-        let what = job.label();
+        // 標籤要在把任務交出去之前取（`dispatch_control` 取得所有權）。
+        let what = job_what(&job);
         let target = failed_target_of(&job);
         let site = self.login_site_of(&job);
         let resource = resource_of(&job);
@@ -392,11 +395,7 @@ impl Worker {
             //（介面要留在輸入畫面），不另外彈出一般失敗。
             if !matches!(err, AppError::VerificationRetry(_)) {
                 self.emit(Event::Failed {
-                    what: if what.is_empty() {
-                        "操作".to_owned()
-                    } else {
-                        what
-                    },
+                    what,
                     message: err.to_string(),
                     target,
                     site,
@@ -432,13 +431,8 @@ impl Worker {
         if matches!(job, Job::LoadHomework { .. }) {
             self.finish_timing();
         }
-        let what = job.label();
         self.emit(Event::Failed {
-            what: if what.is_empty() {
-                "操作".to_owned()
-            } else {
-                what
-            },
+            what: job_what(job),
             message: err.to_string(),
             target: failed_target_of(job),
             site,
@@ -468,7 +462,7 @@ impl Worker {
     /// 不重試（見 [`AppError::is_connection_error`]）；有可見副作用的任務
     /// 也不重試（見 [`Job::is_replayable`]）。
     fn dispatch_control(&mut self, job: Job) -> AppResult<()> {
-        let what = job.label();
+        let what = job_what(&job);
         let mut attempt: u8 = 1;
         loop {
             match self.dispatch_control_once(job.clone()) {
@@ -479,10 +473,7 @@ impl Worker {
                         && err.is_connection_error() =>
                 {
                     attempt += 1;
-                    self.emit(Event::Notice(format!(
-                        "{}失败，正在重试（{attempt}/{MAX_ATTEMPTS}）…",
-                        if what.is_empty() { "操作" } else { &what }
-                    )));
+                    self.emit(Event::Notice(retry_notice(&what, attempt)));
                 }
                 Err(err) => {
                     // 登入步驟重試到最後仍失敗：流程不可能再有進展，作廢它，否則
@@ -832,10 +823,7 @@ impl Worker {
             && let Some(key) = job.data_key()
             && let Some(attempt) = self.retries.try_consume(&key)
         {
-            self.emit(Event::Notice(format!(
-                "{}失败，正在重试（{attempt}/{MAX_ATTEMPTS}）…",
-                job.label()
-            )));
+            self.emit(Event::Notice(retry_notice(&job_what(&job), attempt)));
             self.run_data_job(job);
             return;
         }
@@ -877,6 +865,23 @@ fn is_recoverable(err: &AppError) -> bool {
         return false;
     }
     !matches!(err, AppError::Network { kind, .. } if kind.is_connection_level())
+}
+
+/// 失敗訊息與提示的主詞：任務標籤，沒有標籤時用「操作」。
+///
+/// 只有 `Job::Shutdown` 沒有標籤；回退字串只寫一次，避免每個呼叫端各自處理。
+fn job_what(job: &Job) -> String {
+    let label = job.label();
+    if label.is_empty() {
+        "操作".to_owned()
+    } else {
+        label
+    }
+}
+
+/// 連線層失敗後的重試提示（控制任務與資料任務共用同一種格式）。
+fn retry_notice(what: &str, attempt: u8) -> String {
+    format!("{what}失败，正在重试（{attempt}/{MAX_ATTEMPTS}）…")
 }
 
 #[cfg(test)]

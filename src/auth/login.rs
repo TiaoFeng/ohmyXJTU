@@ -30,8 +30,16 @@ use super::html;
 use super::rsa;
 use super::state::{AccountType, LoginReply, MfaFlow};
 
-/// 統一認證入口主機。
-pub const LOGIN_HOST: &str = "https://login.xjtu.edu.cn";
+/// 統一認證入口主機（**URL 前綴**，與 `session::site` 的同名常數不同：那裡是
+/// 裸主機名，用於比對 `final_url` 的主機）。
+pub const LOGIN_BASE_URL: &str = "https://login.xjtu.edu.cn";
+
+/// 統一認證的登入路徑。
+///
+/// 登入頁判定有兩處：這裡（`LoginDriver::new` 據此判斷「尚未登入」）與
+/// `session::site::is_login_path`（判斷登入態是否失效）。兩者必須一致，
+/// 因此共用同一個常數。
+pub const CAS_LOGIN_PATH: &str = "/cas/login";
 
 /// MFA 偵測端點。
 const MFA_DETECT_URL: &str = "https://login.xjtu.edu.cn/cas/mfa/detect";
@@ -113,7 +121,7 @@ impl LoginDriver {
         let initial_safety_verify = html::is_safety_verify_page(&text);
         let already_authenticated = if !initial_safety_verify
             && execution.is_none()
-            && !response.final_url.contains("/cas/login")
+            && !response.final_url.contains(CAS_LOGIN_PATH)
         {
             Some(response.clone())
         } else {
@@ -245,7 +253,7 @@ impl LoginDriver {
         let flow = context.flow;
         let state = context.state.clone();
         let mut url = Url::parse(&format!(
-            "{LOGIN_HOST}/cas/{}/initByType/securephone",
+            "{LOGIN_BASE_URL}/cas/{}/initByType/securephone",
             flow.path_segment()
         ))
         .map_err(|err| AppError::protocol(format!("无法构造手机号查询地址：{err}")))?;

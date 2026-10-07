@@ -1741,6 +1741,17 @@ impl App {
         self.message = Some((message, Instant::now(), tone));
     }
 
+    /// 回報瀏覽器開啟結果。
+    ///
+    /// 成功只是一則提示（使用者還要在瀏覽器裡自行登入），失敗則是真的失敗——
+    /// 兩者必須用不同的語意色，否則「打开网页失败」會長得像一般提示。
+    pub fn report_open_result(&mut self, error: Option<String>) {
+        match error {
+            None => self.set_message("已在浏览器打开：如需登录请在浏览器完成登录"),
+            Some(error) => self.set_error_message(format!("打开网页失败：{error}")),
+        }
+    }
+
     /// 清除暫時訊息。
     ///
     /// 使用者按下任何按鍵時呼叫（見 `handler::handle_key`）：底部提示列會立刻

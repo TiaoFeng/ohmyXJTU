@@ -151,11 +151,11 @@ fn main_loop(
             }
         }
 
-        // 事件要求的瀏覽器開啟：在這裡執行，錯誤以狀態訊息回報。
+        // 事件要求的瀏覽器開啟：在這裡執行，結果以狀態訊息回報（失敗為錯誤色）。
         if let Some(url) = app.pending_open.take() {
             match crate::system::browser::open_url(&url) {
-                Ok(()) => app.set_message("已在浏览器打开：如需登录请在浏览器完成登录"),
-                Err(err) => app.set_message(format!("打开网页失败：{err}")),
+                Ok(()) => app.report_open_result(None),
+                Err(err) => app.report_open_result(Some(err.to_string())),
             }
         }
 

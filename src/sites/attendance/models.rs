@@ -5,8 +5,8 @@ use serde::Deserialize;
 use crate::tone::Tone;
 
 use super::super::{
-    date_string, lenient_flag, optional_string_or_number, string_lenient, string_or_number,
-    u32_lenient, u32_or_string,
+    date_string, lenient_flag, optional_string_lenient, optional_string_or_number_lenient,
+    string_lenient, string_or_number, u32_lenient, u32_or_string,
 };
 
 /// 考勤狀態。
@@ -96,8 +96,11 @@ pub struct Semester {
     pub semester_name: String,
     /// 學期開始日期（`YYYY-MM-DD`）。
     pub start_date: String,
-    /// 學期結束日期（`YYYY-MM-DD`）。
-    #[serde(default, deserialize_with = "optional_string_or_number")]
+    /// 學期結束日期（`YYYY-MM-DD`；選填，型別異常時視為缺漏）。
+    ///
+    /// 只用於「學期是否已結束」的判斷：讀不出來時不啟用該判斷，不該讓整個
+    /// 學期查詢失敗（那會連帶毀掉課表頁）。
+    #[serde(default, deserialize_with = "optional_string_lenient")]
     pub end_date: Option<String>,
 }
 
@@ -162,6 +165,11 @@ pub struct TimetableCourse {
 /// `records_between` 逐項解析、跳過讀不出來的記錄（見
 /// [`crate::sites::parse_lenient`]），因此「本程式沒有用到的欄位」不該成為整筆
 /// 記錄被丟棄的理由。
+///
+/// **比對用的地點與教師刻意維持嚴格**（型別異常即丟棄整筆）：比對時任一方缺值
+/// 視為「不比對該欄位」（見 `attendance_match::matches_optional`），因此把它們
+/// 寬容化成 `None` 會讓一筆讀不出地點的記錄**匹配任何同日期同節次的課**，把
+/// 「待核实」變成假的「正常」——丟掉整筆才是安全的方向。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WaterRecord {
@@ -188,8 +196,8 @@ pub struct WaterRecord {
     /// 上課日期（解析時正規化為 `YYYY-MM-DD`；格式無法解讀時該筆記錄會被跳過）。
     #[serde(deserialize_with = "date_string")]
     pub attendance_date: String,
-    /// 所屬學期識別碼。
-    #[serde(default, deserialize_with = "optional_string_or_number")]
+    /// 所屬學期識別碼（本程式不以此欄位判斷任何事；型別異常時視為缺漏）。
+    #[serde(default, deserialize_with = "optional_string_or_number_lenient")]
     pub semester_id: Option<String>,
 }
 
@@ -207,11 +215,11 @@ pub struct FlowRecord {
     /// 流水識別碼（本程式不以此欄位判斷任何事；讀不出來時為空字串）。
     #[serde(default, deserialize_with = "string_lenient")]
     pub id: String,
-    /// 打卡地點。
-    #[serde(default)]
+    /// 打卡地點（純展示；型別異常時只損失該欄位）。
+    #[serde(default, deserialize_with = "optional_string_lenient")]
     pub classroom_name: Option<String>,
-    /// 打卡時間。
-    #[serde(default)]
+    /// 打卡時間（純展示；型別異常時只損失該欄位）。
+    #[serde(default, deserialize_with = "optional_string_lenient")]
     pub collect_time: Option<String>,
     /// 是否落在某堂課的考勤範圍內。
     ///

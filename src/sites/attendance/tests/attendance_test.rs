@@ -475,7 +475,8 @@ fn flow_page_tolerates_loosely_typed_and_unused_fields() {
                 "rows": [
                     {"id": 1, "effective": true, "classroomName": "主楼A101"},
                     // `id` 是物件：本程式不以識別碼判斷任何事，仍保留這筆。
-                    {"id": {"unexpected": true}, "effective": "yes"},
+                    // `collectTime` 是數字：純展示欄位，型別異常只損失該欄位。
+                    {"id": {"unexpected": true}, "effective": "yes", "collectTime": 123},
                     "not an object"
                 ]
             }
@@ -490,6 +491,10 @@ fn flow_page_tolerates_loosely_typed_and_unused_fields() {
     assert_eq!(page.records[0].id, "1");
     assert_eq!(page.records[1].id, "", "读不出来的识别码视为空");
     assert!(page.records[1].effective, "isEffective 之外的字段不受影响");
+    assert_eq!(
+        page.records[1].collect_time, None,
+        "型别异常的打卡时间只损失该字段，不丢掉整笔流水"
+    );
     assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
@@ -497,6 +502,9 @@ fn flow_page_tolerates_loosely_typed_and_unused_fields() {
 ///
 /// 比對以日期字串全等為鍵：分隔符一變（`2026/10/07`）就會全數失配，每一堂已過
 /// 的課都變成「待核实」。無法解讀的日期則由 `parse_lenient` 跳過並計數。
+///
+/// 形狀必須是 4-2-2 位數字：chrono 的 `%Y` 只要求「一位以上數字」，
+/// `09/01/26` 會被讀成公元 9 年——一筆看似有效卻荒謬的記錄，比讀不出來更糟。
 #[test]
 fn normalizes_attendance_dates_and_skips_unreadable_ones() {
     use crate::http::fake::json;
@@ -506,14 +514,16 @@ fn normalizes_attendance_dates_and_skips_unreadable_ones() {
             "code": 0,
             "message": "ok",
             "data": {
-                "total": 3,
+                "total": 4,
                 "rows": [
                     {
                         "resultId": 1,
                         "startSection": 1,
                         "endSection": 2,
                         "attendanceStatus": "NORMAL",
-                        "attendanceDate": "2026/09/01"
+                        "attendanceDate": "2026/09/01",
+                        // 純展示的學期識別碼：型別異常時只損失該欄位。
+                        "semesterId": {"unexpected": true}
                     },
                     {
                         "resultId": 2,
@@ -528,6 +538,13 @@ fn normalizes_attendance_dates_and_skips_unreadable_ones() {
                         "endSection": 2,
                         "attendanceStatus": "NORMAL",
                         "attendanceDate": "下周一"
+                    },
+                    {
+                        "resultId": 4,
+                        "startSection": 1,
+                        "endSection": 2,
+                        "attendanceStatus": "NORMAL",
+                        "attendanceDate": "09/01/26"
                     }
                 ]
             }
@@ -540,10 +557,17 @@ fn normalizes_attendance_dates_and_skips_unreadable_ones() {
     let batch = api.records_between(start, end).expect("查询应成功");
 
     assert_eq!(batch.records.len(), 2);
-    assert_eq!(batch.skipped, 1, "无法解读的日期应被跳过并计数");
+    assert_eq!(
+        batch.skipped, 2,
+        "无法解读的日期与形状不符的日期都应被跳过并计数"
+    );
     assert_eq!(
         batch.records[0].attendance_date, "2026-09-01",
         "斜杠应被正规化"
+    );
+    assert_eq!(
+        batch.records[0].semester_id, None,
+        "型别异常的学期识别码视为缺漏，不影响整笔记录"
     );
     assert_eq!(
         batch.records[1].attendance_date, "2026-09-02",

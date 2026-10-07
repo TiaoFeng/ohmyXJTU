@@ -163,11 +163,34 @@ where
     normalize_date(&raw).ok_or_else(|| serde::de::Error::custom("日期格式无法识别"))
 }
 
-/// 把日期字串正規化為 `YYYY-MM-DD`（同時驗證日期本身合法）。
-fn normalize_date(raw: &str) -> Option<String> {
+/// 把日期字串解析為日期（正規化分隔符並驗證形狀）。
+///
+/// 接受 `-` 與 `/` 分隔、允許前後空白；**形狀必須是 4-2-2 位數字**——chrono 的
+/// `%Y` 只要求「一位以上數字」，`09/01/26` 會被讀成公元 9 年，變成一筆看似有效
+/// 卻荒謬的記錄（比讀不出來更糟：它會參與比對、也可能讓學期起點跑到兩千年前）。
+pub(crate) fn parse_date_lenient(raw: &str) -> Option<chrono::NaiveDate> {
     let normalized = raw.trim().replace('/', "-");
-    let date = chrono::NaiveDate::parse_from_str(&normalized, "%Y-%m-%d").ok()?;
-    Some(date.format("%Y-%m-%d").to_string())
+    let mut parts = normalized.split('-');
+    let (year, month, day) = (parts.next()?, parts.next()?, parts.next()?);
+    if parts.next().is_some() {
+        return None;
+    }
+    let shaped = [year, month, day];
+    if shaped[0].len() != 4 || shaped[1].len() != 2 || shaped[2].len() != 2 {
+        return None;
+    }
+    if !shaped
+        .iter()
+        .all(|part| part.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return None;
+    }
+    chrono::NaiveDate::parse_from_str(&normalized, "%Y-%m-%d").ok()
+}
+
+/// 把日期字串正規化為 `YYYY-MM-DD`。
+fn normalize_date(raw: &str) -> Option<String> {
+    parse_date_lenient(raw).map(|date| date.format("%Y-%m-%d").to_string())
 }
 
 /// 缺欄位時回傳 `None`，型別不符時才報錯的可選字串。

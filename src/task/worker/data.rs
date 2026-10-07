@@ -41,13 +41,17 @@ impl Worker {
                 let session = self.session_mut()?;
                 AttendanceApi::new(session).current_semester()?
             };
+            // 學期日期與考勤記錄共用同一套日期正規化（見
+            // [`crate::sites::parse_date_lenient`]）：伺服器改以 `2026/09/07`
+            // 回傳時，`start_date` 不該讓整頁失敗（比「全數待核实」更糟），
+            // `end_date` 也不該靜默失效（那會關掉「已結束」的判斷）。
             let start = parse_date(&semester.start_date)?;
             // `end_date` 為選填：缺失或無法解析時不啟用「已結束」判斷（不讓整個
             // 頁面因此失敗），但可解析時一定以它為準。
             let end = semester
                 .end_date
                 .as_deref()
-                .and_then(|raw| NaiveDate::parse_from_str(raw.trim(), "%Y-%m-%d").ok());
+                .and_then(crate::sites::parse_date_lenient);
             let term = semester.term_name();
             let label = semester.display_label();
             // 記錄本會話得知的學期，供思源學堂課程分區使用（不重複查詢考勤）。
@@ -376,8 +380,8 @@ fn schedule_notice(truncated: bool, kept: usize, skipped: usize) -> Option<Strin
     (!parts.is_empty()).then(|| parts.join("；"))
 }
 
-/// 考勤學期的開始日期（`YYYY-MM-DD`）。
+/// 考勤學期的開始日期（接受 `-` 與 `/` 分隔；訊息不含欄位值）。
 pub(super) fn parse_date(value: &str) -> AppResult<NaiveDate> {
-    NaiveDate::parse_from_str(value.trim(), "%Y-%m-%d")
-        .map_err(|_| AppError::protocol("学期开始日期格式无法识别（应为 YYYY-MM-DD）"))
+    crate::sites::parse_date_lenient(value)
+        .ok_or_else(|| AppError::protocol("学期开始日期格式无法识别（应为 YYYY-MM-DD）"))
 }

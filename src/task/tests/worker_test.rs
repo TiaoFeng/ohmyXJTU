@@ -3291,6 +3291,67 @@ fn schedule_in_session_matches_attendance_without_notice() {
     );
 }
 
+/// 學期日期同樣接受 `-` 與 `/` 分隔（與考勤記錄共用同一套正規化）。
+///
+/// `startDate` 原本是嚴格解析：伺服器改以 `2026/09/07` 回傳時，整頁課表會直接
+/// 失敗——比「全數待核实」更糟；`endDate` 解析失敗則會靜默關掉「已結束」的判斷。
+#[test]
+fn semester_dates_accept_slashes() {
+    let today = chrono::Local::now().date_naive();
+    let (start, day_of_week) = semester_fixture_meeting_today(today, 3);
+    let start = start.replace('-', "/");
+    let end = (today + chrono::Duration::days(90))
+        .format("%Y/%m/%d")
+        .to_string();
+    let mut harness = harness(move |request: &HttpRequest| {
+        let url = request.url.clone();
+        if url.ends_with("/timetable/semesters") {
+            return Ok(json(serde_json::json!({ "code": 0, "data": [{
+                "semesterId": "s-1",
+                "academicYear": "2026-2027",
+                "semesterName": "第一学期",
+                "startDate": start.clone(),
+                "endDate": end.clone(),
+            }]})));
+        }
+        if url.contains("/timetable/weekly") {
+            return Ok(json(serde_json::json!({ "code": 0, "data": { "courses": [{
+                "courseName": "线性代数",
+                "teacherName": "张老师",
+                "classroomName": "主楼A101",
+                "dayOfWeek": day_of_week,
+                "startSection": 1,
+                "endSection": 2,
+                "weekRanges": "1-30",
+            }]}})));
+        }
+        if url.contains("attendance-records") {
+            return Ok(json(serde_json::json!({ "code": 0, "data": {
+                "rows": [],
+                "total": 0,
+            }})));
+        }
+        panic!("未预期的请求：{url}");
+    });
+    harness.login_both_sites();
+
+    harness
+        .dispatch(Job::LoadSchedule { force: false })
+        .expect("斜线日期不得让整页失败");
+
+    let schedule = harness
+        .drain_events()
+        .into_iter()
+        .find_map(|event| match event {
+            Event::Schedule(data) => Some(*data),
+            _ => None,
+        })
+        .expect("应发出课表事件");
+    assert_eq!(schedule.week, 3, "周次仍应正确计算");
+    assert_eq!(schedule.lessons.len(), 1, "课程应照常载入");
+    assert!(schedule.notice.is_none(), "不得出现解析失败提示");
+}
+
 /// 讀不出來的考勤記錄與課程只跳過該筆，並在課表頁提示筆數。
 ///
 /// 修復前是整批嚴格解析：一筆 `resultId` 型別異常的記錄或一門缺 `dayOfWeek`

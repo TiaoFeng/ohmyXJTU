@@ -1,6 +1,6 @@
 //! 以 `reqwest` 實作的 HTTP 客戶端。
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use reqwest::blocking::Client;
 use reqwest::redirect::Policy;
@@ -130,14 +130,26 @@ impl ReqwestClient {
         let mut headers = request.headers.clone();
         let mut url = request.url.clone();
         let mut hops = 0_usize;
+        // 逾時是**整條請求**的預算，不是每一跳各算一次：逐跳各自吃滿逾時的話，
+        // 一條十跳的慢速重導鏈最壞會拖上「逾時 × 10」，而工作執行緒在這段期間
+        // 無法處理任何控制任務（取消登入、結束、設定），使用者看到的就是卡死。
+        let deadline = request.timeout.map(|timeout| Instant::now() + timeout);
 
         loop {
+            if let Some(deadline) = deadline
+                && Instant::now() >= deadline
+            {
+                return Err(AppError::network_kind(
+                    NetworkKind::Timeout,
+                    "请求超时（重定向链未在时限内完成）",
+                ));
+            }
             let response = self.send_once(&HttpRequest {
                 method,
                 url: url.clone(),
                 headers: headers.clone(),
                 body: body.clone(),
-                timeout: request.timeout,
+                timeout: remaining_timeout(deadline),
                 follow_redirects: false,
             })?;
 
@@ -182,6 +194,14 @@ impl HttpClient for ReqwestClient {
 /// 重定向目的主機是否可接受。
 fn is_trusted_redirect_host(host: &str) -> bool {
     webvpn::is_school_host(host) || host.eq_ignore_ascii_case(webvpn::WEBVPN_HOST)
+}
+
+/// 下一跳還剩多少逾時預算（沒有設定逾時時為 `None`）。
+///
+/// 呼叫端已先確認「還沒到截止時間」，因此回傳值必定大於零；`saturating_*`
+/// 只是防禦（時鐘不會倒退，但沒必要讓這裡成為 panic 的來源）。
+fn remaining_timeout(deadline: Option<Instant>) -> Option<Duration> {
+    deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()))
 }
 
 /// 跨來源重定向時可保留的標頭。

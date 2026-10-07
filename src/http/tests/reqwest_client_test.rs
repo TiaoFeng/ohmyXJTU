@@ -9,7 +9,7 @@ use std::net::TcpListener;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use url::Url;
 
@@ -103,6 +103,46 @@ fn ok_response(body: &str) -> Vec<u8> {
 
 fn client() -> ReqwestClient {
     ReqwestClient::new("ohmyXJTU-test").expect("建立 HTTP 客户端")
+}
+
+/// 逾時是整條請求的預算，不是每一跳各算一次。
+///
+/// 逐跳各自吃一次逾時的話，慢速重導鏈最壞會拖上「逾時 × 跳數」，而工作執行緒
+/// 在這段期間無法處理任何控制任務（取消登入、結束、設定），使用者看到的就是
+/// 卡死。這裡每一跳都慢但都在單跳逾時之內：修復前會一路跟完十跳才以「重定向
+/// 次數過多」失敗，修復後會很快用完預算並回報逾時。
+#[test]
+fn redirect_chain_shares_a_single_timeout_budget() {
+    const DELAY: Duration = Duration::from_millis(120);
+    const TIMEOUT: Duration = Duration::from_millis(400);
+
+    let (base, hits) = serve(12, |_index, base| {
+        thread::sleep(DELAY);
+        redirect_response(302, &format!("{base}/next"))
+    });
+
+    let started = Instant::now();
+    let err = insecure_client()
+        .send(HttpRequest::get(format!("{base}/start")).timeout(TIMEOUT))
+        .expect_err("整条链超出预算时必须逾时");
+    let elapsed = started.elapsed();
+
+    assert!(
+        matches!(
+            err,
+            AppError::Network {
+                kind: NetworkKind::Timeout,
+                ..
+            }
+        ),
+        "应是逾时而非重定向次数过多：{err:?}"
+    );
+    assert!(elapsed < DELAY * 4, "不应跟完整条链：{elapsed:?}");
+    assert!(
+        hits.load(Ordering::SeqCst) < 6,
+        "超出预算后不应继续送请求：{}",
+        hits.load(Ordering::SeqCst)
+    );
 }
 
 /// 不檢查重定向目的地的客戶端（本機假伺服器用；信任規則由純函式測試涵蓋）。

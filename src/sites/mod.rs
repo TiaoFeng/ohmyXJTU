@@ -133,6 +133,17 @@ where
     }
 }
 
+/// 缺欄位或型別不符時回傳 `0` 的數字欄位（**不報錯**）。
+///
+/// 用於目前不參與語意判斷的數值欄位（例如課程考勤記錄的 `courseWeek`）：這些
+/// 欄位讀不出來時只損失欄位本身，不該讓整筆記錄被 [`parse_lenient`] 丟棄。
+pub(crate) fn u32_lenient<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(u32_or_string(deserializer).unwrap_or(0))
+}
+
 /// 缺欄位時回傳 `None`，型別不符時才報錯的可選字串。
 pub(crate) fn optional_string_or_number<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where

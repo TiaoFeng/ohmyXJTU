@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 use super::super::{
     lenient_array, lenient_bool, optional_string_lenient, optional_string_or_number,
-    optional_string_or_number_lenient, optional_u64_lenient, string_or_number,
+    optional_string_or_number_lenient, optional_u64_lenient, string_lenient, string_or_number,
 };
 use super::html;
 
@@ -257,31 +257,37 @@ impl ActivityContent {
 }
 
 /// 活動（作業、資料、課程內容…）。
+///
+/// 除了 `id`（本程式據以查詳情與提交記錄，讀不出來就無法處理該項），其餘欄位
+/// 一律寬容讀取：清單與詳情都是**整項**解析，任何一個欄位型別異常都會讓整筆
+/// 作業從任務頁消失（清單）或讓該課程的作業全部退回「待核实」（詳情）。伺服器
+/// 對這些欄位的型別並不穩定（布林出現過 `0`／`"true"`，文字出現過數字），
+/// 型別異常時只應損失該欄位。
 #[derive(Debug, Clone, Deserialize)]
 pub struct LmsActivity {
     /// 活動識別碼。
     #[serde(deserialize_with = "string_or_number")]
     pub id: String,
     /// 所屬課程識別碼。
-    #[serde(default, deserialize_with = "optional_string_or_number")]
+    #[serde(default, deserialize_with = "optional_string_or_number_lenient")]
     pub course_id: Option<String>,
-    /// 活動類型字串（`type`）。
-    #[serde(rename = "type", default)]
+    /// 活動類型字串（`type`）；讀不出來時為空字串（視為未知類型）。
+    #[serde(rename = "type", default, deserialize_with = "string_lenient")]
     pub kind: String,
     /// 標題。
-    #[serde(default)]
+    #[serde(default, deserialize_with = "optional_string_lenient")]
     pub title: Option<String>,
     /// 開始時間。
-    #[serde(default)]
+    #[serde(default, deserialize_with = "optional_string_lenient")]
     pub start_time: Option<String>,
     /// 截止時間。
-    #[serde(default)]
+    #[serde(default, deserialize_with = "optional_string_lenient")]
     pub end_time: Option<String>,
-    /// 是否以小組為單位提交。
-    #[serde(default)]
+    /// 是否以小組為單位提交；型別異常時視同缺少（保持「待核实」，不猜成個人）。
+    #[serde(default, deserialize_with = "lenient_bool")]
     pub submit_by_group: Option<bool>,
     /// 小組識別碼（小組作業時使用）。
-    #[serde(default, deserialize_with = "optional_string_or_number")]
+    #[serde(default, deserialize_with = "optional_string_or_number_lenient")]
     pub group_id: Option<String>,
     /// 活動正文區塊（`data`；只有詳情回應提供，列表項目為 `None`）。
     ///
@@ -310,11 +316,11 @@ pub struct LmsActivity {
     /// 此欄位；參考實作同樣從頂層取用。
     #[serde(default, deserialize_with = "lenient_array")]
     pub uploads: Vec<LmsUpload>,
-    /// 伺服器記錄的提交次數。
-    #[serde(default)]
+    /// 伺服器記錄的提交次數（接受數字與可解析的數字字串）。
+    #[serde(default, deserialize_with = "optional_u64_lenient")]
     pub user_submit_count: Option<u64>,
     /// 是否已發布。
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_bool")]
     pub published: Option<bool>,
 }
 

@@ -107,6 +107,95 @@ fn parses_activities_and_kinds() {
     );
 }
 
+/// 型別異常的欄位只損失該欄位，不得讓整筆作業消失或整課作業退回「待核实」。
+///
+/// 伺服器對這些欄位的型別並不穩定（布林出現過 `0`／`"true"`，文字出現過數字）；
+/// 修復前 `submit_by_group`／`published` 是嚴格的 `Option<bool>`、`title` 是嚴格的
+/// `Option<String>`，任何一個型別異常都會讓整項被 `parse_lenient` 丟棄——作業直接
+/// 從任務頁消失。
+#[test]
+fn tolerates_loosely_typed_activity_fields() {
+    let value = json!([{
+        "id": 9101,
+        "course_id": 4711,
+        "type": "homework",
+        "title": 123,
+        "start_time": 5,
+        "end_time": "2026-09-30T15:59:00.000Z",
+        "submit_by_group": "true",
+        "group_id": {"unexpected": true},
+        "user_submit_count": "3",
+        "published": 0
+    }]);
+
+    let (activities, skipped): (Vec<LmsActivity>, usize) =
+        crate::sites::parse_lenient(value, "查询课程活动").unwrap();
+    assert_eq!(skipped, 0, "型别异常不应让整项被跳过");
+    let activity = &activities[0];
+    assert_eq!(activity.kind(), ActivityKind::Homework);
+    assert_eq!(activity.title, None, "无法解读的标题视为缺漏");
+    assert_eq!(activity.display_title(), "作业", "标题缺漏时回退为类型标签");
+    assert_eq!(activity.start_time, None);
+    assert_eq!(
+        activity.submit_by_group,
+        Some(true),
+        "字符串布林应按宽容规则解读"
+    );
+    assert_eq!(activity.group_id, None);
+    assert_eq!(activity.user_submit_count, Some(3), "数字字符串应可解读");
+    assert_eq!(activity.published, Some(false), "0 应解读为假");
+    assert_eq!(activity.course_id.as_deref(), Some("4711"));
+
+    // 活動類型讀不出來時保留項目（型別未知），而不是整項消失。
+    let value = json!([{"id": 9102, "type": 3, "title": "类型异常"}]);
+    let (activities, skipped): (Vec<LmsActivity>, usize) =
+        crate::sites::parse_lenient(value, "查询课程活动").unwrap();
+    assert_eq!(skipped, 0);
+    assert_eq!(activities[0].kind(), ActivityKind::Unknown);
+    assert_eq!(activities[0].display_title(), "类型异常");
+}
+
+/// 提交單位欄位型別異常時視同缺少：一律「待核实」且**不發出任何提交查詢**。
+///
+/// 猜成個人作業可能把小組作業的提交記錄誤判為「已完成」，因此保守方向必須是
+/// 「無法確認」。詳情缺少 `submit_by_group` 的既有語意與此一致，這裡鎖定型別
+/// 異常也走同一條路。
+#[test]
+fn unknown_submit_by_group_type_stays_unknown_without_requests() {
+    use std::sync::Arc;
+
+    use crate::config::{AccessPolicy, Config};
+    use crate::http::HttpClient;
+    use crate::http::fake::FakeClient;
+    use crate::session::{AccessMode, SessionManager, SiteKind};
+
+    let client = Arc::new(FakeClient::with_responder(|_request: &HttpRequest| {
+        panic!("无法判定提交单位时不得发出任何请求");
+    }));
+    let direct: Arc<dyn HttpClient> = client.clone();
+    let webvpn: Arc<dyn HttpClient> = client;
+    let config = Config {
+        access_policy: AccessPolicy::Direct,
+        ..Config::default()
+    };
+    let mut session = SessionManager::with_clients(&config, direct, webvpn);
+    session.register(Box::new(LmsSite));
+    session.mark_logged_in(SiteKind::Lms, AccessMode::Direct, Vec::new());
+    let mut api = LmsApi::new(&mut session);
+
+    let detail: LmsActivity = crate::sites::deserialize_value(
+        json!({"id": "9001", "type": "homework", "submit_by_group": "maybe"}),
+        "查询活动详情",
+    )
+    .expect("活动详情");
+    assert_eq!(detail.submit_by_group, None, "无法解读时应视为缺漏");
+
+    let summary = api.submission_summary_for(&detail).expect("摘要");
+    assert_eq!(summary.submit_by_group, None);
+    assert_eq!(summary.count, None, "无法确认时提交数必须为未知");
+    assert_eq!(summary.note.as_deref(), Some(MISSING_SUBMIT_BY_GROUP_NOTE));
+}
+
 #[test]
 fn classifies_server_types_case_insensitively() {
     assert_eq!(

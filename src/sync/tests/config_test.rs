@@ -38,6 +38,7 @@ fn round_trips_config_and_records() {
             SyncFile::Tasks,
             FileRecord {
                 version: Some("v1".to_owned()),
+                etag: Some("\"v1\"".to_owned()),
                 hash: Some("h1".to_owned()),
             },
         )
@@ -52,6 +53,7 @@ fn round_trips_config_and_records() {
     assert!(!config.auto_sync);
     let record = reloaded.record(SyncFile::Tasks);
     assert_eq!(record.version.as_deref(), Some("v1"));
+    assert_eq!(record.etag.as_deref(), Some("\"v1\""));
     assert_eq!(record.hash.as_deref(), Some("h1"));
     assert_eq!(reloaded.record(SyncFile::Credentials).version, None);
 }
@@ -137,6 +139,24 @@ fn rekey_is_a_noop_when_never_configured() {
         !dir.path().join("sync.vault").exists(),
         "从未设定时换钥不应建立文件"
     );
+}
+
+#[test]
+fn rekey_is_skipped_when_the_store_is_unavailable() {
+    let dir = tempdir().unwrap();
+    let mut store = new_store(&dir);
+    store.init(PASSPHRASE).unwrap();
+    store.set_config(config()).unwrap();
+    let path = dir.path().join("sync.vault");
+    let before = std::fs::read(&path).unwrap();
+
+    // 以錯誤口令載入 → 標記不可用（原檔不被修改）。
+    let mut other = new_store(&dir);
+    other.init("wrong passphrase").unwrap();
+
+    // 換口令不得因同步檔不可用而失敗，也不得改動原檔。
+    other.rekey("new passphrase").unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), before, "原檔不得被修改");
 }
 
 #[test]

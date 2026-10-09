@@ -101,6 +101,10 @@ pub struct FileRecord {
     /// 上次同步時遠端檔案的版本（`ETag`，否則 `Last-Modified`）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    /// 上次同步時遠端 `ETag` 的原始值（含引號），供下一次上傳作 `If-Match`
+    /// 條件；遠端未提供 ETag 或僅有弱驗證標籤時為 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub etag: Option<String>,
     /// 上次同步時本機內容的指紋。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hash: Option<String>,
@@ -245,10 +249,11 @@ impl SyncStore {
     /// 換口令：以新口令重新加密設定檔（新鹽值與金鑰）。
     ///
     /// 尚未設定同步、也沒有檔案時直接略過：沒有東西要換鑰，也不該憑空建立
-    /// 一個 `sync.vault`。存儲不可用（原檔讀不到）時回錯，絕不覆寫原檔。
+    /// 一個 `sync.vault`。存儲不可用（原檔讀不到）時同樣略過：不碰這個檔案，
+    /// 也不該讓「修改加密口令」被一個已不可用的同步檔連帶拖垮。
     pub(crate) fn rekey(&mut self, passphrase: &str) -> AppResult<()> {
-        if let Some(message) = &self.unavailable {
-            return Err(AppError::Crypto(message.clone()));
+        if self.unavailable.is_some() {
+            return Ok(());
         }
         if self.content.config.is_none() && !self.path.is_file() {
             return Ok(());

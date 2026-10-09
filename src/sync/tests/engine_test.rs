@@ -99,11 +99,37 @@ fn push_sends_local_content_and_records_the_version() {
     let path = dir.path().join("tasks.vault");
     std::fs::write(&path, b"local-bytes").unwrap();
     let (client, dav) = dav(vec![response(201, &[("ETag", "n1")], b"")]);
-    let record = push(&dav, SyncFile::Tasks, &path).expect("上传应成功");
+    let record = push(&dav, SyncFile::Tasks, &path, None).expect("上传应成功");
     assert_eq!(record.version.as_deref(), Some("n1"));
 
     let request = client.last_request().expect("应有请求");
     assert_eq!(request.method, Method::Put);
+}
+
+#[test]
+fn push_sends_if_match_and_records_the_new_etag() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("tasks.vault");
+    std::fs::write(&path, b"local-bytes").unwrap();
+    let (client, dav) = dav(vec![response(201, &[("ETag", "\"n2\"")], b"")]);
+    let record = push(&dav, SyncFile::Tasks, &path, Some("\"n1\"")).expect("上传应成功");
+    assert_eq!(record.version.as_deref(), Some("n2"));
+    assert_eq!(record.etag.as_deref(), Some("\"n2\""));
+
+    let request = client.last_request().expect("应有请求");
+    assert_eq!(request.header_value("If-Match"), Some("\"n1\""));
+}
+
+#[test]
+fn push_surfaces_a_conflict_on_precondition_failure() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("tasks.vault");
+    std::fs::write(&path, b"local-bytes").unwrap();
+    let (_client, dav) = dav(vec![response(412, &[], b"")]);
+    assert!(matches!(
+        push(&dav, SyncFile::Tasks, &path, Some("\"stale\"")),
+        Err(AppError::WebDavConflict)
+    ));
 }
 
 #[test]
@@ -124,7 +150,7 @@ fn push_errors_when_there_is_no_local_file() {
     let path = dir.path().join("tasks.vault");
     let (_client, dav) = dav(vec![]);
     assert!(matches!(
-        push(&dav, SyncFile::Tasks, &path),
+        push(&dav, SyncFile::Tasks, &path, None),
         Err(AppError::WebDav(_))
     ));
 }
@@ -136,6 +162,7 @@ fn evaluate_reports_only_local_change_as_push() {
     std::fs::write(&path, b"newer").unwrap();
     let record = FileRecord {
         version: Some("v1".to_owned()),
+        etag: None,
         hash: Some(fingerprint(b"older")),
     };
     let (_client, dav) = dav(vec![response(200, &[("ETag", "v1")], b"")]);
@@ -152,6 +179,7 @@ fn evaluate_reports_conflict_when_both_changed() {
     std::fs::write(&path, b"newer").unwrap();
     let record = FileRecord {
         version: Some("v1".to_owned()),
+        etag: None,
         hash: Some(fingerprint(b"older")),
     };
     let (_client, dav) = dav(vec![response(200, &[("ETag", "v2")], b"")]);

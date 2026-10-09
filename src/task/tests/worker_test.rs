@@ -7651,3 +7651,60 @@ fn sync_auto_only_uploads_when_enabled() {
     harness.dispatch(Job::SyncAuto).expect("自动同步应成功");
     assert!(harness.saw(|event| matches!(event, Event::SyncDone { .. })));
 }
+
+#[test]
+fn sync_now_reports_a_conflict_when_the_upload_is_rejected() {
+    let mut harness = Harness::new(|_| Ok(html("")));
+    harness.seed_vault("secret123", &Credentials::new("3120000001", "pw-12345"));
+    harness
+        .dispatch(Job::Unlock {
+            passphrase: "secret123".into(),
+        })
+        .expect("解锁应成功");
+
+    harness.set_webdav(|request| {
+        // 連線測試的探測檔一律可寫。
+        if request.url.contains("ohmyXJTU-probe.tmp") {
+            return Ok(HttpResponse {
+                status: 201,
+                final_url: request.url.clone(),
+                headers: Vec::new(),
+                body: Vec::new(),
+            });
+        }
+        match request.method {
+            // 遠端不存在 → 本機變更即計畫為 Push。
+            Method::Head => Ok(HttpResponse::new(404, request.url.clone(), b"".as_slice())),
+            // 上傳被拒（模擬遠端已在他處改動，If-Match 未通過）。
+            Method::Put => Ok(HttpResponse::new(412, request.url.clone(), b"".as_slice())),
+            _ => Ok(html("")),
+        }
+    });
+
+    harness
+        .dispatch(Job::SetSyncConfig {
+            config: crate::sync::config::SyncConfig::new(
+                "https://dav.example/dav/",
+                "u@example.com",
+                "app-pass",
+            ),
+        })
+        .expect("保存同步设置应成功");
+
+    harness
+        .dispatch(Job::SyncNow)
+        .expect("同步应成功（冲突以事件回报）");
+    let events = harness.drain_events();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::SyncConflict { .. })),
+        "上传被拒时应回报冲突：{events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::SyncDone { .. })),
+        "冲突时不该回报同步完成：{events:?}"
+    );
+}

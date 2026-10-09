@@ -121,9 +121,15 @@ impl Worker {
             match engine::evaluate(&dav, file, &path, &record)? {
                 Plan::Noop => {}
                 Plan::Push => {
-                    let new = engine::push(&dav, file, &path)?;
-                    self.sync.set_record(file, new)?;
-                    uploaded += 1;
+                    match engine::push(&dav, file, &path, record.etag.as_deref()) {
+                        Ok(new) => {
+                            self.sync.set_record(file, new)?;
+                            uploaded += 1;
+                        }
+                        // 檢查後遠端被其他裝置改動（If-Match 未通過）：不覆蓋，改報衝突。
+                        Err(AppError::WebDavConflict) => conflicts.push(file.remote_name()),
+                        Err(err) => return Err(err),
+                    }
                 }
                 Plan::Pull => {
                     if let Some(new) = engine::pull(&dav, file, &path)? {
@@ -161,9 +167,15 @@ impl Worker {
         for (file, path) in self.sync_local.clone() {
             let record = self.sync.record(file).clone();
             if matches!(engine::evaluate(&dav, file, &path, &record)?, Plan::Push) {
-                let new = engine::push(&dav, file, &path)?;
-                self.sync.set_record(file, new)?;
-                uploaded += 1;
+                match engine::push(&dav, file, &path, record.etag.as_deref()) {
+                    Ok(new) => {
+                        self.sync.set_record(file, new)?;
+                        uploaded += 1;
+                    }
+                    // 自動模式絕不覆蓋遠端：檢查後遠端被改動時靜默略過。
+                    Err(AppError::WebDavConflict) => {}
+                    Err(err) => return Err(err),
+                }
             }
         }
         if uploaded > 0 {
@@ -183,7 +195,8 @@ impl Worker {
             if !path.is_file() {
                 continue;
             }
-            let new = engine::push(&dav, file, &path)?;
+            // 強制上傳：不帶條件請求，以本機覆蓋遠端。
+            let new = engine::push(&dav, file, &path, None)?;
             self.sync.set_record(file, new)?;
             uploaded += 1;
         }

@@ -80,15 +80,22 @@ pub(crate) fn pull(
     io::write_private_atomic(local_path, &bytes)?;
     Ok(Some(FileRecord {
         version: remote_version(&meta).map(str::to_owned),
+        etag: meta.if_match.clone(),
         hash: Some(fingerprint(&bytes)),
     }))
 }
 
 /// 上傳本機檔案覆蓋遠端，回傳新的同步記錄。
 ///
-/// 覆寫前由呼叫端以 [`Plan`] 三方比對確認「只有本機變更」（見 [`evaluate`]），
-/// 因此這裡不帶條件請求。
-pub(crate) fn push(webdav: &WebDav, file: SyncFile, local_path: &Path) -> AppResult<FileRecord> {
+/// `if_match` 為上次同步記錄的遠端 `ETag`：帶入後 PUT 成為條件請求，若遠端在
+/// 檢查後又被其他裝置改動，伺服器會回 `412`（映射為 [`AppError::WebDavConflict`]），
+/// 呼叫端可據此避免覆蓋而改報衝突。遠端尚無檔案（首次上傳）或無 ETag 時帶 `None`。
+pub(crate) fn push(
+    webdav: &WebDav,
+    file: SyncFile,
+    local_path: &Path,
+    if_match: Option<&str>,
+) -> AppResult<FileRecord> {
     let Some(bytes) = read_local(local_path)? else {
         return Err(AppError::webdav(format!(
             "本机没有 {} 可供上传",
@@ -96,7 +103,7 @@ pub(crate) fn push(webdav: &WebDav, file: SyncFile, local_path: &Path) -> AppRes
         )));
     };
     let name = file.remote_name();
-    let meta = webdav.put(name, &bytes, None)?;
+    let meta = webdav.put(name, &bytes, if_match)?;
     // 伺服器未在 PUT 回應提供版本時，補做一次 HEAD 取得權威版本。
     let meta = if remote_version(&meta).is_none() {
         webdav.head(name)?
@@ -105,6 +112,7 @@ pub(crate) fn push(webdav: &WebDav, file: SyncFile, local_path: &Path) -> AppRes
     };
     Ok(FileRecord {
         version: remote_version(&meta).map(str::to_owned),
+        etag: meta.if_match.clone(),
         hash: Some(fingerprint(&bytes)),
     })
 }
@@ -128,6 +136,7 @@ pub(crate) fn import(
             *file,
             FileRecord {
                 version: remote_version(&meta).map(str::to_owned),
+                etag: meta.if_match.clone(),
                 hash: Some(fingerprint(&bytes)),
             },
         ));

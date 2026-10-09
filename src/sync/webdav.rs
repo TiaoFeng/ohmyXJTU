@@ -22,6 +22,12 @@ pub const DEFAULT_BASE: &str = "https://dav.jianguoyun.com/dav/";
 /// 連線測試用的探測檔名（與同步檔案不衝突）。
 const PROBE_FILE: &str = "ohmyXJTU-probe.tmp";
 
+/// 單一遠端檔案下載的大小上限（8 MiB）。
+///
+/// 同步的容器（加密後的憑證／任務檔）只有數 KB；設上限是為了避免來歷不明或被
+/// 入侵的 WebDAV 伺服器回傳超大內容，耗盡記憶體或塞爆磁碟。
+const MAX_DOWNLOAD_BYTES: u64 = 8 * 1024 * 1024;
+
 /// 遠端子目錄名：所有同步檔案都放在 `<伺服器位址>/ohmyXJTU/` 之下。
 ///
 /// 堅果雲（及多數 WebDAV 服務）不接受直接在帳號根目錄建立檔案（實測 `PUT`
@@ -34,10 +40,13 @@ const FOLDER: &str = "ohmyXJTU";
 pub struct RemoteMeta {
     /// 檔案是否存在（`404` 視為不存在）。
     pub exists: bool,
-    /// `ETag`（伺服器有回應才為 `Some`）。
+    /// `ETag`（正規化：去引號與弱驗證前綴；伺服器有回應才為 `Some`）。
     pub etag: Option<String>,
     /// `Last-Modified`（`ETag` 不可用時的備援）。
     pub last_modified: Option<String>,
+    /// 可用於 `If-Match` 的原始 `ETag`（保留引號）；遠端未提供 ETag 或僅有弱驗證
+    /// 標籤（`W/`）時為 `None`——弱驗證標籤不可用作 `If-Match` 條件。
+    pub if_match: Option<String>,
 }
 
 /// 一個 WebDAV 端點（伺服器位址＋Basic 認證）。
@@ -108,7 +117,7 @@ impl WebDav {
     /// 下載遠端檔案；不存在時回 `None`。
     pub fn get(&self, file: &str) -> AppResult<Option<(Vec<u8>, RemoteMeta)>> {
         let url = self.url_for(file);
-        let response = self.send(HttpRequest::get(url.clone()))?;
+        let response = self.send(HttpRequest::get(url.clone()).limit_body(MAX_DOWNLOAD_BYTES))?;
         match response.status {
             200..=299 => Ok(Some((response.body.clone(), meta_from(&response, true)))),
             404 | 409 | 410 => Ok(None),
@@ -209,8 +218,9 @@ fn normalize_base(base: &str) -> String {
 /// 組出 HTTP Basic 認證標頭值。
 fn basic_auth(account: &str, app_password: &str) -> String {
     let raw = Zeroizing::new(format!("{account}:{app_password}"));
-    let encoded = base64::engine::general_purpose::STANDARD.encode(raw.as_bytes());
-    format!("Basic {encoded}")
+    // base64 中介值同樣含憑證，一併零化，不留下可讀的堆積副本。
+    let encoded = Zeroizing::new(base64::engine::general_purpose::STANDARD.encode(raw.as_bytes()));
+    format!("Basic {}", encoded.as_str())
 }
 
 /// 由回應標頭取出中介資料。
@@ -219,7 +229,14 @@ fn meta_from(response: &HttpResponse, exists: bool) -> RemoteMeta {
         exists,
         etag: response.header("etag").map(normalize_etag),
         last_modified: response.header("last-modified").map(str::to_owned),
+        if_match: if_match_tag(response),
     }
+}
+
+/// 取出可用於 `If-Match` 的原始 `ETag`（保留引號；弱驗證標籤不可用）。
+fn if_match_tag(response: &HttpResponse) -> Option<String> {
+    let raw = response.header("etag")?.trim();
+    (!raw.starts_with("W/")).then(|| raw.to_owned())
 }
 
 /// 去除 `ETag` 的引號與弱驗證前綴（`W/`）。

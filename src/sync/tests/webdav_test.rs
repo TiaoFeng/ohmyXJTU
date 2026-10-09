@@ -62,7 +62,7 @@ fn requests_carry_basic_auth_without_following_redirects() {
     );
 }
 
-/// `HEAD` 200 帶 `ETag`：存在且正規化後的中介資料正確。
+/// `HEAD` 200 帶 `ETag`：存在且正規化後的中介資料正確（並保留原始 ETag 供 If-Match）。
 #[test]
 fn head_reports_existence_and_normalized_etag() {
     let (_client, dav) = endpoint(vec![response(200, &[("ETag", "\"abc123\"")], b"")]);
@@ -73,8 +73,31 @@ fn head_reports_existence_and_normalized_etag() {
             exists: true,
             etag: Some("abc123".to_owned()),
             last_modified: None,
+            if_match: Some("\"abc123\"".to_owned()),
         }
     );
+}
+
+/// 弱驗證 `ETag`（`W/`）不得用作 `If-Match`，但仍可作變更偵測。
+#[test]
+fn weak_etag_is_not_used_for_if_match() {
+    let (_client, dav) = endpoint(vec![response(200, &[("ETag", "W/\"weak1\"")], b"")]);
+    let meta = dav.head("f.vault").expect("HEAD 应成功");
+    assert_eq!(meta.etag.as_deref(), Some("weak1"));
+    assert_eq!(meta.if_match, None);
+}
+
+/// 無 `ETag` 時 `If-Match` 亦不存在。
+#[test]
+fn absent_etag_yields_no_if_match() {
+    let (_client, dav) = endpoint(vec![response(
+        200,
+        &[("Last-Modified", "Mon, 01 Jan 2024 00:00:00 GMT")],
+        b"",
+    )]);
+    let meta = dav.head("f.vault").expect("HEAD 应成功");
+    assert_eq!(meta.if_match, None);
+    assert!(meta.etag.is_none());
 }
 
 /// `HEAD` 404：檔案不存在。

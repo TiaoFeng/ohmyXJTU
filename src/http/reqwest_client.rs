@@ -105,6 +105,7 @@ impl ReqwestClient {
             Method::Put => self.client.put(&request.url),
             Method::Delete => self.client.delete(&request.url),
             Method::Head => self.client.head(&request.url),
+            Method::Mkcol => self.client.request(mkcol_method(), &request.url),
         };
 
         for (name, value) in &request.headers {
@@ -346,8 +347,13 @@ fn redirect_method(status: u16, method: Method) -> Method {
     }
     match method {
         Method::Get | Method::Head => method,
-        Method::Post | Method::Put | Method::Delete => Method::Get,
+        Method::Post | Method::Put | Method::Delete | Method::Mkcol => Method::Get,
     }
+}
+
+/// WebDAV 的 `MKCOL` 方法（`reqwest` 沒有提供對應常數）。
+fn mkcol_method() -> reqwest::Method {
+    reqwest::Method::from_bytes(b"MKCOL").expect("MKCOL 是合法的方法名")
 }
 
 /// 網址的可比較來源（協定 ＋ 主機 ＋ 有效埠）。

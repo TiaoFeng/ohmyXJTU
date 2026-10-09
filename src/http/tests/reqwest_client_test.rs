@@ -745,6 +745,7 @@ fn redirect_method_keeps_head_and_downgrades_writes() {
         assert_eq!(redirect_method(status, Method::Post), Method::Get);
         assert_eq!(redirect_method(status, Method::Put), Method::Get);
         assert_eq!(redirect_method(status, Method::Delete), Method::Get);
+        assert_eq!(redirect_method(status, Method::Mkcol), Method::Get);
     }
     for status in [307, 308] {
         for method in [
@@ -753,6 +754,7 @@ fn redirect_method_keeps_head_and_downgrades_writes() {
             Method::Put,
             Method::Delete,
             Method::Head,
+            Method::Mkcol,
         ] {
             assert_eq!(redirect_method(status, method), method);
         }

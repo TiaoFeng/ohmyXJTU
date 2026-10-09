@@ -107,6 +107,10 @@ fn put_delete_head_builders_set_method_and_body() {
     let head = HttpRequest::head("https://dav.example/x.vault");
     assert_eq!(head.method, Method::Head);
     assert!(head.body.is_none());
+
+    let mkcol = HttpRequest::mkcol("https://dav.example/x/");
+    assert_eq!(mkcol.method, Method::Mkcol);
+    assert!(mkcol.body.is_none());
 }
 
 /// 原始位元組主體（同步的加密文檔）不得出現在 `Debug` 輸出裡。

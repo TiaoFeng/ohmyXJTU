@@ -22,6 +22,13 @@ pub const DEFAULT_BASE: &str = "https://dav.jianguoyun.com/dav/";
 /// 連線測試用的探測檔名（與同步檔案不衝突）。
 const PROBE_FILE: &str = "ohmyXJTU-probe.tmp";
 
+/// 遠端子目錄名：所有同步檔案都放在 `<伺服器位址>/ohmyXJTU/` 之下。
+///
+/// 堅果雲（及多數 WebDAV 服務）不接受直接在帳號根目錄建立檔案（實測 `PUT`
+/// 回 `404`）；必須寫入已存在的集合。因此固定使用這個子目錄，並在需要時以
+/// `MKCOL` 建立。
+const FOLDER: &str = "ohmyXJTU";
+
 /// 遠端檔案的中介資料。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RemoteMeta {
@@ -55,20 +62,35 @@ impl WebDav {
         }
     }
 
-    /// 遠端檔案網址。
+    /// 遠端檔案網址（位於 `<伺服器位址>/ohmyXJTU/` 之下）。
     pub fn url_for(&self, file: &str) -> String {
-        format!("{}{}", self.base, file)
+        format!("{}{}/{}", self.base, FOLDER, file)
     }
 
     /// 測試連線與寫入權限：上傳一個小探測檔後立即刪除。
     ///
-    /// `HEAD` 只能證明「路徑可達」，无法保證可寫入；同步需要寫入權限，因此以
+    /// `HEAD` 只能證明「路徑可達」，無法保證可寫入；同步需要寫入權限，因此以
     /// 一次真實的 `PUT`＋`DELETE` 驗證，並在失敗時回報方法與目標網址。刪除失敗
     /// 不影響「可寫」的結論。
     pub fn check(&self) -> AppResult<()> {
         self.put(PROBE_FILE, b"ohmyXJTU probe", None)?;
         let _ = self.delete(PROBE_FILE);
         Ok(())
+    }
+
+    /// 確保遠端子目錄存在：`MKCOL`；已存在時伺服器回 `405`，視為成功。
+    pub fn ensure_folder(&self) -> AppResult<()> {
+        let mut url = self.base.clone();
+        url.push_str(FOLDER);
+        url.push('/');
+        let response = self.send(HttpRequest::mkcol(url.clone()))?;
+        match response.status {
+            200..=299 | 405 => Ok(()),
+            401 | 403 => Err(AppError::WebDavAuth),
+            other => Err(AppError::webdav(format!(
+                "无法建立远端目录（MKCOL {url} → {other}）：请确认服务器地址与账户权限（坚果云默认为 https://dav.jianguoyun.com/dav/）"
+            ))),
+        }
     }
 
     /// 讀取遠端檔案中介資料（不下載主體）。
@@ -99,23 +121,40 @@ impl WebDav {
     ///
     /// `if_match` 為 `Some` 時附上 `If-Match`，讓「檢查→上傳」成為條件請求：
     /// 遠端已被其他裝置改動時伺服器會回 `412`，映射為 [`AppError::WebDavConflict`]。
+    ///
+    /// 首次遇到 `404`（上層集合不存在）時先以 `MKCOL` 建立子目錄再重試一次；
+    /// 這是堅果雲等服務的常見要求（不接受直接寫入根目錄）。
     pub fn put(&self, file: &str, bytes: &[u8], if_match: Option<&str>) -> AppResult<RemoteMeta> {
         let url = self.url_for(file);
-        let mut request = HttpRequest::put(url.clone(), bytes.to_vec())
+        let response = self.send_put(&url, bytes, if_match)?;
+        if response.status == 404 {
+            self.ensure_folder()?;
+            let retried = self.send_put(&url, bytes, if_match)?;
+            return self.finish_put(&url, retried);
+        }
+        self.finish_put(&url, response)
+    }
+
+    /// 送出一則 `PUT` 並取回回應。
+    fn send_put(&self, url: &str, bytes: &[u8], if_match: Option<&str>) -> AppResult<HttpResponse> {
+        let mut request = HttpRequest::put(url.to_owned(), bytes.to_vec())
             .header("Content-Type", "application/octet-stream");
         if let Some(etag) = if_match {
             request = request.header("If-Match", etag);
         }
-        let response = self.send(request)?;
+        self.send(request)
+    }
+
+    /// 解讀 `PUT` 回應。
+    fn finish_put(&self, url: &str, response: HttpResponse) -> AppResult<RemoteMeta> {
         match response.status {
             200..=299 => Ok(meta_from(&response, true)),
             401 | 403 => Err(AppError::WebDavAuth),
             412 => Err(AppError::WebDavConflict),
-            // PUT 遇到 404 幾乎都是路徑問題（目錄不存在或地址写錯），單獨提示。
             404 => Err(AppError::webdav(format!(
-                "服务器找不到目标路径（PUT {url} → 404）：请确认服务器地址是否正确，且该目录存在、可写入（坚云默认为 https://dav.jianguoyun.com/dav/）"
+                "服务器找不到目标路径（PUT {url} → 404）：请确认服务器地址正确、且账户对该目录有写入权限（坚果云默认为 https://dav.jianguoyun.com/dav/）"
             ))),
-            other => Err(unexpected_status("PUT", &url, other)),
+            other => Err(unexpected_status("PUT", url, other)),
         }
     }
 

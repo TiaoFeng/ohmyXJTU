@@ -33,13 +33,13 @@ fn endpoint(responses: Vec<HttpResponse>) -> (Arc<FakeClient>, WebDav) {
     (client, dav)
 }
 
-/// 伺服器位址會正規化為以 `/` 結尾，再接上檔名。
+/// 伺服器位址會正規化為以 `/` 結尾，再接上子目錄與檔名。
 #[test]
-fn url_for_normalizes_base_and_appends_file() {
+fn url_for_normalizes_base_and_appends_the_subfolder() {
     let (_client, dav) = endpoint(vec![]);
     assert_eq!(
         dav.url_for("ohmyXJTU-tasks.vault"),
-        "https://dav.jianguoyun.com/dav/ohmyXJTU-tasks.vault"
+        "https://dav.jianguoyun.com/dav/ohmyXJTU/ohmyXJTU-tasks.vault"
     );
 }
 
@@ -154,14 +154,36 @@ fn check_uploads_and_removes_a_probe_file() {
     assert_eq!(methods, vec![Method::Put, Method::Delete]);
 }
 
-/// 連線測試遇到 404（路徑不存在／不可寫）时应报错，并指出方法与网址。
+/// 連線測試遇到持續 404（路徑不可寫）時应报错，并指出方法。
 #[test]
 fn check_reports_an_unwritable_path() {
-    let (_client, dav) = endpoint(vec![response(404, &[], b"")]);
+    // PUT 404 → MKCOL 也 404：回报建立目錄失敗。
+    let (_client, dav) = endpoint(vec![response(404, &[], b""), response(404, &[], b"")]);
     let err = dav.check().expect_err("不可写入时应报错");
     let text = err.to_string();
+    assert!(text.contains("MKCOL"), "应指出方法：{text}");
     assert!(text.contains("404"), "{text}");
-    assert!(text.contains("PUT"), "应指出方法：{text}");
+}
+
+/// `PUT` 遇到 `404` 時先以 `MKCOL` 建立子目錄，再重試一次。
+#[test]
+fn put_creates_the_folder_then_retries() {
+    let (client, dav) = endpoint(vec![
+        response(404, &[], b""),
+        response(201, &[], b""),
+        response(201, &[("ETag", "v1")], b""),
+    ]);
+    let meta = dav.put("f.vault", b"x", None).expect("建立目录后应成功");
+    assert_eq!(meta.etag.as_deref(), Some("v1"));
+    let methods: Vec<Method> = client.requests().iter().map(|r| r.method).collect();
+    assert_eq!(methods, vec![Method::Put, Method::Mkcol, Method::Put]);
+}
+
+/// `MKCOL` 回 `405`（目錄已存在）视为成功。
+#[test]
+fn ensure_folder_treats_already_exists_as_success() {
+    let (_client, dav) = endpoint(vec![response(405, &[], b"")]);
+    dav.ensure_folder().expect("405 应视为已存在");
 }
 
 /// `Debug` 不得洩漏應用密碼或其 base64。

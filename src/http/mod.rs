@@ -31,6 +31,8 @@ pub enum Method {
     Delete,
     /// `HEAD`
     Head,
+    /// `MKCOL`（WebDAV：建立集合）
+    Mkcol,
 }
 
 /// 請求主體。
@@ -197,6 +199,18 @@ impl HttpRequest {
     pub fn head(url: impl Into<String>) -> Self {
         Self {
             method: Method::Head,
+            url: url.into(),
+            headers: Vec::new(),
+            body: None,
+            timeout: None,
+            follow_redirects: true,
+        }
+    }
+
+    /// 建立 `MKCOL` 請求（WebDAV：建立集合；無主體）。
+    pub fn mkcol(url: impl Into<String>) -> Self {
+        Self {
+            method: Method::Mkcol,
             url: url.into(),
             headers: Vec::new(),
             body: None,

@@ -89,6 +89,18 @@ pub enum AppError {
     #[error("服务器返回异常状态码：{status}")]
     Http { status: u16 },
 
+    /// 回應本文超過允許的上限（避免超大回應耗盡記憶體或磁碟）。
+    ///
+    /// 這不是連線層失敗：伺服器正常回應，只是內容太大，因此不自動重試，
+    /// 訊息也不該冠上「网络连接失败」。
+    #[error("服务器响应过大（{size} 字节，上限 {limit} 字节）")]
+    ResponseTooLarge {
+        /// 實際（或宣稱的）本文長度。
+        size: u64,
+        /// 允許的上限。
+        limit: u64,
+    },
+
     /// 伺服器回應了業務錯誤（形如 `{"code": .., "message": ..}`）。
     #[error("服务返回错误（{code}）：{message}")]
     Server { code: i64, message: String },

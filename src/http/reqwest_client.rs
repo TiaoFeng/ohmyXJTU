@@ -467,8 +467,11 @@ fn read_body_limited(response: reqwest::blocking::Response, limit: u64) -> AppRe
 }
 
 /// 回應本文超過上限的錯誤。
-fn body_too_large(length: u64, limit: u64) -> AppError {
-    AppError::network(format!("响应正文过大（{length} 字节，上限 {limit}）"))
+///
+/// 用專屬變體而非 `Network`：伺服器正常回應，只是內容太大，訊息不該被誤讀
+/// 成連線失敗（也因此在工作者眼中不可重試）。
+fn body_too_large(size: u64, limit: u64) -> AppError {
+    AppError::ResponseTooLarge { size, limit }
 }
 
 /// 依錯誤鏈判斷網路錯誤類別。

@@ -99,7 +99,7 @@ impl WebDav {
         let response = self.send(HttpRequest::head(url.clone()))?;
         match response.status {
             200..=299 => Ok(meta_from(&response, true)),
-            404 | 410 => Ok(RemoteMeta::default()),
+            404 | 409 | 410 => Ok(RemoteMeta::default()),
             401 | 403 => Err(AppError::WebDavAuth),
             other => Err(unexpected_status("HEAD", &url, other)),
         }
@@ -111,7 +111,7 @@ impl WebDav {
         let response = self.send(HttpRequest::get(url.clone()))?;
         match response.status {
             200..=299 => Ok(Some((response.body.clone(), meta_from(&response, true)))),
-            404 | 410 => Ok(None),
+            404 | 409 | 410 => Ok(None),
             401 | 403 => Err(AppError::WebDavAuth),
             other => Err(unexpected_status("GET", &url, other)),
         }
@@ -122,12 +122,13 @@ impl WebDav {
     /// `if_match` 為 `Some` 時附上 `If-Match`，讓「檢查→上傳」成為條件請求：
     /// 遠端已被其他裝置改動時伺服器會回 `412`，映射為 [`AppError::WebDavConflict`]。
     ///
-    /// 首次遇到 `404`（上層集合不存在）時先以 `MKCOL` 建立子目錄再重試一次；
-    /// 這是堅果雲等服務的常見要求（不接受直接寫入根目錄）。
+    /// 首次遇到 `404` 或 `409`（上層集合不存在）時先以 `MKCOL` 建立子目錄再重試
+    /// 一次；這是堅果雲等服務的常見要求（不接受直接寫入根目錄，且 `PUT` 到不存
+    /// 在集合下會回 `409`）。
     pub fn put(&self, file: &str, bytes: &[u8], if_match: Option<&str>) -> AppResult<RemoteMeta> {
         let url = self.url_for(file);
         let response = self.send_put(&url, bytes, if_match)?;
-        if response.status == 404 {
+        if matches!(response.status, 404 | 409) {
             self.ensure_folder()?;
             let retried = self.send_put(&url, bytes, if_match)?;
             return self.finish_put(&url, retried);
@@ -147,12 +148,13 @@ impl WebDav {
 
     /// 解讀 `PUT` 回應。
     fn finish_put(&self, url: &str, response: HttpResponse) -> AppResult<RemoteMeta> {
-        match response.status {
+        let status = response.status;
+        match status {
             200..=299 => Ok(meta_from(&response, true)),
             401 | 403 => Err(AppError::WebDavAuth),
             412 => Err(AppError::WebDavConflict),
-            404 => Err(AppError::webdav(format!(
-                "服务器找不到目标路径（PUT {url} → 404）：请确认服务器地址正确、且账户对该目录有写入权限（坚果云默认为 https://dav.jianguoyun.com/dav/）"
+            404 | 409 => Err(AppError::webdav(format!(
+                "服务器拒绝写入（PUT {url} → {status}）：请确认服务器地址正确、目录可写，且应用密码未限制目录（坚果云默认为 https://dav.jianguoyun.com/dav/）"
             ))),
             other => Err(unexpected_status("PUT", url, other)),
         }

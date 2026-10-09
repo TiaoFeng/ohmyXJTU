@@ -179,6 +179,19 @@ fn put_creates_the_folder_then_retries() {
     assert_eq!(methods, vec![Method::Put, Method::Mkcol, Method::Put]);
 }
 
+/// `PUT` 遇到 `409`（上層集合不存在）同樣先 `MKCOL` 再重試。
+#[test]
+fn put_creates_the_folder_when_the_parent_is_missing() {
+    let (client, dav) = endpoint(vec![
+        response(409, &[], b""),
+        response(201, &[], b""),
+        response(201, &[], b""),
+    ]);
+    dav.put("f.vault", b"x", None).expect("建立目录后应成功");
+    let methods: Vec<Method> = client.requests().iter().map(|r| r.method).collect();
+    assert_eq!(methods, vec![Method::Put, Method::Mkcol, Method::Put]);
+}
+
 /// `MKCOL` 回 `405`（目錄已存在）视为成功。
 #[test]
 fn ensure_folder_treats_already_exists_as_success() {

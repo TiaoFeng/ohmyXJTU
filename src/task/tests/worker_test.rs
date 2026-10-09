@@ -7609,3 +7609,45 @@ fn sync_now_uploads_local_files_when_the_remote_is_empty() {
     );
     assert!(harness.sync_path().is_file(), "同步设置应已写入磁盘");
 }
+
+#[test]
+fn sync_auto_only_uploads_when_enabled() {
+    let mut harness = Harness::new(|_| Ok(html("")));
+    harness.seed_vault("secret123", &Credentials::new("3120000001", "pw-12345"));
+    harness
+        .dispatch(Job::Unlock {
+            passphrase: "secret123".into(),
+        })
+        .expect("解锁应成功");
+
+    // 尚未設定：自動同步靜默跳過（不連網、不發完成事件）。
+    harness.dispatch(Job::SyncAuto).expect("未配置时应静默跳过");
+    assert!(!harness.saw(|event| matches!(event, Event::SyncDone { .. })));
+
+    harness.set_webdav(|request| match request.method {
+        Method::Head => Ok(HttpResponse::new(404, request.url.clone(), b"".as_slice())),
+        Method::Put => Ok(HttpResponse {
+            status: 201,
+            final_url: request.url.clone(),
+            headers: vec![("ETag".to_owned(), "v1".to_owned())],
+            body: Vec::new(),
+        }),
+        _ => Ok(html("")),
+    });
+    harness
+        .dispatch(Job::SetSyncConfig {
+            config: crate::sync::config::SyncConfig::new(
+                "https://dav.example/dav/",
+                "u@example.com",
+                "app-pass",
+            ),
+        })
+        .expect("保存同步设置应成功");
+    harness
+        .dispatch(Job::SetSyncAuto { enabled: true })
+        .expect("开启自动同步");
+
+    // 開啟後：本機憑證檔（遠端不存在）會被自動上傳。
+    harness.dispatch(Job::SyncAuto).expect("自动同步应成功");
+    assert!(harness.saw(|event| matches!(event, Event::SyncDone { .. })));
+}

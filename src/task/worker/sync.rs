@@ -140,6 +140,42 @@ impl Worker {
         Ok(())
     }
 
+    /// 自動同步（背景）：僅在「本機變更、遠端未變」時上傳。
+    ///
+    /// 其餘情況（無變更、遠端也變了、遠端較新）一律不動：自動模式絕不覆蓋
+    /// 遠端，也不在本機狀態可能因此變舊時下載——需要下載或解決衝突時，留給
+    /// 使用者在設定中按「立即同步」。背景失敗只留提示，不當成操作失敗。
+    pub(super) fn sync_auto(&mut self) -> AppResult<()> {
+        if !self.sync.config().is_some_and(|config| config.auto_sync) {
+            return Ok(());
+        }
+        if let Err(err) = self.run_auto_upload() {
+            self.emit(Event::Warning(format!("自动同步失败：{err}")));
+        }
+        Ok(())
+    }
+
+    /// 執行自動上傳（無變更時不動作）。
+    fn run_auto_upload(&mut self) -> AppResult<()> {
+        let config = self.require_sync_config()?;
+        let dav = self.webdav_for(&config);
+        let mut uploaded = 0_u32;
+        for (file, path) in self.sync_local.clone() {
+            let record = self.sync.record(file).clone();
+            if matches!(engine::evaluate(&dav, file, &path, &record)?, Plan::Push) {
+                let new = engine::push(&dav, file, &path)?;
+                self.sync.set_record(file, new)?;
+                uploaded += 1;
+            }
+        }
+        if uploaded > 0 {
+            self.emit(Event::SyncDone {
+                summary: format!("已自动上传 {uploaded} 个文件"),
+            });
+        }
+        Ok(())
+    }
+
     /// 以本機覆蓋遠端（強制）。
     pub(super) fn sync_push(&mut self) -> AppResult<()> {
         let config = self.require_sync_config()?;

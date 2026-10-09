@@ -598,6 +598,7 @@ impl Worker {
             Job::SyncTestConnection { config } => self.sync_test_connection(config),
             Job::SyncImport { config } => self.sync_import(config),
             Job::SyncNow => self.sync_now(),
+            Job::SyncAuto => self.sync_auto(),
             Job::SyncPush => self.sync_push(),
             Job::SyncPull => self.sync_pull(),
             Job::SetSyncConfig { config } => self.set_sync_config(config),

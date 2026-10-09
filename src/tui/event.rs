@@ -56,7 +56,7 @@ pub(crate) fn apply_event(app: &mut App, event: Event, jobs: &Sender<Job>) {
             app.cancel_loading(target);
         }
         Event::Schedule(data) => apply_schedule(app, *data),
-        Event::Tasks(tasks) => apply_tasks(app, tasks),
+        Event::Tasks(tasks) => apply_tasks(app, tasks, jobs),
         Event::Homework(update) => apply_homework(app, update),
         Event::HomeworkNeedsTerm {
             options,
@@ -396,7 +396,7 @@ fn apply_homework(app: &mut App, update: HomeworkUpdate) {
 /// 這裡刻意不切換根畫面：解鎖時任務服務會先回報一次快照（`InitTasks` 排在
 /// `VaultReady` 之前送出），那時介面還停在解鎖表單，不該被任務快照拉進主畫面
 /// ——進入主畫面由 `VaultReady` 負責。
-fn apply_tasks(app: &mut App, tasks: Vec<Task>) {
+fn apply_tasks(app: &mut App, tasks: Vec<Task>, jobs: &Sender<Job>) {
     let previous = app.task_page_selected_id();
     app.task_page.tasks = tasks;
     if let Screen::TaskForm(form) = &app.screen
@@ -410,6 +410,10 @@ fn apply_tasks(app: &mut App, tasks: Vec<Task>) {
         selection.retain(|id| alive.contains(id));
     }
     app.anchor_task_selection(previous);
+    // 自動同步已開啟：任務變更後把本機變更自動上傳（工作者在無變更時不動作）。
+    if app.sync.auto_sync {
+        let _ = jobs.send(Job::SyncAuto);
+    }
 }
 
 /// 課程清單更新：以穩定的課程識別碼重新定位目前課程。

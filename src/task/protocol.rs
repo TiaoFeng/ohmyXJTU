@@ -275,6 +275,8 @@ pub enum Job {
     },
     /// 智慧同步：逐檔三方比對，只做無衝突的動作。
     SyncNow,
+    /// 自動同步（背景）：僅在「本機變更、遠端未變」時上傳，其餘不動。
+    SyncAuto,
     /// 以本機覆蓋遠端（強制；用於解決衝突）。
     SyncPush,
     /// 以遠端覆蓋本機（強制；用於解決衝突）。
@@ -330,6 +332,7 @@ impl Job {
             Self::SyncTestConnection { .. } => "测试坚果云连接".to_owned(),
             Self::SyncImport { .. } => "从坚果云导入".to_owned(),
             Self::SyncNow | Self::SyncPush | Self::SyncPull => "坚果云同步".to_owned(),
+            Self::SyncAuto => "坚果云自动同步".to_owned(),
             Self::SetSyncConfig { .. } => "保存坚果云设置".to_owned(),
             Self::SetSyncAuto { .. } => "坚果云自动同步".to_owned(),
             Self::ClearSyncConfig => "清除坚果云配置".to_owned(),
@@ -752,6 +755,7 @@ pub(super) fn failed_target_of(job: &Job) -> FailedTarget {
         Job::SyncTestConnection { .. }
         | Job::SyncImport { .. }
         | Job::SyncNow
+        | Job::SyncAuto
         | Job::SyncPush
         | Job::SyncPull
         | Job::SetSyncConfig { .. }

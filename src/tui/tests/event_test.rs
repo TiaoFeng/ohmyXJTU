@@ -36,6 +36,25 @@ fn app() -> App {
 }
 
 #[test]
+fn tasks_event_auto_uploads_only_when_enabled() {
+    let mut app = app();
+    let (jobs, rx) = channel();
+
+    // 未開啟自動同步：任務事件不觸發同步。
+    apply_event_with_jobs(&mut app, Event::Tasks(Vec::new()), &jobs);
+    assert!(rx.try_iter().next().is_none(), "未开启时不应触发自动同步");
+
+    // 開啟自動同步後：任務事件送出自動同步任務。
+    app.sync = crate::task::SyncStateView {
+        configured: true,
+        auto_sync: true,
+        ..Default::default()
+    };
+    apply_event_with_jobs(&mut app, Event::Tasks(Vec::new()), &jobs);
+    assert!(matches!(rx.try_iter().next(), Some(Job::SyncAuto)));
+}
+
+#[test]
 fn vault_ready_moves_to_main_and_starts_loading() {
     let mut app = app();
     let (jobs, rx) = channel();

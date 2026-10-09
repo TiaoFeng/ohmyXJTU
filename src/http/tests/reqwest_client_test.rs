@@ -800,6 +800,26 @@ fn webvpn_proxy_targets_define_the_origin() {
     assert!(!same_origin(&broken, &broken), "无法判定时应视为跨源");
 }
 
+/// `limit_body`：回應本文超過上限時即中止，避免超大本文耗盡資源。
+#[test]
+fn body_over_the_limit_is_rejected() {
+    let (base, _hits) = serve(1, |_index, _base| ok_response(&"x".repeat(64)));
+    let err = client()
+        .send(HttpRequest::get(base).limit_body(16))
+        .expect_err("超大正文应报错");
+    assert!(err.to_string().contains("过大"), "{err}");
+}
+
+/// `limit_body`：本文在上限之內時正常回傳。
+#[test]
+fn body_within_the_limit_is_returned() {
+    let (base, _hits) = serve(1, |_index, _base| ok_response("hello"));
+    let response = client()
+        .send(HttpRequest::get(base).limit_body(64))
+        .expect("正文在上限内应成功");
+    assert_eq!(response.body, b"hello");
+}
+
 /// 逾時是對外承諾的數值：縮短它是為了讓失敗更快暴露，讓使用者不必
 /// 枯等半分鐘才看到錯誤（失敗後由工作者自動重試）。改動這兩個值時
 /// 必須一併確認自動重試的次數仍能接受。

@@ -112,6 +112,8 @@ pub struct HttpRequest {
     pub timeout: Option<Duration>,
     /// 是否跟隨重定向。
     pub follow_redirects: bool,
+    /// 回應本文大小上限（位元組）；`None` 表示不限制。
+    pub max_body: Option<u64>,
 }
 
 impl HttpRequest {
@@ -124,6 +126,7 @@ impl HttpRequest {
             body: None,
             timeout: None,
             follow_redirects: true,
+            max_body: None,
         }
     }
 
@@ -136,6 +139,7 @@ impl HttpRequest {
             body: None,
             timeout: None,
             follow_redirects: true,
+            max_body: None,
         }
     }
 
@@ -156,6 +160,7 @@ impl HttpRequest {
             body: Some(Body::Form(fields)),
             timeout: None,
             follow_redirects: true,
+            max_body: None,
         }
     }
 
@@ -168,6 +173,7 @@ impl HttpRequest {
             body: Some(Body::Json(value)),
             timeout: None,
             follow_redirects: true,
+            max_body: None,
         }
     }
 
@@ -180,6 +186,7 @@ impl HttpRequest {
             body: Some(Body::Bytes(body.into())),
             timeout: None,
             follow_redirects: true,
+            max_body: None,
         }
     }
 
@@ -192,6 +199,7 @@ impl HttpRequest {
             body: None,
             timeout: None,
             follow_redirects: true,
+            max_body: None,
         }
     }
 
@@ -204,6 +212,7 @@ impl HttpRequest {
             body: None,
             timeout: None,
             follow_redirects: true,
+            max_body: None,
         }
     }
 
@@ -216,6 +225,7 @@ impl HttpRequest {
             body: None,
             timeout: None,
             follow_redirects: true,
+            max_body: None,
         }
     }
 
@@ -228,6 +238,12 @@ impl HttpRequest {
     /// 不跟隨重定向（用於需要觀察狀態碼的探測請求）。
     pub fn no_redirect(mut self) -> Self {
         self.follow_redirects = false;
+        self
+    }
+
+    /// 限制回應本文大小；超過即中止，避免超大回應耗盡記憶體或磁碟。
+    pub fn limit_body(mut self, max_body: u64) -> Self {
+        self.max_body = Some(max_body);
         self
     }
 
@@ -270,6 +286,7 @@ impl fmt::Debug for HttpRequest {
             .field("body", &self.body)
             .field("timeout", &self.timeout)
             .field("follow_redirects", &self.follow_redirects)
+            .field("max_body", &self.max_body)
             .finish()
     }
 }

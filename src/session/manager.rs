@@ -633,6 +633,7 @@ fn prepare_request(
         body: request.body,
         timeout: request.timeout,
         follow_redirects: request.follow_redirects,
+        max_body: request.max_body,
     })
 }
 

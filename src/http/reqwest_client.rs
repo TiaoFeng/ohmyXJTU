@@ -1,5 +1,6 @@
 //! 以 `reqwest` 實作的 HTTP 客戶端。
 
+use std::io::Read;
 use std::time::{Duration, Instant};
 
 use reqwest::blocking::Client;
@@ -137,7 +138,10 @@ impl ReqwestClient {
                 )
             })
             .collect();
-        let body = response.bytes().map_err(map_error)?.to_vec();
+        let body = match request.max_body {
+            Some(limit) => read_body_limited(response, limit)?,
+            None => response.bytes().map_err(map_error)?.to_vec(),
+        };
 
         Ok(HttpResponse {
             status,
@@ -157,6 +161,7 @@ impl ReqwestClient {
         let mut body = request.body.clone();
         let mut headers = request.headers.clone();
         let mut url = request.url.clone();
+        let max_body = request.max_body;
         let mut hops = 0_usize;
         // 逾時是**整條請求**的預算，不是每一跳各算一次：逐跳各自吃滿逾時的話，
         // 一條十跳的慢速重導鏈最壞會拖上「逾時 × 10」，而工作執行緒在這段期間
@@ -185,6 +190,7 @@ impl ReqwestClient {
                 body: body.clone(),
                 timeout: Some(remaining_timeout(deadline)),
                 follow_redirects: false,
+                max_body,
             })?;
 
             let Some(location) = redirect_location(&response) else {
@@ -437,6 +443,32 @@ fn build_client(user_agent: &str, timeout: Duration) -> AppResult<Client> {
 /// URL 與查詢參數，避免把敏感資訊帶進使用者可見訊息。
 fn map_error(err: reqwest::Error) -> AppError {
     AppError::network_kind(classify(&err), describe(&err))
+}
+
+/// 讀取回應本文，超過 `limit` 即中止。
+///
+/// 有 `Content-Length` 時先據以拒絕，避免把超大本文讀進記憶體；否則邊讀邊計，
+/// 一旦超過即停（`take(limit + 1)` 保證讀不到更多）。
+fn read_body_limited(response: reqwest::blocking::Response, limit: u64) -> AppResult<Vec<u8>> {
+    if let Some(length) = response.content_length()
+        && length > limit
+    {
+        return Err(body_too_large(length, limit));
+    }
+    let mut body = Vec::new();
+    response
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut body)
+        .map_err(|err| AppError::network(format!("读取响应正文失败：{err}")))?;
+    if body.len() as u64 > limit {
+        return Err(body_too_large(body.len() as u64, limit));
+    }
+    Ok(body)
+}
+
+/// 回應本文超過上限的錯誤。
+fn body_too_large(length: u64, limit: u64) -> AppError {
+    AppError::network(format!("响应正文过大（{length} 字节，上限 {limit}）"))
 }
 
 /// 依錯誤鏈判斷網路錯誤類別。

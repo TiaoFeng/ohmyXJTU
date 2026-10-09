@@ -840,29 +840,37 @@ fn build_job(kind: FormKind, values: &FormValues) -> Result<Job, String> {
                 new: values.password.clone(),
             })
         }
-        FormKind::SyncConfig => {
-            let url = values.sync_url.trim();
-            if url.is_empty() {
-                return Err("请输入服务器地址".to_owned());
-            }
-            if !url.starts_with("https://") && !url.starts_with("http://") {
-                return Err("服务器地址必须以 http(s):// 开头".to_owned());
-            }
-            if values.sync_account.trim().is_empty() {
-                return Err("请输入坚果云账号".to_owned());
-            }
-            if values.sync_app_password.is_empty() {
-                return Err("请输入应用密码".to_owned());
-            }
-            Ok(Job::SetSyncConfig {
-                config: SyncConfig::new(
-                    url,
-                    values.sync_account.trim(),
-                    values.sync_app_password.as_str(),
-                ),
-            })
-        }
+        FormKind::SyncConfig => Ok(Job::SetSyncConfig {
+            config: sync_config_from(values)?,
+        }),
     }
+}
+
+/// 由同步設定表單組出連線設定（驗證失敗時回傳訊息）。
+pub(super) fn sync_config_from_form(form: &FormState) -> Result<SyncConfig, String> {
+    sync_config_from(&FormValues::from_form(form))
+}
+
+/// 由表單值組出連線設定（驗證失敗時回傳訊息）。
+fn sync_config_from(values: &FormValues) -> Result<SyncConfig, String> {
+    let url = values.sync_url.trim();
+    if url.is_empty() {
+        return Err("请输入服务器地址".to_owned());
+    }
+    if !url.starts_with("https://") && !url.starts_with("http://") {
+        return Err("服务器地址必须以 http(s):// 开头".to_owned());
+    }
+    if values.sync_account.trim().is_empty() {
+        return Err("请输入坚果云账号".to_owned());
+    }
+    if values.sync_app_password.is_empty() {
+        return Err("请输入应用密码".to_owned());
+    }
+    Ok(SyncConfig::new(
+        url,
+        values.sync_account.trim(),
+        values.sync_app_password.as_str(),
+    ))
 }
 
 fn validate_passphrase(passphrase: &str, confirm: &str) -> Result<(), String> {

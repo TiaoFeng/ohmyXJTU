@@ -946,6 +946,31 @@ impl SettingsState {
     }
 }
 
+/// 登入畫面「從堅果雲導入」的狀態。
+#[derive(Debug, Clone)]
+pub struct SyncImportState {
+    /// 連線設定表單（伺服器位址／帳號／應用密碼）。
+    pub form: FormState,
+    /// 表單是從首次設定（尚未有憑證檔）開啟的；`esc` 據此返回對應畫面。
+    pub from_setup: bool,
+    /// 是否正在測試連線或導入。
+    pub busy: bool,
+    /// 測試連線的結果或錯誤訊息。
+    pub message: Option<String>,
+}
+
+impl SyncImportState {
+    /// 建立導入狀態（伺服器位址預填預設值）。
+    pub fn new(from_setup: bool) -> Self {
+        Self {
+            form: FormState::sync_config(&SyncStateView::default()),
+            from_setup,
+            busy: false,
+            message: None,
+        }
+    }
+}
+
 /// 「坚果云同步」設定子選單的狀態。
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SyncMenuState {
@@ -1130,6 +1155,8 @@ pub enum Screen {
     SettingsForm(FormState),
     /// 帳戶設定中的「坚果云同步」子選單。
     SyncMenu(SyncMenuState),
+    /// 登入畫面的「從堅果雲導入」。
+    SyncImport(SyncImportState),
     /// 學期選擇器。
     TermPicker(TermPickerState),
     /// 任務設置彈窗（`^T`）。
@@ -1524,6 +1551,7 @@ impl App {
         }
         match &mut self.screen {
             Screen::Setup(form) | Screen::Unlock(form) | Screen::SettingsForm(form) => Some(form),
+            Screen::SyncImport(state) => Some(&mut state.form),
             _ => None,
         }
     }

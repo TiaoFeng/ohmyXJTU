@@ -144,17 +144,28 @@ fn apply_sync_state(app: &mut App, view: SyncStateView) {
     }
 }
 
-/// 堅果雲連線測試結果：通過／失敗都以底欄訊息呈現。
+/// 堅果雲連線測試結果：導入畫面就地顯示，其餘情況顯示於底欄。
 fn apply_sync_test_result(app: &mut App, ok: bool, message: String) {
-    if ok {
-        app.set_message(format!("坚果云连接成功：{message}"));
+    let text = if ok {
+        format!("连接成功：{message}（按 enter 或 ^s 导入）")
     } else {
-        app.set_warning_message(format!("坚果云连接失败：{message}"));
+        format!("连接失败：{message}")
+    };
+    if let Screen::SyncImport(state) = &mut app.screen {
+        state.busy = false;
+        state.message = Some(text);
+        return;
+    }
+    if ok {
+        app.set_message(text);
+    } else {
+        app.set_warning_message(text);
     }
 }
 
-/// 已從堅果雲導入：本機憑證檔已就緒，提示使用者輸入加密口令。
+/// 已從堅果雲導入：本機憑證檔已就緒，回到解鎖畫面請使用者輸入加密口令。
 fn apply_sync_imported(app: &mut App, message: String) {
+    app.set_screen(Screen::Unlock(FormState::unlock()));
     app.set_message(message);
 }
 
@@ -535,12 +546,16 @@ fn apply_failure(
             FailedTarget::Login => set_login_error(app, login_site, text.clone()),
             FailedTarget::Settings | FailedTarget::Sync => {
                 // 設定保存失敗：保留彈窗與草稿，僅解除「保存中」；
-                // 設定表單失敗則就地顯示錯誤並恢復輸入。
+                // 設定表單失敗則就地顯示錯誤並恢復輸入；導入畫面就地顯示。
                 match &mut app.screen {
                     Screen::Settings(state) => state.saving = false,
                     Screen::SettingsForm(form) => {
                         form.busy = false;
                         form.error = Some(text.clone());
+                    }
+                    Screen::SyncImport(state) => {
+                        state.busy = false;
+                        state.message = Some(text.clone());
                     }
                     _ => {}
                 }

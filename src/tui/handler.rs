@@ -12,8 +12,8 @@ use crate::domain::todo::{self, SortMode};
 use crate::session::SiteKind;
 use crate::task::Job;
 use crate::tui::app::{
-    App, FormKind, FormState, LoginScreen, NavItem, Screen, SettingsState, SyncMenuAction,
-    SyncMenuState, TaskBatchOp, TaskConfirmState, TaskField, TaskMenuKind,
+    App, FormKind, FormState, LoginScreen, NavItem, Screen, SettingsState, SyncImportState,
+    SyncMenuAction, SyncMenuState, TaskBatchOp, TaskConfirmState, TaskField, TaskMenuKind,
 };
 use crate::tui::text::InputLine;
 
@@ -91,6 +91,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
         }
         Screen::Settings(_) => handle_settings(app, key, jobs),
         Screen::SyncMenu(_) => handle_sync_menu(app, key, jobs),
+        Screen::SyncImport(_) => handle_sync_import(app, key, jobs),
         Screen::TermPicker(_) => handle_term_picker(app, key, jobs),
         Screen::TaskMenu(_) => handle_task_menu(app, key),
         Screen::TaskBatchMenu(_) => handle_task_batch_menu(app, key, jobs),
@@ -284,6 +285,16 @@ fn handle_form(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
         return;
     }
     let kind = app.form_mut().map(|form| form.kind);
+
+    // 「從堅果雲導入」只在首次設定與解鎖畫面提供（`^y`）。
+    if key.modifiers.contains(KeyModifiers::CONTROL)
+        && key.code == KeyCode::Char('y')
+        && matches!(kind, Some(FormKind::Setup | FormKind::Unlock))
+    {
+        let from_setup = matches!(kind, Some(FormKind::Setup));
+        app.set_screen(Screen::SyncImport(SyncImportState::new(from_setup)));
+        return;
+    }
 
     match key.code {
         KeyCode::Esc => {
@@ -578,6 +589,72 @@ fn run_sync_action(app: &mut App, jobs: &Sender<Job>, action: SyncMenuAction) {
 }
 
 // ── 主畫面 ───────────────────────────────────────────
+
+/// 「從堅果雲導入」：輸入設定、測試連線、導入。
+fn handle_sync_import(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
+    let control = key.modifiers.contains(KeyModifiers::CONTROL);
+    let (busy, from_setup) = match &app.screen {
+        Screen::SyncImport(state) => (state.busy, state.from_setup),
+        _ => return,
+    };
+    if busy {
+        return;
+    }
+
+    if control && key.code == KeyCode::Char('t') {
+        submit_sync_import(app, jobs, true);
+        return;
+    }
+    if (control && key.code == KeyCode::Char('s'))
+        || matches!(key.code, KeyCode::Enter | KeyCode::Char('\n'))
+    {
+        submit_sync_import(app, jobs, false);
+        return;
+    }
+    if key.code == KeyCode::Esc {
+        app.set_screen(if from_setup {
+            Screen::Setup(FormState::setup())
+        } else {
+            Screen::Unlock(FormState::unlock())
+        });
+        return;
+    }
+
+    let Screen::SyncImport(state) = &mut app.screen else {
+        return;
+    };
+    match key.code {
+        KeyCode::Tab | KeyCode::Down => state.form.focus_next(),
+        KeyCode::BackTab | KeyCode::Up => state.form.focus_previous(),
+        _ => {
+            if !control && let Some(field) = state.form.focused_mut() {
+                edit_line(&mut field.value, key);
+            }
+        }
+    }
+}
+
+/// 由導入表單組出設定並送出測試或導入任務；驗證失敗就地顯示。
+fn submit_sync_import(app: &mut App, jobs: &Sender<Job>, test: bool) {
+    let Screen::SyncImport(state) = &mut app.screen else {
+        return;
+    };
+    let config = match controller::sync_config_from_form(&state.form) {
+        Ok(config) => config,
+        Err(message) => {
+            state.message = Some(message);
+            return;
+        }
+    };
+    state.busy = true;
+    state.message = None;
+    let job = if test {
+        Job::SyncTestConnection { config }
+    } else {
+        Job::SyncImport { config }
+    };
+    let _ = jobs.send(job);
+}
 
 /// 學期選擇器（作業頁）：上下選擇、enter 確認、esc 取消。
 fn handle_term_picker(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {

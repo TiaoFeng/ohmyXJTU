@@ -15,7 +15,8 @@ use crate::sites::lms::{ActivityKind, LmsActivity, LmsCourse};
 use crate::task::Job;
 use crate::tui::app::{
     AgreementState, App, FormKind, FormState, HomeworkData, LmsLevel, LoginScreen, NavItem, Page,
-    Screen, SettingsState, TaskConfirmState, TaskEntry, TaskField, TaskFormMode, TermPickerState,
+    Screen, SettingsState, SyncImportState, TaskConfirmState, TaskEntry, TaskField, TaskFormMode,
+    TermPickerState,
 };
 use crate::tui::controller::FormValues;
 
@@ -674,6 +675,73 @@ fn sync_menu_submits_each_action() {
     }
     press(&mut app, &jobs, KeyCode::Enter);
     assert!(matches!(rx.try_recv(), Ok(Job::ClearSyncConfig)));
+}
+
+#[test]
+fn unlock_ctrl_y_opens_the_import_screen() {
+    let (jobs, rx) = channel();
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Unlock(FormState::unlock()));
+    press_ctrl(&mut app, &jobs, 'y');
+    assert!(
+        matches!(app.screen, Screen::SyncImport(_)),
+        "{:?}",
+        app.screen
+    );
+    assert!(rx.try_recv().is_err(), "開啟導入畫面不送任務");
+
+    // esc 回到解鎖畫面。
+    press(&mut app, &jobs, KeyCode::Esc);
+    assert!(matches!(app.screen, Screen::Unlock(_)));
+}
+
+#[test]
+fn sync_import_tests_and_imports_with_the_entered_settings() {
+    let (jobs, rx) = channel();
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::SyncImport(SyncImportState::new(false)));
+    // 伺服器位址已預填，填入帳號與應用密碼。
+    press(&mut app, &jobs, KeyCode::Tab);
+    type_text(&mut app, &jobs, "u@example.com");
+    press(&mut app, &jobs, KeyCode::Tab);
+    type_text(&mut app, &jobs, "app-pass");
+
+    press_ctrl(&mut app, &jobs, 't');
+    match rx.try_recv() {
+        Ok(Job::SyncTestConnection { .. }) => {}
+        other => panic!("^t 应送出连线测试：{other:?}"),
+    }
+
+    // 處理中：忽略其餘輸入，不重送。
+    press_ctrl(&mut app, &jobs, 's');
+    assert!(rx.try_recv().is_err(), "处理中不应重复送出");
+}
+
+#[test]
+fn sync_import_enter_submits_the_import() {
+    let (jobs, rx) = channel();
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::SyncImport(SyncImportState::new(false)));
+    press(&mut app, &jobs, KeyCode::Tab);
+    type_text(&mut app, &jobs, "u@example.com");
+    press(&mut app, &jobs, KeyCode::Tab);
+    type_text(&mut app, &jobs, "app-pass");
+    press(&mut app, &jobs, KeyCode::Enter);
+    assert!(matches!(rx.try_recv(), Ok(Job::SyncImport { .. })));
+}
+
+#[test]
+fn sync_import_reports_validation_errors_in_place() {
+    let (jobs, rx) = channel();
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::SyncImport(SyncImportState::new(false)));
+    // 帳號與應用密碼留空：enter 就地報錯、不送任務。
+    press(&mut app, &jobs, KeyCode::Enter);
+    assert!(rx.try_recv().is_err(), "验证失败不应送出任务");
+    let Screen::SyncImport(state) = &app.screen else {
+        panic!("应停留在导入画面");
+    };
+    assert!(state.message.is_some(), "应就地显示验证错误");
 }
 
 #[test]

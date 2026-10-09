@@ -145,13 +145,23 @@ fn normalize_etag_strips_quotes_and_weak_prefix() {
     assert_eq!(normalize_etag("abc123"), "abc123");
 }
 
-/// `HEAD` 不被支援（405）時，改用 `GET` 探測。
+/// 連線測試（`check`）：先 `PUT` 探測檔再 `DELETE`。
 #[test]
-fn probe_falls_back_to_get_when_head_is_unsupported() {
-    let (client, dav) = endpoint(vec![response(405, &[], b""), response(404, &[], b"")]);
-    dav.probe("f.vault").expect("GET 回 404 应视为可连线");
+fn check_uploads_and_removes_a_probe_file() {
+    let (client, dav) = endpoint(vec![response(201, &[], b""), response(204, &[], b"")]);
+    dav.check().expect("可写入时应通过");
     let methods: Vec<Method> = client.requests().iter().map(|r| r.method).collect();
-    assert_eq!(methods, vec![Method::Head, Method::Get]);
+    assert_eq!(methods, vec![Method::Put, Method::Delete]);
+}
+
+/// 連線測試遇到 404（路徑不存在／不可寫）时应报错，并指出方法与网址。
+#[test]
+fn check_reports_an_unwritable_path() {
+    let (_client, dav) = endpoint(vec![response(404, &[], b"")]);
+    let err = dav.check().expect_err("不可写入时应报错");
+    let text = err.to_string();
+    assert!(text.contains("404"), "{text}");
+    assert!(text.contains("PUT"), "应指出方法：{text}");
 }
 
 /// `Debug` 不得洩漏應用密碼或其 base64。

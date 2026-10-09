@@ -82,11 +82,9 @@ impl Worker {
             .ok_or_else(|| AppError::config("尚未配置坚果云同步"))
     }
 
-    /// 測試連線（登入畫面與設定表單共用）。
+    /// 測試連線與寫入權限（登入畫面與設定表單共用）。
     pub(super) fn sync_test_connection(&mut self, config: SyncConfig) -> AppResult<()> {
-        let result = self
-            .webdav_for(&config)
-            .probe(SyncFile::Credentials.remote_name());
+        let result = self.webdav_for(&config).check();
         let event = match result {
             Ok(()) => Event::SyncTestResult {
                 ok: true,
@@ -214,8 +212,7 @@ impl Worker {
 
     /// 儲存連線設定：先測試連線，通過才保存（「測試連線通過才啟用」）。
     pub(super) fn set_sync_config(&mut self, mut config: SyncConfig) -> AppResult<()> {
-        self.webdav_for(&config)
-            .probe(SyncFile::Credentials.remote_name())?;
+        self.webdav_for(&config).check()?;
         // 編輯既有設定時沿用目前的自動同步偏好，避免被重設為關閉。
         if let Some(existing) = self.sync.config() {
             config.auto_sync = existing.auto_sync;

@@ -168,8 +168,8 @@ pub enum AppError {
     #[error("远端文档已被其他设备修改，请先同步")]
     WebDavConflict,
 
-    /// 其他 WebDAV（堅果雲同步）錯誤。
-    #[error("坚果云同步失败：{0}")]
+    /// 其他 WebDAV（坚果云同步）错误（訊息自足，不再重複「坚果云同步失败」前缀）。
+    #[error("{0}")]
     WebDav(String),
 
     /// 設定檔或路徑相關錯誤。

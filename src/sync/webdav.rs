@@ -19,6 +19,9 @@ use crate::http::{HttpClient, HttpRequest, HttpResponse};
 /// 堅果雲 WebDAV 的預設伺服器位址。
 pub const DEFAULT_BASE: &str = "https://dav.jianguoyun.com/dav/";
 
+/// 連線測試用的探測檔名（與同步檔案不衝突）。
+const PROBE_FILE: &str = "ohmyXJTU-probe.tmp";
+
 /// 遠端檔案的中介資料。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RemoteMeta {
@@ -57,46 +60,38 @@ impl WebDav {
         format!("{}{}", self.base, file)
     }
 
-    /// 測試連線：對目標檔案做一次 `HEAD`。
+    /// 測試連線與寫入權限：上傳一個小探測檔後立即刪除。
     ///
-    /// `401/403` 代表認證失敗；`404` 代表認證通過但檔案尚未建立（正常）；
-    /// `405/501`（不支援 `HEAD`）改以 `GET` 探測；其他非 2xx 視為錯誤。
-    pub fn probe(&self, file: &str) -> AppResult<()> {
-        let response = self.send(HttpRequest::head(self.url_for(file)))?;
-        match response.status {
-            200..=299 | 404 | 410 => Ok(()),
-            401 | 403 => Err(AppError::WebDavAuth),
-            405 | 501 => {
-                let response = self.send(HttpRequest::get(self.url_for(file)))?;
-                match response.status {
-                    200..=299 | 404 | 410 => Ok(()),
-                    401 | 403 => Err(AppError::WebDavAuth),
-                    other => Err(unexpected_status(other)),
-                }
-            }
-            other => Err(unexpected_status(other)),
-        }
+    /// `HEAD` 只能證明「路徑可達」，无法保證可寫入；同步需要寫入權限，因此以
+    /// 一次真實的 `PUT`＋`DELETE` 驗證，並在失敗時回報方法與目標網址。刪除失敗
+    /// 不影響「可寫」的結論。
+    pub fn check(&self) -> AppResult<()> {
+        self.put(PROBE_FILE, b"ohmyXJTU probe", None)?;
+        let _ = self.delete(PROBE_FILE);
+        Ok(())
     }
 
     /// 讀取遠端檔案中介資料（不下載主體）。
     pub fn head(&self, file: &str) -> AppResult<RemoteMeta> {
-        let response = self.send(HttpRequest::head(self.url_for(file)))?;
+        let url = self.url_for(file);
+        let response = self.send(HttpRequest::head(url.clone()))?;
         match response.status {
             200..=299 => Ok(meta_from(&response, true)),
             404 | 410 => Ok(RemoteMeta::default()),
             401 | 403 => Err(AppError::WebDavAuth),
-            other => Err(unexpected_status(other)),
+            other => Err(unexpected_status("HEAD", &url, other)),
         }
     }
 
     /// 下載遠端檔案；不存在時回 `None`。
     pub fn get(&self, file: &str) -> AppResult<Option<(Vec<u8>, RemoteMeta)>> {
-        let response = self.send(HttpRequest::get(self.url_for(file)))?;
+        let url = self.url_for(file);
+        let response = self.send(HttpRequest::get(url.clone()))?;
         match response.status {
             200..=299 => Ok(Some((response.body.clone(), meta_from(&response, true)))),
             404 | 410 => Ok(None),
             401 | 403 => Err(AppError::WebDavAuth),
-            other => Err(unexpected_status(other)),
+            other => Err(unexpected_status("GET", &url, other)),
         }
     }
 
@@ -105,7 +100,8 @@ impl WebDav {
     /// `if_match` 為 `Some` 時附上 `If-Match`，讓「檢查→上傳」成為條件請求：
     /// 遠端已被其他裝置改動時伺服器會回 `412`，映射為 [`AppError::WebDavConflict`]。
     pub fn put(&self, file: &str, bytes: &[u8], if_match: Option<&str>) -> AppResult<RemoteMeta> {
-        let mut request = HttpRequest::put(self.url_for(file), bytes.to_vec())
+        let url = self.url_for(file);
+        let mut request = HttpRequest::put(url.clone(), bytes.to_vec())
             .header("Content-Type", "application/octet-stream");
         if let Some(etag) = if_match {
             request = request.header("If-Match", etag);
@@ -115,17 +111,22 @@ impl WebDav {
             200..=299 => Ok(meta_from(&response, true)),
             401 | 403 => Err(AppError::WebDavAuth),
             412 => Err(AppError::WebDavConflict),
-            other => Err(unexpected_status(other)),
+            // PUT 遇到 404 幾乎都是路徑問題（目錄不存在或地址写錯），單獨提示。
+            404 => Err(AppError::webdav(format!(
+                "服务器找不到目标路径（PUT {url} → 404）：请确认服务器地址是否正确，且该目录存在、可写入（坚云默认为 https://dav.jianguoyun.com/dav/）"
+            ))),
+            other => Err(unexpected_status("PUT", &url, other)),
         }
     }
 
-    /// 刪除遠端檔案（不存在視為刪除成功）。
+    /// 刪除遠端檔案（不存在视为刪除成功）。
     pub fn delete(&self, file: &str) -> AppResult<()> {
-        let response = self.send(HttpRequest::delete(self.url_for(file)))?;
+        let url = self.url_for(file);
+        let response = self.send(HttpRequest::delete(url.clone()))?;
         match response.status {
             200..=299 | 404 | 410 => Ok(()),
             401 | 403 => Err(AppError::WebDavAuth),
-            other => Err(unexpected_status(other)),
+            other => Err(unexpected_status("DELETE", &url, other)),
         }
     }
 
@@ -149,9 +150,9 @@ impl std::fmt::Debug for WebDav {
     }
 }
 
-/// 非預期的 HTTP 狀態碼。
-fn unexpected_status(status: u16) -> AppError {
-    AppError::webdav(format!("服务器返回异常状态码：{status}"))
+/// 非預期的 HTTP 狀態碼（附方法與網址，方便診斷）。
+fn unexpected_status(method: &str, url: &str, status: u16) -> AppError {
+    AppError::webdav(format!("服务器返回异常状态码 {status}（{method} {url}）"))
 }
 
 /// 確保伺服器位址以 `/` 結尾。

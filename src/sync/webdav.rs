@@ -16,6 +16,9 @@ use zeroize::Zeroizing;
 use crate::error::{AppError, AppResult};
 use crate::http::{HttpClient, HttpRequest, HttpResponse};
 
+/// 堅果雲 WebDAV 的預設伺服器位址。
+pub const DEFAULT_BASE: &str = "https://dav.jianguoyun.com/dav/";
+
 /// 遠端檔案的中介資料。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RemoteMeta {

@@ -10,7 +10,7 @@ use crate::text::display_width;
 use crate::tone::Tone;
 use crate::tui::app::{App, LmsLevel, NavItem, Screen};
 use crate::tui::theme::THEME;
-use crate::tui::views::{content, settings, task_form, task_menu, term_picker};
+use crate::tui::views::{content, settings, sync_menu, task_form, task_menu, term_picker};
 
 /// 側邊欄寬度。
 const SIDEBAR_WIDTH: u16 = 22;
@@ -38,6 +38,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     if let Screen::Settings(state) = &app.screen {
         settings::draw(frame, app, *state);
+    }
+    if let Screen::SyncMenu(state) = &app.screen {
+        sync_menu::draw(frame, app, *state);
     }
     if let Screen::TermPicker(state) = &app.screen {
         term_picker::draw(frame, state);

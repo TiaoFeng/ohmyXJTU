@@ -12,8 +12,8 @@ use crate::domain::todo::{self, SortMode};
 use crate::session::SiteKind;
 use crate::task::Job;
 use crate::tui::app::{
-    App, FormKind, FormState, LoginScreen, NavItem, Screen, SettingsState, TaskBatchOp,
-    TaskConfirmState, TaskField, TaskMenuKind,
+    App, FormKind, FormState, LoginScreen, NavItem, Screen, SettingsState, SyncMenuAction,
+    SyncMenuState, TaskBatchOp, TaskConfirmState, TaskField, TaskMenuKind,
 };
 use crate::tui::text::InputLine;
 
@@ -90,6 +90,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
             handle_form(app, key, jobs);
         }
         Screen::Settings(_) => handle_settings(app, key, jobs),
+        Screen::SyncMenu(_) => handle_sync_menu(app, key, jobs),
         Screen::TermPicker(_) => handle_term_picker(app, key, jobs),
         Screen::TaskMenu(_) => handle_task_menu(app, key),
         Screen::TaskBatchMenu(_) => handle_task_batch_menu(app, key, jobs),
@@ -209,8 +210,8 @@ fn toggle_settings(app: &mut App) {
         return;
     }
     match app.screen {
-        // 設定彈窗已開啟：`^P` 關閉它（相當於 esc）。
-        Screen::Settings(_) => app.set_screen(Screen::Main),
+        // 設定彈窗（含同步子選單）已開啟：`^P` 關閉它（相當於 esc）。
+        Screen::Settings(_) | Screen::SyncMenu(_) => app.set_screen(Screen::Main),
         // 學期選擇器上的 `^P` 是「開啟帳戶設定」，與其他畫面一致；選擇器是
         // 彈窗，被設定畫面取代後可用 `s` 重新開啟（選項記在 `term_options`）。
         // 設定表單與其他彈窗不動：不丟掉進行中的輸入。
@@ -291,6 +292,8 @@ fn handle_form(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
                 Some(FormKind::ChangeAccount | FormKind::ChangePassphrase)
             ) {
                 app.set_screen(Screen::Settings(SettingsState::open(app.access_policy)));
+            } else if matches!(kind, Some(FormKind::SyncConfig)) {
+                app.set_screen(Screen::SyncMenu(SyncMenuState::default()));
             }
         }
         KeyCode::Enter | KeyCode::Char('\n') => controller::submit_form(app, jobs),
@@ -491,6 +494,9 @@ fn handle_settings(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
             SettingsState::PASSPHRASE_INDEX => {
                 app.set_screen(Screen::SettingsForm(FormState::change_passphrase()));
             }
+            SettingsState::SYNC_INDEX => {
+                app.set_screen(Screen::SyncMenu(SyncMenuState::default()));
+            }
             // 訪問模式：enter 提交草稿；未變更或保存中則不送任務。
             _ => {
                 if !state.saving && state.policy_dirty(app.access_policy) {
@@ -504,6 +510,70 @@ fn handle_settings(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
             }
         },
         _ => {}
+    }
+}
+
+// ── 同步子選單 ───────────────────────────────────────
+
+/// 「坚果云同步」子選單：上下選擇、enter 執行、esc 返回設定。
+fn handle_sync_menu(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
+    // 同上：`Ctrl+K`／`Ctrl+J` 不該移動選取。
+    if has_command_modifier(&key) {
+        return;
+    }
+    let Screen::SyncMenu(mut state) = app.screen else {
+        return;
+    };
+    let actions = SyncMenuAction::items(app.sync.configured);
+    state.index = state.index.min(actions.len().saturating_sub(1));
+
+    match key.code {
+        KeyCode::Esc => app.set_screen(Screen::Settings(SettingsState::open(app.access_policy))),
+        KeyCode::Up | KeyCode::Char('k') => {
+            state.index = if state.index == 0 {
+                actions.len() - 1
+            } else {
+                state.index - 1
+            };
+            app.set_screen(Screen::SyncMenu(state));
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            state.index = (state.index + 1) % actions.len();
+            app.set_screen(Screen::SyncMenu(state));
+        }
+        KeyCode::Enter => {
+            let action = actions[state.index];
+            app.set_screen(Screen::SyncMenu(state));
+            run_sync_action(app, jobs, action);
+        }
+        _ => {}
+    }
+}
+
+/// 執行同步子選單的項目。
+fn run_sync_action(app: &mut App, jobs: &Sender<Job>, action: SyncMenuAction) {
+    match action {
+        // 尚未設定與修改設定都開啟同一個表單（後者預填現有值）。
+        SyncMenuAction::Configure | SyncMenuAction::EditConfig => {
+            app.set_screen(Screen::SettingsForm(FormState::sync_config(&app.sync)));
+        }
+        SyncMenuAction::SyncNow => {
+            let _ = jobs.send(Job::SyncNow);
+        }
+        SyncMenuAction::Push => {
+            let _ = jobs.send(Job::SyncPush);
+        }
+        SyncMenuAction::Pull => {
+            let _ = jobs.send(Job::SyncPull);
+        }
+        SyncMenuAction::ToggleAuto => {
+            let _ = jobs.send(Job::SetSyncAuto {
+                enabled: !app.sync.auto_sync,
+            });
+        }
+        SyncMenuAction::Clear => {
+            let _ = jobs.send(Job::ClearSyncConfig);
+        }
     }
 }
 

@@ -7576,17 +7576,8 @@ fn sync_now_uploads_local_files_when_the_remote_is_empty() {
             passphrase: "secret123".into(),
         })
         .expect("解锁应成功");
-    harness
-        .dispatch(Job::SetSyncConfig {
-            config: crate::sync::config::SyncConfig::new(
-                "https://dav.example/dav/",
-                "u@example.com",
-                "app-pass",
-            ),
-        })
-        .expect("保存同步设置应成功");
-
     // 遠端沒有任何檔案：本機憑證檔會被上傳，任務檔不存在則略過。
+    // `set_sync_config` 會先測試連線（HEAD 404 視為可連線），因此須先注入後端。
     harness.set_webdav(|request| match request.method {
         Method::Head => Ok(HttpResponse::new(404, request.url.clone(), b"".as_slice())),
         Method::Put => Ok(HttpResponse {
@@ -7597,6 +7588,16 @@ fn sync_now_uploads_local_files_when_the_remote_is_empty() {
         }),
         _ => Ok(html("")),
     });
+
+    harness
+        .dispatch(Job::SetSyncConfig {
+            config: crate::sync::config::SyncConfig::new(
+                "https://dav.example/dav/",
+                "u@example.com",
+                "app-pass",
+            ),
+        })
+        .expect("保存同步设置应成功");
 
     harness.dispatch(Job::SyncNow).expect("同步应成功");
     let events = harness.drain_events();

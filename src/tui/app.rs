@@ -592,6 +592,8 @@ pub enum FormKind {
     ChangeAccount,
     /// 修改加密口令。
     ChangePassphrase,
+    /// 坚果云同步服务器设置。
+    SyncConfig,
 }
 
 impl FormKind {
@@ -621,6 +623,11 @@ impl FormKind {
                 (FieldRole::OldPassphrase, "原加密口令"),
                 (FieldRole::NewPassphrase, "新加密口令"),
                 (FieldRole::NewPassphraseConfirm, "确认新口令"),
+            ],
+            Self::SyncConfig => &[
+                (FieldRole::SyncUrl, "服务器地址"),
+                (FieldRole::SyncAccount, "坚果云账号"),
+                (FieldRole::SyncAppPassword, "应用密码"),
             ],
         }
     }
@@ -655,12 +662,21 @@ pub enum FieldRole {
     NewPassword,
     /// 新密碼的確認輸入。
     NewPasswordConfirm,
+    /// 坚果云伺服器位址。
+    SyncUrl,
+    /// 坚果云帳號。
+    SyncAccount,
+    /// 坚果云應用密碼。
+    SyncAppPassword,
 }
 
 impl FieldRole {
     /// 是否為敏感欄位（遮蔽輸入、失敗時清空）。
     pub fn is_secret(self) -> bool {
-        !matches!(self, Self::Username | Self::NewUsername)
+        !matches!(
+            self,
+            Self::Username | Self::NewUsername | Self::SyncUrl | Self::SyncAccount
+        )
     }
 }
 
@@ -716,6 +732,28 @@ impl FormState {
     /// 修改加密口令表單。
     pub fn change_passphrase() -> Self {
         Self::new(FormKind::ChangePassphrase)
+    }
+
+    /// 坚果云同步設定表單（伺服器位址預填預設值；已設定時預填位址與帳號）。
+    pub fn sync_config(state: &SyncStateView) -> Self {
+        let mut form = Self::new(FormKind::SyncConfig);
+        let url = if state.configured && !state.url.is_empty() {
+            state.url.as_str()
+        } else {
+            crate::sync::webdav::DEFAULT_BASE
+        };
+        form.prefill(FieldRole::SyncUrl, url);
+        if state.configured {
+            form.prefill(FieldRole::SyncAccount, &state.account);
+        }
+        form
+    }
+
+    /// 以角色設定欄位初值（設定表單預填用）。
+    pub fn prefill(&mut self, role: FieldRole, text: &str) {
+        if let Some(field) = self.fields.iter_mut().find(|field| field.role == role) {
+            field.value.set(text);
+        }
     }
 
     /// 清空敏感欄位（口令與密碼）；保留非敏感輸入（例如帳號）。
@@ -846,13 +884,15 @@ pub struct SettingsState {
 
 impl SettingsState {
     /// 設定項目數量。
-    pub const COUNT: usize = 3;
+    pub const COUNT: usize = 4;
     /// 修改帳號項目的索引。
     pub const ACCOUNT_INDEX: usize = 0;
     /// 修改加密口令項目的索引。
     pub const PASSPHRASE_INDEX: usize = 1;
     /// 訪問模式項目的索引。
     pub const POLICY_INDEX: usize = 2;
+    /// 坚果云同步項目的索引。
+    pub const SYNC_INDEX: usize = 3;
 
     /// 開啟設定彈窗。
     pub fn open(policy: AccessPolicy) -> Self {
@@ -868,7 +908,8 @@ impl SettingsState {
         match index % Self::COUNT {
             Self::ACCOUNT_INDEX => "修改账号",
             Self::PASSPHRASE_INDEX => "修改加密口令",
-            _ => "访问模式",
+            Self::POLICY_INDEX => "访问模式",
+            _ => "坚果云同步",
         }
     }
 
@@ -902,6 +943,69 @@ impl SettingsState {
     /// 草稿與已生效值是否不同。
     pub fn policy_dirty(&self, current: AccessPolicy) -> bool {
         self.policy(current) != current
+    }
+}
+
+/// 「坚果云同步」設定子選單的狀態。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SyncMenuState {
+    /// 目前選取的項目。
+    pub index: usize,
+}
+
+/// 同步子選單的項目。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncMenuAction {
+    /// 尚未設定：開啟設定表單並啟用。
+    Configure,
+    /// 智慧同步（三方比對：只做無衝突的動作）。
+    SyncNow,
+    /// 以本機覆蓋遠端（強制）。
+    Push,
+    /// 以遠端覆蓋本機（強制）。
+    Pull,
+    /// 切換自動同步。
+    ToggleAuto,
+    /// 修改伺服器設定。
+    EditConfig,
+    /// 清除同步設定。
+    Clear,
+}
+
+impl SyncMenuAction {
+    /// 依是否已設定決定可選項目。
+    pub fn items(configured: bool) -> &'static [SyncMenuAction] {
+        if configured {
+            &[
+                Self::SyncNow,
+                Self::Push,
+                Self::Pull,
+                Self::ToggleAuto,
+                Self::EditConfig,
+                Self::Clear,
+            ]
+        } else {
+            &[Self::Configure]
+        }
+    }
+
+    /// 項目標籤（`auto_sync` 供自動同步項顯示目前狀態）。
+    pub fn label(self, auto_sync: bool) -> String {
+        match self {
+            Self::Configure => "配置并启用同步".to_owned(),
+            Self::SyncNow => "立即同步".to_owned(),
+            Self::Push => "上传本机（覆盖远端）".to_owned(),
+            Self::Pull => "下载云端（覆盖本机）".to_owned(),
+            Self::ToggleAuto => {
+                if auto_sync {
+                    "自动同步：开".to_owned()
+                } else {
+                    "自动同步：关".to_owned()
+                }
+            }
+            Self::EditConfig => "修改服务器设置".to_owned(),
+            Self::Clear => "清除同步配置".to_owned(),
+        }
     }
 }
 
@@ -1024,6 +1128,8 @@ pub enum Screen {
     Settings(SettingsState),
     /// 設定中的表單。
     SettingsForm(FormState),
+    /// 帳戶設定中的「坚果云同步」子選單。
+    SyncMenu(SyncMenuState),
     /// 學期選擇器。
     TermPicker(TermPickerState),
     /// 任務設置彈窗（`^T`）。
@@ -1765,6 +1871,7 @@ impl App {
             self.screen,
             Screen::Main
                 | Screen::Settings(_)
+                | Screen::SyncMenu(_)
                 | Screen::SettingsForm(_)
                 | Screen::TermPicker(_)
                 | Screen::TaskMenu(_)

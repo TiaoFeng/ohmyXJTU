@@ -4,6 +4,7 @@ pub mod agreement;
 pub mod content;
 pub mod main_view;
 pub mod settings;
+pub mod sync_menu;
 pub mod task_form;
 pub mod task_menu;
 pub mod term_picker;
@@ -48,21 +49,26 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             );
         }
         Screen::SettingsForm(form) => {
-            let title = match form.kind {
-                crate::tui::app::FormKind::ChangeAccount => "修改账号",
-                _ => "修改加密口令",
+            let (title, hint) = match form.kind {
+                crate::tui::app::FormKind::ChangeAccount => (
+                    "修改账号",
+                    "tab 切换字段 · enter 保存（需先验证原口令）· esc 返回",
+                ),
+                crate::tui::app::FormKind::SyncConfig => (
+                    "坚果云同步设置",
+                    "tab 切换字段 · enter 测试并保存 · esc 返回",
+                ),
+                _ => (
+                    "修改加密口令",
+                    "tab 切换字段 · enter 保存（需先验证原口令）· esc 返回",
+                ),
             };
-            crate::tui::ui::draw_form(
-                frame,
-                form,
-                title,
-                "tab 切换字段 · enter 保存（需先验证原口令）· esc 返回",
-                None,
-            );
+            crate::tui::ui::draw_form(frame, form, title, hint, None);
         }
         Screen::Main
         | Screen::Sort
         | Screen::Settings(_)
+        | Screen::SyncMenu(_)
         | Screen::TermPicker(_)
         | Screen::TaskMenu(_)
         | Screen::TaskBatchMenu(_)

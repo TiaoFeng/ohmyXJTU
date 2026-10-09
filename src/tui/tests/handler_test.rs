@@ -569,6 +569,114 @@ fn settings_opens_account_forms() {
 }
 
 #[test]
+fn settings_sync_item_opens_the_sync_menu() {
+    let (jobs, rx) = channel();
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Settings(SettingsState::open(AccessPolicy::Auto)));
+    for _ in 0..SettingsState::SYNC_INDEX {
+        press(&mut app, &jobs, KeyCode::Down);
+    }
+    press(&mut app, &jobs, KeyCode::Enter);
+    assert!(
+        matches!(app.screen, Screen::SyncMenu(_)),
+        "{:?}",
+        app.screen
+    );
+    assert!(rx.try_recv().is_err(), "開啟子選單不送任務");
+
+    press(&mut app, &jobs, KeyCode::Esc);
+    assert!(matches!(app.screen, Screen::Settings(_)));
+}
+
+#[test]
+fn sync_menu_opens_the_config_form_and_submits_settings() {
+    let (jobs, rx) = channel();
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::SyncMenu(crate::tui::app::SyncMenuState::default()));
+
+    // 尚未設定：唯一項目是「配置并启用同步」，開啟同步設定表單。
+    press(&mut app, &jobs, KeyCode::Enter);
+    let Screen::SettingsForm(form) = &app.screen else {
+        panic!("应开启同步设置表单：{:?}", app.screen);
+    };
+    assert_eq!(form.kind, FormKind::SyncConfig);
+    assert!(
+        form.value("服务器地址").starts_with("https://"),
+        "伺服器位址应预填预设值"
+    );
+
+    // 伺服器位址已預填，填帳號與應用密碼後送出。
+    press(&mut app, &jobs, KeyCode::Tab);
+    type_text(&mut app, &jobs, "u@example.com");
+    press(&mut app, &jobs, KeyCode::Tab);
+    type_text(&mut app, &jobs, "app-pass");
+    press(&mut app, &jobs, KeyCode::Enter);
+
+    match rx.try_recv() {
+        Ok(Job::SetSyncConfig { config }) => {
+            assert_eq!(config.url, "https://dav.jianguoyun.com/dav/");
+            assert_eq!(config.account, "u@example.com");
+            assert_eq!(config.app_password, "app-pass");
+        }
+        other => panic!("应送出同步设置：{other:?}"),
+    }
+}
+
+#[test]
+fn sync_menu_submits_each_action() {
+    let mut app = App::new(AccessPolicy::Auto);
+    app.sync = crate::task::SyncStateView {
+        configured: true,
+        url: "https://dav.example/dav/".to_owned(),
+        account: "u@example.com".to_owned(),
+        auto_sync: false,
+    };
+
+    // 已設定：項目依序為 [立即同步, 上傳, 下載, 自動同步, 修改設定, 清除]。
+    let (jobs, rx) = channel();
+    app.set_screen(Screen::SyncMenu(crate::tui::app::SyncMenuState::default()));
+    press(&mut app, &jobs, KeyCode::Enter);
+    assert!(matches!(rx.try_recv(), Ok(Job::SyncNow)));
+
+    let (jobs, rx) = channel();
+    press(&mut app, &jobs, KeyCode::Down);
+    press(&mut app, &jobs, KeyCode::Enter);
+    assert!(matches!(rx.try_recv(), Ok(Job::SyncPush)));
+
+    let (jobs, rx) = channel();
+    press(&mut app, &jobs, KeyCode::Down);
+    press(&mut app, &jobs, KeyCode::Enter);
+    assert!(matches!(rx.try_recv(), Ok(Job::SyncPull)));
+
+    // 自動同步：目前為關，切換後送出「開」。
+    let (jobs, rx) = channel();
+    press(&mut app, &jobs, KeyCode::Down);
+    press(&mut app, &jobs, KeyCode::Enter);
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(Job::SetSyncAuto { enabled: true })
+    ));
+
+    // 修改伺服器設定：開啟預填現有值的表單。
+    let (jobs, _rx) = channel();
+    press(&mut app, &jobs, KeyCode::Down);
+    press(&mut app, &jobs, KeyCode::Enter);
+    let Screen::SettingsForm(form) = &app.screen else {
+        panic!("应开启同步设置表单：{:?}", app.screen);
+    };
+    assert_eq!(form.value("坚果云账号"), "u@example.com");
+
+    // 清除同步配置。
+    let (jobs, rx) = channel();
+    app.set_screen(Screen::SyncMenu(crate::tui::app::SyncMenuState::default()));
+    for _ in 0..5 {
+        press(&mut app, &jobs, KeyCode::Down);
+    }
+    press(&mut app, &jobs, KeyCode::Enter);
+    assert!(matches!(rx.try_recv(), Ok(Job::ClearSyncConfig)));
+}
+
+#[test]
 fn login_captcha_submission_sends_job() {
     let (jobs, rx) = channel();
     let mut app = App::new(AccessPolicy::Auto);

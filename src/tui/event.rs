@@ -14,12 +14,12 @@ use crate::domain::todo::Task;
 use crate::model::{ActivityDetailView, FlowData, ScheduleData};
 use crate::session::{AccessMode, SiteKind};
 use crate::sites::lms::LmsActivity;
-use crate::task::{CoursesData, Event, FailedTarget, HomeworkUpdate, Job};
+use crate::task::{CoursesData, Event, FailedTarget, HomeworkUpdate, Job, SyncStateView};
 use crate::text::{MAX_INLINE_CHARS, sanitize_inline};
 
 use super::app::{
     App, FormKind, FormState, HomeworkData, LmsLevel, LoginScreen, Page, Screen, SettingsState,
-    TermPickerState,
+    SyncMenuState, TermPickerState,
 };
 use super::controller;
 use super::text::InputLine;
@@ -91,7 +91,7 @@ pub(crate) fn apply_event(app: &mut App, event: Event, jobs: &Sender<Job>) {
         Event::AccessPolicyUpdated(policy) => apply_access_policy_updated(app, policy),
         Event::Notice(message) => app.set_message(message),
         Event::Warning(message) => app.set_warning_message(message),
-        Event::SyncState(view) => app.sync = *view,
+        Event::SyncState(view) => apply_sync_state(app, *view),
         Event::SyncTestResult { ok, message } => apply_sync_test_result(app, ok, message),
         Event::SyncImported { message } => apply_sync_imported(app, message),
         Event::SyncDone { summary } => app.set_message(summary),
@@ -128,6 +128,20 @@ fn apply_vault_ready(app: &mut App, jobs: &Sender<Job>) {
         controller::ensure_page(app, jobs);
     }
     app.set_message("凭证已就绪");
+}
+
+/// 同步設定狀態變更：更新顯示用狀態；若同步設定表單剛保存成功則關閉它。
+fn apply_sync_state(app: &mut App, view: SyncStateView) {
+    let configured = view.configured;
+    let form_open = matches!(
+        &app.screen,
+        Screen::SettingsForm(form) if form.kind == FormKind::SyncConfig
+    );
+    app.sync = view;
+    if configured && form_open {
+        app.set_screen(Screen::SyncMenu(SyncMenuState::default()));
+        app.set_message("坚果云同步已启用");
+    }
 }
 
 /// 堅果雲連線測試結果：通過／失敗都以底欄訊息呈現。
@@ -519,7 +533,7 @@ fn apply_failure(
         let text = format!("{what}失败：{message}");
         match target {
             FailedTarget::Login => set_login_error(app, login_site, text.clone()),
-            FailedTarget::Settings => {
+            FailedTarget::Settings | FailedTarget::Sync => {
                 // 設定保存失敗：保留彈窗與草稿，僅解除「保存中」；
                 // 設定表單失敗則就地顯示錯誤並恢復輸入。
                 match &mut app.screen {

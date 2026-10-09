@@ -176,8 +176,14 @@ impl Worker {
         Ok(())
     }
 
-    /// 儲存連線設定。
-    pub(super) fn set_sync_config(&mut self, config: SyncConfig) -> AppResult<()> {
+    /// 儲存連線設定：先測試連線，通過才保存（「測試連線通過才啟用」）。
+    pub(super) fn set_sync_config(&mut self, mut config: SyncConfig) -> AppResult<()> {
+        self.webdav_for(&config)
+            .probe(SyncFile::Credentials.remote_name())?;
+        // 編輯既有設定時沿用目前的自動同步偏好，避免被重設為關閉。
+        if let Some(existing) = self.sync.config() {
+            config.auto_sync = existing.auto_sync;
+        }
         self.sync.set_config(config)?;
         self.emit_sync_state();
         Ok(())

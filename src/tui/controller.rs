@@ -10,6 +10,7 @@ use std::sync::mpsc::Sender;
 use crate::credentials::{Credentials, Secret};
 use crate::domain::todo::{self, SortMode, Task};
 use crate::sites::lms::ActivityKind;
+use crate::sync::config::SyncConfig;
 use crate::task::Job;
 use crate::tui::app::{
     App, FieldRole, FormKind, FormState, LmsLevel, NavItem, Screen, TaskBatchMenuState, TaskEntry,
@@ -839,6 +840,28 @@ fn build_job(kind: FormKind, values: &FormValues) -> Result<Job, String> {
                 new: values.password.clone(),
             })
         }
+        FormKind::SyncConfig => {
+            let url = values.sync_url.trim();
+            if url.is_empty() {
+                return Err("请输入服务器地址".to_owned());
+            }
+            if !url.starts_with("https://") && !url.starts_with("http://") {
+                return Err("服务器地址必须以 http(s):// 开头".to_owned());
+            }
+            if values.sync_account.trim().is_empty() {
+                return Err("请输入坚果云账号".to_owned());
+            }
+            if values.sync_app_password.is_empty() {
+                return Err("请输入应用密码".to_owned());
+            }
+            Ok(Job::SetSyncConfig {
+                config: SyncConfig::new(
+                    url,
+                    values.sync_account.trim(),
+                    values.sync_app_password.as_str(),
+                ),
+            })
+        }
     }
 }
 
@@ -865,6 +888,12 @@ pub(super) struct FormValues {
     password: Secret,
     /// 確認密碼（自動零化）。
     password_confirm: Secret,
+    /// 坚果云伺服器位址（非機密）。
+    sync_url: String,
+    /// 坚果云帳號（非機密）。
+    sync_account: String,
+    /// 坚果云應用密碼（自動零化）。
+    sync_app_password: Secret,
 }
 
 impl std::fmt::Debug for FormValues {
@@ -877,6 +906,9 @@ impl std::fmt::Debug for FormValues {
             .field("username", &!self.username.is_empty())
             .field("password", &!self.password.is_empty())
             .field("password_confirm", &!self.password_confirm.is_empty())
+            .field("sync_url", &!self.sync_url.is_empty())
+            .field("sync_account", &!self.sync_account.is_empty())
+            .field("sync_app_password", &!self.sync_app_password.is_empty())
             .finish()
     }
 }
@@ -905,6 +937,9 @@ impl FormValues {
                 | FieldRole::NewPassphraseConfirm => {
                     values.password_confirm = Secret::from(text);
                 }
+                FieldRole::SyncUrl => values.sync_url = text.to_owned(),
+                FieldRole::SyncAccount => values.sync_account = text.to_owned(),
+                FieldRole::SyncAppPassword => values.sync_app_password = Secret::from(text),
             }
         }
         values

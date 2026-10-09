@@ -165,6 +165,16 @@ pub(crate) fn unseal(
     Ok((Zeroizing::new(plaintext), Sealed { params, salt, key }))
 }
 
+/// 位元組是否為結構完整的加密信封（不驗證口令，也不驗證內容）。
+///
+/// 供「下載後才覆寫本機檔案」的路徑把關：遠端檔名固定，但取回的內容未必是
+/// 本程式的容器（指到錯的目錄、雲端上的同名檔案、供應商回的錯誤頁）。只驗
+/// 結構——AAD 與標籤的認證要等口令到齊才做得到，這裡先擋掉明顯不是容器的
+/// 位元組，避免覆蓋掉本機仍可用的憑證或任務檔。
+pub(crate) fn is_envelope(bytes: &[u8]) -> bool {
+    parse(bytes).is_ok()
+}
+
 type ParsedEnvelope<'a> = (KdfParams, [u8; SALT_LEN], [u8; NONCE_LEN], &'a [u8]);
 
 fn encrypt_with(

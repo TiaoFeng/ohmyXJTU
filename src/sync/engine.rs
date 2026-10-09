@@ -6,6 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::credentials::envelope;
 use crate::error::{AppError, AppResult};
 use crate::io;
 use crate::sync::config::{FileRecord, SyncFile};
@@ -77,6 +78,7 @@ pub(crate) fn pull(
     let Some((bytes, meta)) = webdav.get(file.remote_name())? else {
         return Ok(None);
     };
+    ensure_container(file, &bytes)?;
     io::write_private_atomic(local_path, &bytes)?;
     Ok(Some(FileRecord {
         version: remote_version(&meta).map(str::to_owned),
@@ -131,6 +133,7 @@ pub(crate) fn import(
         let Some((bytes, meta)) = webdav.get(name)? else {
             continue;
         };
+        ensure_container(*file, &bytes)?;
         io::write_private_atomic(path, &bytes)?;
         records.push((
             *file,
@@ -145,6 +148,21 @@ pub(crate) fn import(
         return Err(AppError::webdav("云端没有可导入的同步数据"));
     }
     Ok(records)
+}
+
+/// 下載內容必須是結構完整的加密信封，才允許覆寫本機檔案。
+///
+/// 遠端檔名固定，取回的內容卻未必是本程式的容器（指到錯的目錄、雲端上的
+/// 同名檔案、供應商回的錯誤頁）。直接覆寫會讓本機仍可用的憑證或任務檔消失，
+/// 因此寧可整筆失敗也不寫入。這裡只驗結構——AAD 與標籤的認證要等口令到齊。
+fn ensure_container(file: SyncFile, bytes: &[u8]) -> AppResult<()> {
+    if envelope::is_envelope(bytes) {
+        return Ok(());
+    }
+    Err(AppError::webdav(format!(
+        "云端文件 {} 不是本程序加密的容器，已保留本机文件（请确认服务器地址与账户指向正确的同步目录）",
+        file.remote_name()
+    )))
 }
 
 /// 讀取本機檔案；不存在時回 `None`。

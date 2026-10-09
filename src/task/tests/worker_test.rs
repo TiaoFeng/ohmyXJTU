@@ -223,6 +223,7 @@ impl Harness {
                         dir.path().join("tasks.vault"),
                     ),
                 ],
+                sync_pulled: false,
                 shutdown: false,
                 tasks,
             },
@@ -7783,4 +7784,120 @@ fn sync_pull_locks_the_session_and_demands_a_new_unlock() {
         harness.dispatch(Job::SyncPush).is_err(),
         "锁定后不应再写入同步记录"
     );
+}
+
+/// 下載已覆寫本機後，後續檔案失敗也必須重新鎖定。
+///
+/// 這是修復的核心：`pull` 先寫入憑證檔，接著任務檔下載失敗經 `?` 提前返回。
+/// 若錯誤路徑略過重新鎖定，記憶體中的舊憑證／舊任務清單會反過來覆寫剛下載的
+/// 內容，且自動同步會把舊清單上傳回雲端。
+#[test]
+fn sync_pull_relocks_even_when_a_later_download_fails() {
+    let remote = crate::credentials::envelope::seal("secret123", "ohmyXJTU-vault", b"remote-vault")
+        .expect("建立远端容器")
+        .0;
+
+    let mut harness = Harness::new(|_| Ok(html("")));
+    harness.seed_vault("secret123", &Credentials::new("3120000001", "pw-12345"));
+    harness
+        .dispatch(Job::Unlock {
+            passphrase: "secret123".into(),
+        })
+        .expect("解锁应成功");
+    assert!(harness.worker.session.is_some(), "解锁后应有会话");
+
+    // 探測檔可寫；憑證下載成功（先覆寫本機）；任務下載失敗（伺服器 500）。
+    harness.set_webdav(move |request| match request.method {
+        Method::Put => Ok(HttpResponse {
+            status: 201,
+            final_url: request.url.clone(),
+            headers: vec![("ETag".to_owned(), "v1".to_owned())],
+            body: Vec::new(),
+        }),
+        Method::Get if request.url.contains("tasks") => {
+            Ok(HttpResponse::new(500, request.url.clone(), b"".as_slice()))
+        }
+        Method::Get => Ok(HttpResponse {
+            status: 200,
+            final_url: request.url.clone(),
+            headers: vec![("ETag".to_owned(), "v2".to_owned())],
+            body: remote.clone(),
+        }),
+        _ => Ok(HttpResponse::new(404, request.url.clone(), b"".as_slice())),
+    });
+
+    harness
+        .dispatch(Job::SetSyncConfig {
+            config: crate::sync::config::SyncConfig::new(
+                "https://dav.example/dav/",
+                "u@example.com",
+                "app-pass",
+            ),
+        })
+        .expect("保存同步设置应成功");
+
+    assert!(
+        harness.dispatch(Job::SyncPull).is_err(),
+        "任务下载失败应向上报错"
+    );
+    let events = harness.drain_events();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::SyncRelocked)),
+        "已覆写本机时即使后续下载失败也必须重新锁定：{events:?}"
+    );
+    assert!(harness.worker.session.is_none(), "下载后应丢弃会话");
+    assert!(
+        harness.worker.credentials.is_none(),
+        "下载后应丢弃内存中的凭证"
+    );
+    // 金鑰已丟棄：重新解鎖前不得再寫入同步記錄。
+    assert!(
+        harness.dispatch(Job::SyncPush).is_err(),
+        "锁定后不应再写入同步记录"
+    );
+}
+
+/// 純上傳（無下載）不應鎖定會話，也不應在錯誤路徑誤鎖。
+#[test]
+fn sync_now_upload_only_keeps_the_session() {
+    let mut harness = Harness::new(|_| Ok(html("")));
+    harness.seed_vault("secret123", &Credentials::new("3120000001", "pw-12345"));
+    harness
+        .dispatch(Job::Unlock {
+            passphrase: "secret123".into(),
+        })
+        .expect("解锁应成功");
+
+    harness.set_webdav(|request| match request.method {
+        Method::Head => Ok(HttpResponse::new(404, request.url.clone(), b"".as_slice())),
+        Method::Put => Ok(HttpResponse {
+            status: 201,
+            final_url: request.url.clone(),
+            headers: vec![("ETag".to_owned(), "v1".to_owned())],
+            body: Vec::new(),
+        }),
+        _ => Ok(html("")),
+    });
+
+    harness
+        .dispatch(Job::SetSyncConfig {
+            config: crate::sync::config::SyncConfig::new(
+                "https://dav.example/dav/",
+                "u@example.com",
+                "app-pass",
+            ),
+        })
+        .expect("保存同步设置应成功");
+
+    harness.dispatch(Job::SyncNow).expect("同步应成功");
+    let events = harness.drain_events();
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::SyncRelocked)),
+        "纯上传不应锁定会话：{events:?}"
+    );
+    assert!(harness.worker.session.is_some(), "纯上传后会话应保留");
 }

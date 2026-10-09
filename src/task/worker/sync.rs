@@ -3,12 +3,13 @@
 //! 同步屬網路任務，因此由工作者執行（任務服務明文不經網路）。磁碟上的檔案
 //! 本來就是加密的，這裡只做檔案傳輸與三方比對，不在記憶體中解開密文。
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::error::{AppError, AppResult};
 use crate::sync::config::{self, FileRecord, SyncConfig, SyncFile};
 use crate::sync::engine::{self, Plan};
-use crate::sync::webdav::WebDav;
+use crate::sync::webdav::{Precondition, WebDav};
 use crate::task::protocol::{Event, SyncStateView};
 
 use super::Worker;
@@ -115,29 +116,63 @@ impl Worker {
     }
 
     /// 智慧同步：逐檔三方比對，只做無衝突的動作。
+    ///
+    /// 下載會覆寫本機檔案：**先暫停任務服務寫入**（避免它以舊清單覆寫剛下載的
+    /// 任務檔），且一旦真的下載過，錯誤路徑也必須重新鎖定（見 [`Self::settle_sync`]）。
     pub(super) fn sync_now(&mut self) -> AppResult<()> {
         let config = self.require_sync_config()?;
         let dav = self.webdav_for(&config);
-        let (mut uploaded, mut downloaded) = (0_u32, 0_u32);
-        let mut conflicts: Vec<&'static str> = Vec::new();
+        let plans = self.evaluate_all(&dav)?;
+        let paused = plans
+            .iter()
+            .any(|(_, _, evaluation)| evaluation.plan == Plan::Pull);
+        if paused {
+            self.tasks.pause()?;
+        }
+        let outcome = self.apply_plans(&dav, plans);
+        self.settle_sync(outcome, paused)
+    }
+
+    /// 唯讀評估所有同步檔案（只做 `HEAD` 與本機讀取，不寫入）。
+    fn evaluate_all(
+        &mut self,
+        dav: &WebDav,
+    ) -> AppResult<Vec<(SyncFile, PathBuf, engine::Evaluation)>> {
+        let mut plans = Vec::new();
         for (file, path) in self.sync_local.clone() {
             let record = self.sync.record(file).clone();
-            match engine::evaluate(&dav, file, &path, &record)? {
+            let evaluation = engine::evaluate(dav, file, &path, &record)?;
+            plans.push((file, path, evaluation));
+        }
+        Ok(plans)
+    }
+
+    /// 依評估結果執行上傳／下載；衝突只記錄、不覆蓋。
+    fn apply_plans(
+        &mut self,
+        dav: &WebDav,
+        plans: Vec<(SyncFile, PathBuf, engine::Evaluation)>,
+    ) -> AppResult<()> {
+        let (mut uploaded, mut downloaded) = (0_u32, 0_u32);
+        let mut conflicts: Vec<&'static str> = Vec::new();
+        for (file, path, evaluation) in plans {
+            match evaluation.plan {
                 Plan::Noop => {}
                 Plan::Push => {
-                    match engine::push(&dav, file, &path, record.etag.as_deref()) {
+                    let record = self.sync.record(file).clone();
+                    let precondition = evaluation.precondition(record.etag.as_deref());
+                    match engine::push(dav, file, &path, precondition) {
                         Ok(new) => {
                             self.sync.set_record(file, new)?;
                             uploaded += 1;
                         }
-                        // 檢查後遠端被其他裝置改動（If-Match 未通過）：不覆蓋，改報衝突。
+                        // 檢查後遠端被其他裝置改動（條件未通過）：不覆蓋，改報衝突。
                         Err(AppError::WebDavConflict) => conflicts.push(file.remote_name()),
                         Err(err) => return Err(err),
                     }
                 }
                 Plan::Pull => {
-                    if let Some(new) = engine::pull(&dav, file, &path)? {
-                        self.sync.set_record(file, new)?;
+                    if self.pull_file(dav, file, &path)? {
                         downloaded += 1;
                     }
                 }
@@ -145,10 +180,36 @@ impl Worker {
             }
         }
         self.finish_sync(&conflicts, uploaded, downloaded);
-        if downloaded > 0 {
-            self.relock_after_pull();
-        }
         Ok(())
+    }
+
+    /// 下載單一檔案，回傳是否確實覆寫了本機檔案。
+    ///
+    /// 覆寫後**立刻**立旗標 `sync_pulled`（在 `set_record` 之前）：之後無論
+    /// `set_record` 或下一筆下載失敗，都由 [`Self::settle_sync`] 確保重新鎖定。
+    fn pull_file(&mut self, dav: &WebDav, file: SyncFile, path: &Path) -> AppResult<bool> {
+        let Some(new) = engine::pull(dav, file, path)? else {
+            return Ok(false);
+        };
+        self.sync_pulled = true;
+        self.sync.set_record(file, new)?;
+        Ok(true)
+    }
+
+    /// 下載型同步的收尾：覆寫過本機就重新鎖定，否則恢復任務服務寫入。
+    ///
+    /// **錯誤路徑同樣處理**——這正是修復的核心：`engine::pull` 覆寫本機後若後續
+    /// 步驟失敗，記憶體內容已與磁碟不一致，不重新鎖定就會被舊內容反過來覆寫。
+    /// 重新鎖定會丟棄任務金鑰，無需（也不該）恢復寫入；`paused` 由下次解鎖的
+    /// `TaskStore::init` 重設。
+    fn settle_sync(&mut self, outcome: AppResult<()>, paused: bool) -> AppResult<()> {
+        let pulled = std::mem::take(&mut self.sync_pulled);
+        if pulled {
+            self.relock_after_pull();
+        } else if paused {
+            self.tasks.resume();
+        }
+        outcome
     }
 
     /// 自動同步（背景）：僅在「本機變更、遠端未變」時上傳。
@@ -167,22 +228,27 @@ impl Worker {
     }
 
     /// 執行自動上傳（無變更時不動作）。
+    ///
+    /// 自動模式只上傳、從不下載，因此不需暫停任務服務。
     fn run_auto_upload(&mut self) -> AppResult<()> {
         let config = self.require_sync_config()?;
         let dav = self.webdav_for(&config);
         let mut uploaded = 0_u32;
         for (file, path) in self.sync_local.clone() {
             let record = self.sync.record(file).clone();
-            if matches!(engine::evaluate(&dav, file, &path, &record)?, Plan::Push) {
-                match engine::push(&dav, file, &path, record.etag.as_deref()) {
-                    Ok(new) => {
-                        self.sync.set_record(file, new)?;
-                        uploaded += 1;
-                    }
-                    // 自動模式絕不覆蓋遠端：檢查後遠端被改動時靜默略過。
-                    Err(AppError::WebDavConflict) => {}
-                    Err(err) => return Err(err),
+            let evaluation = engine::evaluate(&dav, file, &path, &record)?;
+            if evaluation.plan != Plan::Push {
+                continue;
+            }
+            let precondition = evaluation.precondition(record.etag.as_deref());
+            match engine::push(&dav, file, &path, precondition) {
+                Ok(new) => {
+                    self.sync.set_record(file, new)?;
+                    uploaded += 1;
                 }
+                // 自動模式絕不覆蓋遠端：檢查後遠端被改動時靜默略過。
+                Err(AppError::WebDavConflict) => {}
+                Err(err) => return Err(err),
             }
         }
         if uploaded > 0 {
@@ -193,7 +259,7 @@ impl Worker {
         Ok(())
     }
 
-    /// 以本機覆蓋遠端（強制）。
+    /// 以本機覆蓋遠端（強制；用於解決衝突）。
     pub(super) fn sync_push(&mut self) -> AppResult<()> {
         let config = self.require_sync_config()?;
         let dav = self.webdav_for(&config);
@@ -202,8 +268,8 @@ impl Worker {
             if !path.is_file() {
                 continue;
             }
-            // 強制上傳：不帶條件請求，以本機覆蓋遠端。
-            let new = engine::push(&dav, file, &path, None)?;
+            // 強制上傳：使用者主動要求以本機覆蓋遠端，故不帶條件請求。
+            let new = engine::push(&dav, file, &path, Precondition::Any)?;
             self.sync.set_record(file, new)?;
             uploaded += 1;
         }
@@ -213,23 +279,27 @@ impl Worker {
         Ok(())
     }
 
-    /// 以遠端覆蓋本機（強制）。
+    /// 以遠端覆蓋本機（強制；用於解決衝突）。
     pub(super) fn sync_pull(&mut self) -> AppResult<()> {
         let config = self.require_sync_config()?;
         let dav = self.webdav_for(&config);
+        // 強制下載一定會覆寫本機檔案：先暫停任務服務寫入。
+        self.tasks.pause()?;
+        let outcome = self.run_pull(&dav);
+        self.settle_sync(outcome, true)
+    }
+
+    /// 逐檔以遠端覆寫本機並回報下載數。
+    fn run_pull(&mut self, dav: &WebDav) -> AppResult<()> {
         let mut downloaded = 0_u32;
         for (file, path) in self.sync_local.clone() {
-            if let Some(new) = engine::pull(&dav, file, &path)? {
-                self.sync.set_record(file, new)?;
+            if self.pull_file(dav, file, &path)? {
                 downloaded += 1;
             }
         }
         self.emit(Event::SyncDone {
             summary: format!("已下载 {downloaded} 个文件"),
         });
-        if downloaded > 0 {
-            self.relock_after_pull();
-        }
         Ok(())
     }
 

@@ -263,6 +263,11 @@ struct Worker {
     pending_sync: Option<sync::PendingSync>,
     /// 受同步的檔案（遠端代號 → 本機路徑）；由建構時的實際路徑決定。
     sync_local: Vec<(SyncFile, PathBuf)>,
+    /// 本輪同步是否已覆寫過本機檔案。
+    ///
+    /// 一旦為真，即使後續步驟失敗也必須重新鎖定（見 `sync::Worker::relock_after_pull`）：
+    /// 記憶體中的憑證與任務清單已與磁碟不一致，沿用會反過來覆寫下載結果。
+    sync_pulled: bool,
     /// 已收到結束指令；[`Worker::run`] 於迴圈開頭立即返回。
     shutdown: bool,
 }
@@ -338,6 +343,7 @@ pub(crate) fn spawn_with_tasks(
         webdav,
         pending_sync: None,
         sync_local,
+        sync_pulled: false,
         shutdown: false,
         tasks,
     };
@@ -594,7 +600,9 @@ impl Worker {
             | Job::DeleteCompletedTasks
             | Job::InitTasks { .. }
             | Job::RekeyTasks { .. }
-            | Job::LockTasks => Ok(()),
+            | Job::LockTasks
+            | Job::PauseTasks { .. }
+            | Job::ResumeTasks => Ok(()),
             Job::SyncTestConnection { config } => self.sync_test_connection(config),
             Job::SyncImport { config } => self.sync_import(config),
             Job::SyncNow => self.sync_now(),

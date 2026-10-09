@@ -263,6 +263,16 @@ pub enum Job {
     },
     /// 丟棄任務檔的記憶體金鑰（會話被停用時）。
     LockTasks,
+    /// 暫停任務服務寫入（同步下載前；避免服務以舊清單覆寫剛下載的檔案）。
+    ///
+    /// `reply` 讓工作者確認暫停**已完成**才開始下載——這是要消除的競態核心：
+    /// 未確認暫停就下載，服務仍可能在下載期間用舊清單落盤。
+    PauseTasks {
+        /// 結果把手。
+        reply: TaskReply,
+    },
+    /// 恢復任務服務寫入（同步未實際下載時）。
+    ResumeTasks,
     /// 測試堅果雲 WebDAV 連線（登入畫面與設定表單共用；不需解鎖）。
     SyncTestConnection {
         /// 連線設定。
@@ -328,7 +338,11 @@ impl Job {
             Self::SetAccessPolicy(_) => "访问模式".to_owned(),
             Self::AcceptAgreement => "用户协议".to_owned(),
             Self::CancelLogin => "取消登录".to_owned(),
-            Self::InitTasks { .. } | Self::RekeyTasks { .. } | Self::LockTasks => "任务".to_owned(),
+            Self::InitTasks { .. }
+            | Self::RekeyTasks { .. }
+            | Self::LockTasks
+            | Self::PauseTasks { .. }
+            | Self::ResumeTasks => "任务".to_owned(),
             Self::SyncTestConnection { .. } => "测试坚果云连接".to_owned(),
             Self::SyncImport { .. } => "从坚果云导入".to_owned(),
             Self::SyncNow | Self::SyncPush | Self::SyncPull => "坚果云同步".to_owned(),

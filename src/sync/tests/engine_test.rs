@@ -10,7 +10,7 @@ use crate::error::AppError;
 use crate::http::fake::FakeClient;
 use crate::http::{HttpResponse, Method};
 use crate::sync::config::{FileRecord, SyncFile};
-use crate::sync::webdav::WebDav;
+use crate::sync::webdav::{Precondition, WebDav};
 
 /// 建立帶標頭的回應。
 fn response(status: u16, headers: &[(&str, &str)], body: &[u8]) -> HttpResponse {
@@ -152,7 +152,7 @@ fn push_sends_local_content_and_records_the_version() {
     let path = dir.path().join("tasks.vault");
     std::fs::write(&path, b"local-bytes").unwrap();
     let (client, dav) = dav(vec![response(201, &[("ETag", "n1")], b"")]);
-    let record = push(&dav, SyncFile::Tasks, &path, None).expect("上传应成功");
+    let record = push(&dav, SyncFile::Tasks, &path, Precondition::Any).expect("上传应成功");
     assert_eq!(record.version.as_deref(), Some("n1"));
 
     let request = client.last_request().expect("应有请求");
@@ -165,7 +165,8 @@ fn push_sends_if_match_and_records_the_new_etag() {
     let path = dir.path().join("tasks.vault");
     std::fs::write(&path, b"local-bytes").unwrap();
     let (client, dav) = dav(vec![response(201, &[("ETag", "\"n2\"")], b"")]);
-    let record = push(&dav, SyncFile::Tasks, &path, Some("\"n1\"")).expect("上传应成功");
+    let record =
+        push(&dav, SyncFile::Tasks, &path, Precondition::Match("\"n1\"")).expect("上传应成功");
     assert_eq!(record.version.as_deref(), Some("n2"));
     assert_eq!(record.etag.as_deref(), Some("\"n2\""));
 
@@ -180,7 +181,12 @@ fn push_surfaces_a_conflict_on_precondition_failure() {
     std::fs::write(&path, b"local-bytes").unwrap();
     let (_client, dav) = dav(vec![response(412, &[], b"")]);
     assert!(matches!(
-        push(&dav, SyncFile::Tasks, &path, Some("\"stale\"")),
+        push(
+            &dav,
+            SyncFile::Tasks,
+            &path,
+            Precondition::Match("\"stale\"")
+        ),
         Err(AppError::WebDavConflict)
     ));
 }
@@ -203,7 +209,7 @@ fn push_errors_when_there_is_no_local_file() {
     let path = dir.path().join("tasks.vault");
     let (_client, dav) = dav(vec![]);
     assert!(matches!(
-        push(&dav, SyncFile::Tasks, &path, None),
+        push(&dav, SyncFile::Tasks, &path, Precondition::Any),
         Err(AppError::WebDav(_))
     ));
 }
@@ -220,7 +226,9 @@ fn evaluate_reports_only_local_change_as_push() {
     };
     let (_client, dav) = dav(vec![response(200, &[("ETag", "v1")], b"")]);
     assert_eq!(
-        evaluate(&dav, SyncFile::Tasks, &path, &record).unwrap(),
+        evaluate(&dav, SyncFile::Tasks, &path, &record)
+            .unwrap()
+            .plan,
         Plan::Push
     );
 }
@@ -237,7 +245,43 @@ fn evaluate_reports_conflict_when_both_changed() {
     };
     let (_client, dav) = dav(vec![response(200, &[("ETag", "v2")], b"")]);
     assert_eq!(
-        evaluate(&dav, SyncFile::Tasks, &path, &record).unwrap(),
+        evaluate(&dav, SyncFile::Tasks, &path, &record)
+            .unwrap()
+            .plan,
         Plan::Conflict
+    );
+}
+
+/// 遠端確認不存在時的 Push 要帶「必須不存在」條件；遠端存在則沿用上次 ETag。
+#[test]
+fn evaluate_prefers_must_not_exist_only_when_the_remote_is_absent() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("tasks.vault");
+    std::fs::write(&path, b"newer").unwrap();
+
+    // 遠端 404：本機變更 → Push，且前條件為 MustNotExist。
+    let (_client_a, dav_a) = dav(vec![response(404, &[], b"")]);
+    let record = FileRecord::default();
+    let evaluation = evaluate(&dav_a, SyncFile::Tasks, &path, &record).unwrap();
+    assert_eq!(evaluation.plan, Plan::Push);
+    assert!(evaluation.remote_absent);
+    assert_eq!(
+        evaluation.precondition(None),
+        Precondition::MustNotExist,
+        "远端不存在时应要求必须不存在"
+    );
+
+    // 遠端存在且有 ETag：前條件沿用上次記錄的 ETag（Match）。
+    let record = FileRecord {
+        version: Some("v1".to_owned()),
+        etag: Some("\"v1\"".to_owned()),
+        hash: Some(fingerprint(b"newer")),
+    };
+    let (_client_b, dav_b) = dav(vec![response(200, &[("ETag", "v1")], b"")]);
+    let evaluation = evaluate(&dav_b, SyncFile::Tasks, &path, &record).unwrap();
+    assert!(!evaluation.remote_absent);
+    assert_eq!(
+        evaluation.precondition(record.etag.as_deref()),
+        Precondition::Match("\"v1\"")
     );
 }

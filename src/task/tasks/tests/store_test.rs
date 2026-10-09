@@ -325,6 +325,44 @@ fn mark_unavailable_blocks_saves_even_with_a_loaded_key() {
 }
 
 #[test]
+fn pause_blocks_saves_until_resumed() {
+    let dir = tempdir().unwrap();
+    let mut store = new_store(&dir);
+    store.init(PASSPHRASE).unwrap();
+    store.add(task("甲")).unwrap();
+
+    // 暫停（模擬同步下載期間）：任務操作被拒絕，磁碟維持原樣。
+    store.pause();
+    let err = store.add(task("乙")).unwrap_err();
+    assert!(
+        matches!(err, AppError::Crypto(_)),
+        "暂停时的保存应被拒绝：{err:?}"
+    );
+    let mut reloaded = new_store(&dir);
+    reloaded.init(PASSPHRASE).unwrap();
+    assert_eq!(reloaded.tasks().len(), 1, "暂停期间不得写入");
+
+    // 恢復後可再寫入。
+    store.resume();
+    store.add(task("丙")).unwrap();
+    let mut reloaded = new_store(&dir);
+    reloaded.init(PASSPHRASE).unwrap();
+    assert_eq!(reloaded.tasks().len(), 2, "恢复后应能写入");
+}
+
+#[test]
+fn reinit_clears_a_leftover_pause() {
+    let dir = tempdir().unwrap();
+    let mut store = new_store(&dir);
+    store.init(PASSPHRASE).unwrap();
+    store.pause();
+
+    // 重新解鎖（新工作階段）代表上一個暫停已結束：寫入恢復。
+    store.init(PASSPHRASE).unwrap();
+    store.add(task("甲")).expect("重新解锁后应能写入");
+}
+
+#[test]
 fn tags_survive_an_encrypted_round_trip() {
     let dir = tempdir().unwrap();
     let mut store = new_store(&dir);

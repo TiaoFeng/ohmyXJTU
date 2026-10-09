@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 
-use super::{RemoteMeta, WebDav, normalize_etag};
+use super::{Precondition, RemoteMeta, WebDav, normalize_etag};
 use crate::error::AppError;
 use crate::http::fake::FakeClient;
 use crate::http::{HttpResponse, Method};
@@ -133,7 +133,7 @@ fn get_returns_body_or_none() {
 fn put_sends_bytes_and_conditional_header() {
     let (client, dav) = endpoint(vec![response(201, &[("ETag", "v2")], b"")]);
     let meta = dav
-        .put("f.vault", b"encrypted-bytes", Some("v1"))
+        .put("f.vault", b"encrypted-bytes", Precondition::Match("v1"))
         .expect("PUT 应成功");
     assert_eq!(meta.etag.as_deref(), Some("v2"));
 
@@ -155,9 +155,40 @@ fn put_sends_bytes_and_conditional_header() {
 fn put_precondition_failure_is_a_conflict() {
     let (_client, dav) = endpoint(vec![response(412, &[], b"")]);
     assert!(matches!(
-        dav.put("f.vault", b"x", Some("stale")),
+        dav.put("f.vault", b"x", Precondition::Match("stale")),
         Err(AppError::WebDavConflict)
     ));
+}
+
+/// 首次建立帶 `If-None-Match: *`：遠端已存在時伺服器回 `412`（衝突），不覆蓋。
+#[test]
+fn put_must_not_exist_sends_if_none_match_and_maps_412_to_conflict() {
+    let (client, dav) = endpoint(vec![response(201, &[("ETag", "v1")], b"")]);
+    let meta = dav
+        .put("f.vault", b"new-bytes", Precondition::MustNotExist)
+        .expect("首次建立应成功");
+    assert_eq!(meta.etag.as_deref(), Some("v1"));
+    let request = client.last_request().expect("应有请求");
+    assert_eq!(request.header_value("If-None-Match"), Some("*"));
+    assert_eq!(request.header_value("If-Match"), None);
+
+    // 遠端已存在（另一台裝置先建立）：412 → 衝突。
+    let (_client, dav) = endpoint(vec![response(412, &[], b"")]);
+    assert!(matches!(
+        dav.put("f.vault", b"new-bytes", Precondition::MustNotExist),
+        Err(AppError::WebDavConflict)
+    ));
+}
+
+/// `Precondition::Any` 不帶任何條件標頭（強制覆寫）。
+#[test]
+fn put_any_sends_no_conditional_header() {
+    let (client, dav) = endpoint(vec![response(201, &[], b"")]);
+    dav.put("f.vault", b"x", Precondition::Any)
+        .expect("PUT 应成功");
+    let request = client.last_request().expect("应有请求");
+    assert_eq!(request.header_value("If-Match"), None);
+    assert_eq!(request.header_value("If-None-Match"), None);
 }
 
 /// `ETag` 正規化去掉引號與弱驗證前綴。
@@ -196,7 +227,9 @@ fn put_creates_the_folder_then_retries() {
         response(201, &[], b""),
         response(201, &[("ETag", "v1")], b""),
     ]);
-    let meta = dav.put("f.vault", b"x", None).expect("建立目录后应成功");
+    let meta = dav
+        .put("f.vault", b"x", Precondition::Any)
+        .expect("建立目录后应成功");
     assert_eq!(meta.etag.as_deref(), Some("v1"));
     let methods: Vec<Method> = client.requests().iter().map(|r| r.method).collect();
     assert_eq!(methods, vec![Method::Put, Method::Mkcol, Method::Put]);
@@ -210,7 +243,8 @@ fn put_creates_the_folder_when_the_parent_is_missing() {
         response(201, &[], b""),
         response(201, &[], b""),
     ]);
-    dav.put("f.vault", b"x", None).expect("建立目录后应成功");
+    dav.put("f.vault", b"x", Precondition::Any)
+        .expect("建立目录后应成功");
     let methods: Vec<Method> = client.requests().iter().map(|r| r.method).collect();
     assert_eq!(methods, vec![Method::Put, Method::Mkcol, Method::Put]);
 }

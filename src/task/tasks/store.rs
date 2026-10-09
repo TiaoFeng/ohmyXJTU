@@ -42,6 +42,8 @@ pub(crate) struct TaskStore {
     sealed: Option<Sealed>,
     /// 本會話無法使用任務存儲時的原因（例如解鎖時讀檔失敗）。
     unavailable: Option<String>,
+    /// 是否暫停寫入（同步下載期間）：暫停時拒絕保存，避免以舊清單覆寫下載結果。
+    paused: bool,
 }
 
 impl TaskStore {
@@ -53,6 +55,7 @@ impl TaskStore {
             next_id: 0,
             sealed: None,
             unavailable: None,
+            paused: false,
         }
     }
 
@@ -75,6 +78,8 @@ impl TaskStore {
     pub(crate) fn init(&mut self, passphrase: &str) -> AppResult<Option<String>> {
         let mut notices: Vec<String> = Vec::new();
         self.unavailable = None;
+        // 重新解鎖代表上一個工作階段已結束（可能曾因同步而暫停）：恢復寫入。
+        self.paused = false;
         match io::read_private(&self.path) {
             Ok(bytes) => {
                 if let Err(err) = self.open(passphrase, &bytes) {
@@ -228,6 +233,20 @@ impl TaskStore {
         self.sealed = None;
     }
 
+    /// 暫停寫入（同步下載前）：暫停期間的任務操作會被拒絕，不會落盤。
+    ///
+    /// 任務服務是獨立執行緒，若不在下載前暫停，它可能在下載覆寫 `tasks.vault`
+    /// 之後、`LockTasks` 送達之前，以記憶體中的**舊清單**保存，把剛下載的內容
+    /// 蓋掉。暫停只擋寫入，記憶體內容與金鑰都保留，可隨時 [`Self::resume`]。
+    pub(crate) fn pause(&mut self) {
+        self.paused = true;
+    }
+
+    /// 恢復寫入（同步未實際覆寫本機檔案時）。
+    pub(crate) fn resume(&mut self) {
+        self.paused = false;
+    }
+
     /// 任務檔路徑。
     #[cfg(test)]
     pub(crate) fn path(&self) -> &std::path::Path {
@@ -273,6 +292,11 @@ impl TaskStore {
 
     /// 以目前信封寫入任務檔（沿用同一鹽值，只換 nonce）。
     fn save(&self) -> AppResult<()> {
+        // 暫停期間（同步下載中）拒絕寫入：否則會以記憶體中的舊清單覆寫剛下載的
+        // 任務檔。使用者可稍後重試。
+        if self.paused {
+            return Err(AppError::Crypto("正在与坚果云同步，请稍后再试".to_owned()));
+        }
         // 存儲不可用時一律拒絕寫入——**即使記憶體中還留著先前載入的金鑰**：
         // 否則「原檔無法讀取」之後的保存會以舊內容覆寫磁碟上的原檔。
         if let Some(message) = &self.unavailable {

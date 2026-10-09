@@ -170,6 +170,38 @@ fn rekey_reports_the_result_synchronously() {
 }
 
 #[test]
+fn pause_blocks_task_operations_until_resume() {
+    let service = Service::new();
+    service.init("secret123");
+    service.collect_events(Duration::from_secs(20), Duration::from_millis(150));
+    service.dispatch(Job::AddTask { task: task("甲") });
+
+    // 暫停（同步下載前）：等待確認完成才繼續；其間的操作被拒絕。
+    service.handle.pause().expect("暂停应得到确认");
+    let events = service.dispatch(Job::AddTask { task: task("乙") });
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Failed {
+                target: crate::task::protocol::FailedTarget::Tasks,
+                ..
+            }
+        )),
+        "暂停期间的操作应回报失败：{events:?}"
+    );
+    let mut store = TaskStore::at(service.tasks_path());
+    store.init("secret123").expect("载入");
+    assert_eq!(store.tasks().len(), 1, "暂停期间不得写入");
+
+    // 恢復後可再寫入。
+    service.handle.resume();
+    service.dispatch(Job::AddTask { task: task("丙") });
+    let mut store = TaskStore::at(service.tasks_path());
+    store.init("secret123").expect("载入");
+    assert_eq!(store.tasks().len(), 2, "恢复后应能写入");
+}
+
+#[test]
 fn lock_drops_the_key_so_later_saves_fail() {
     let service = Service::new();
     service.init("secret123");

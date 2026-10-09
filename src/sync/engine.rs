@@ -10,7 +10,7 @@ use crate::credentials::envelope;
 use crate::error::{AppError, AppResult};
 use crate::io;
 use crate::sync::config::{FileRecord, SyncFile};
-use crate::sync::webdav::{RemoteMeta, WebDav};
+use crate::sync::webdav::{Precondition, RemoteMeta, WebDav};
 
 /// 檔案內容的指紋（用於偵測本機是否變更）。
 ///
@@ -48,13 +48,38 @@ pub(crate) fn plan(local_changed: bool, remote_changed: bool) -> Plan {
     }
 }
 
+/// 單一檔案的評估結果：計畫，以及遠端是否確實不存在。
+///
+/// 「遠端不存在」需要獨立回報，因為上傳的前置條件取決於它：遠端**確認不存在**
+/// 時應帶 `If-None-Match: *`（避免與其他裝置的首次建立互撞），而「遠端存在但
+/// 沒有 `ETag`」只能無條件覆寫。這個區別在只看 [`Plan::Push`] 時會遺失。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Evaluation {
+    /// 三方比對後的計畫。
+    pub plan: Plan,
+    /// 遠端是否確實不存在（`HEAD` 回 `404`／`409`／`410`）。
+    pub remote_absent: bool,
+}
+
+impl Evaluation {
+    /// 上傳時要帶的前置條件：遠端確認不存在時要求「必須不存在」，否則沿用
+    /// 上次記錄的 `ETag`（無 `ETag` 則無條件覆寫）。
+    pub(crate) fn precondition<'a>(&self, etag: Option<&'a str>) -> Precondition<'a> {
+        if self.remote_absent {
+            Precondition::MustNotExist
+        } else {
+            Precondition::from_etag(etag)
+        }
+    }
+}
+
 /// 評估單一檔案的同步計畫（只讀不寫）。
 pub(crate) fn evaluate(
     webdav: &WebDav,
     file: SyncFile,
     local_path: &Path,
     record: &FileRecord,
-) -> AppResult<Plan> {
+) -> AppResult<Evaluation> {
     let local_changed = match (read_local(local_path)?, &record.hash) {
         (Some(bytes), Some(hash)) => &fingerprint(&bytes) != hash,
         (Some(_), None) => true,
@@ -66,7 +91,10 @@ pub(crate) fn evaluate(
         (Some(_), None) => remote.exists,
         (None, _) => false,
     };
-    Ok(plan(local_changed, remote_changed))
+    Ok(Evaluation {
+        plan: plan(local_changed, remote_changed),
+        remote_absent: !remote.exists,
+    })
 }
 
 /// 下載遠端檔案覆蓋本機，回傳新的同步記錄；遠端缺此檔時回 `None`。
@@ -89,14 +117,15 @@ pub(crate) fn pull(
 
 /// 上傳本機檔案覆蓋遠端，回傳新的同步記錄。
 ///
-/// `if_match` 為上次同步記錄的遠端 `ETag`：帶入後 PUT 成為條件請求，若遠端在
-/// 檢查後又被其他裝置改動，伺服器會回 `412`（映射為 [`AppError::WebDavConflict`]），
-/// 呼叫端可據此避免覆蓋而改報衝突。遠端尚無檔案（首次上傳）或無 ETag 時帶 `None`。
+/// `precondition` 為上傳的前置條件（見 [`Precondition`]）：帶入 [`Precondition::Match`]
+/// 時 PUT 成為條件請求，若遠端在檢查後又被其他裝置改動，伺服器會回 `412`
+///（映射為 [`AppError::WebDavConflict`]），呼叫端可據此避免覆蓋而改報衝突；
+/// 遠端確認不存在時用 [`Precondition::MustNotExist`]，避免首次建立互撞。
 pub(crate) fn push(
     webdav: &WebDav,
     file: SyncFile,
     local_path: &Path,
-    if_match: Option<&str>,
+    precondition: Precondition<'_>,
 ) -> AppResult<FileRecord> {
     let Some(bytes) = read_local(local_path)? else {
         return Err(AppError::webdav(format!(
@@ -105,7 +134,7 @@ pub(crate) fn push(
         )));
     };
     let name = file.remote_name();
-    let meta = webdav.put(name, &bytes, if_match)?;
+    let meta = webdav.put(name, &bytes, precondition)?;
     // 伺服器未在 PUT 回應提供版本時，補做一次 HEAD 取得權威版本。
     let meta = if remote_version(&meta).is_none() {
         webdav.head(name)?
@@ -123,29 +152,38 @@ pub(crate) fn push(
 ///
 /// 用於登入畫面的「從堅果雲導入」——此時尚無加密口令，無法讀寫 `sync.vault`，
 /// 因此只回傳記錄，待解鎖後再存回。遠端缺少個別檔案時略過；一個都沒有時回錯。
+///
+/// **先全部下載並驗證、再一起落盤**：任一檔案下載失敗或不是本程式的容器時，
+/// 本機檔案完全不動。若邊下載邊寫入，中途失敗會留下「一半新一半舊」的本機檔，
+/// 而導入又不儲存記錄，之後的同步會以錯誤的基準比對。
 pub(crate) fn import(
     webdav: &WebDav,
     targets: &[(SyncFile, PathBuf)],
 ) -> AppResult<Vec<(SyncFile, FileRecord)>> {
-    let mut records = Vec::new();
+    let mut fetched: Vec<(SyncFile, &PathBuf, Vec<u8>, RemoteMeta)> = Vec::new();
     for (file, path) in targets {
         let name = file.remote_name();
         let Some((bytes, meta)) = webdav.get(name)? else {
             continue;
         };
         ensure_container(*file, &bytes)?;
-        io::write_private_atomic(path, &bytes)?;
+        fetched.push((*file, path, bytes, meta));
+    }
+    if fetched.is_empty() {
+        return Err(AppError::webdav("云端没有可导入的同步数据"));
+    }
+    // 全部驗證通過後才落盤。
+    let mut records = Vec::new();
+    for (file, path, bytes, meta) in &fetched {
+        io::write_private_atomic(path, bytes)?;
         records.push((
             *file,
             FileRecord {
-                version: remote_version(&meta).map(str::to_owned),
+                version: remote_version(meta).map(str::to_owned),
                 etag: meta.if_match.clone(),
-                hash: Some(fingerprint(&bytes)),
+                hash: Some(fingerprint(bytes)),
             },
         ));
-    }
-    if records.is_empty() {
-        return Err(AppError::webdav("云端没有可导入的同步数据"));
     }
     Ok(records)
 }

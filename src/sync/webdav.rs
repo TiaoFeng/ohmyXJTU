@@ -49,6 +49,35 @@ pub struct RemoteMeta {
     pub if_match: Option<String>,
 }
 
+/// `PUT` 的前置條件。
+///
+/// 讓「檢查→上傳」成為條件請求，避免在檢查與上傳之間被其他裝置改動而覆蓋：
+///
+/// - [`Precondition::Any`]：無條件覆寫（遠端無 `ETag` 可用，或使用者主動強制上傳）。
+/// - [`Precondition::MustNotExist`]：要求遠端**不存在**（`If-None-Match: *`）。
+///   用於首次建立：即使伺服器支援 `ETag`，兩台裝置同時首次同步仍可能都看到
+///   `404`；帶上這個條件後，後到者會收到 `412`（衝突），而非默默覆蓋先到者。
+/// - [`Precondition::Match`]：要求遠端版本等於上次記錄的 `ETag`（`If-Match`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Precondition<'a> {
+    /// 無條件覆寫。
+    Any,
+    /// 要求遠端不存在（僅在建立時使用）。
+    MustNotExist,
+    /// 要求遠端版本等於指定的 `ETag`。
+    Match(&'a str),
+}
+
+impl<'a> Precondition<'a> {
+    /// 由上次記錄的 `ETag` 決定：有值用 [`Precondition::Match`]，否則無條件。
+    pub fn from_etag(etag: Option<&'a str>) -> Self {
+        match etag {
+            Some(tag) => Self::Match(tag),
+            None => Self::Any,
+        }
+    }
+}
+
 /// 一個 WebDAV 端點（伺服器位址＋Basic 認證）。
 pub struct WebDav {
     client: Arc<dyn HttpClient>,
@@ -82,7 +111,7 @@ impl WebDav {
     /// 一次真實的 `PUT`＋`DELETE` 驗證，並在失敗時回報方法與目標網址。刪除失敗
     /// 不影響「可寫」的結論。
     pub fn check(&self) -> AppResult<()> {
-        self.put(PROBE_FILE, b"ohmyXJTU probe", None)?;
+        self.put(PROBE_FILE, b"ohmyXJTU probe", Precondition::Any)?;
         let _ = self.delete(PROBE_FILE);
         Ok(())
     }
@@ -128,30 +157,43 @@ impl WebDav {
 
     /// 上傳（覆寫）遠端檔案。
     ///
-    /// `if_match` 為 `Some` 時附上 `If-Match`，讓「檢查→上傳」成為條件請求：
-    /// 遠端已被其他裝置改動時伺服器會回 `412`，映射為 [`AppError::WebDavConflict`]。
+    /// `precondition` 決定是否附上條件標頭，讓「檢查→上傳」成為條件請求：
+    /// 遠端已被其他裝置改動（或已存在，而要求的是「必須不存在」）時，伺服器
+    /// 會回 `412`，映射為 [`AppError::WebDavConflict`]。
     ///
     /// 首次遇到 `404` 或 `409`（上層集合不存在）時先以 `MKCOL` 建立子目錄再重試
     /// 一次；這是堅果雲等服務的常見要求（不接受直接寫入根目錄，且 `PUT` 到不存
     /// 在集合下會回 `409`）。
-    pub fn put(&self, file: &str, bytes: &[u8], if_match: Option<&str>) -> AppResult<RemoteMeta> {
+    pub fn put(
+        &self,
+        file: &str,
+        bytes: &[u8],
+        precondition: Precondition<'_>,
+    ) -> AppResult<RemoteMeta> {
         let url = self.url_for(file);
-        let response = self.send_put(&url, bytes, if_match)?;
+        let response = self.send_put(&url, bytes, precondition)?;
         if matches!(response.status, 404 | 409) {
             self.ensure_folder()?;
-            let retried = self.send_put(&url, bytes, if_match)?;
+            let retried = self.send_put(&url, bytes, precondition)?;
             return self.finish_put(&url, retried);
         }
         self.finish_put(&url, response)
     }
 
     /// 送出一則 `PUT` 並取回回應。
-    fn send_put(&self, url: &str, bytes: &[u8], if_match: Option<&str>) -> AppResult<HttpResponse> {
+    fn send_put(
+        &self,
+        url: &str,
+        bytes: &[u8],
+        precondition: Precondition<'_>,
+    ) -> AppResult<HttpResponse> {
         let mut request = HttpRequest::put(url.to_owned(), bytes.to_vec())
             .header("Content-Type", "application/octet-stream");
-        if let Some(etag) = if_match {
-            request = request.header("If-Match", etag);
-        }
+        request = match precondition {
+            Precondition::Any => request,
+            Precondition::MustNotExist => request.header("If-None-Match", "*"),
+            Precondition::Match(etag) => request.header("If-Match", etag),
+        };
         self.send(request)
     }
 

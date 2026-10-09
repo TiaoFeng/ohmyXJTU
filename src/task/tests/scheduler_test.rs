@@ -118,6 +118,7 @@ impl ThreadWorker {
                     dir.path().join("tasks.vault"),
                 ),
             ],
+            sync_pulled: false,
             shutdown: false,
             tasks,
         };

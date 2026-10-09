@@ -96,6 +96,7 @@ pub(crate) fn apply_event(app: &mut App, event: Event, jobs: &Sender<Job>) {
         Event::SyncImported { message } => apply_sync_imported(app, message),
         Event::SyncDone { summary } => app.set_message(summary),
         Event::SyncConflict { message } => app.set_warning_message(message),
+        Event::SyncRelocked => apply_sync_relocked(app),
         Event::Failed {
             what,
             message,
@@ -167,6 +168,20 @@ fn apply_sync_test_result(app: &mut App, ok: bool, message: String) {
 fn apply_sync_imported(app: &mut App, message: String) {
     app.set_screen(Screen::Unlock(FormState::unlock()));
     app.set_message(message);
+}
+
+/// 下載已覆寫本機檔案：工作者已鎖定金鑰，回到解鎖畫面重新輸入口令。
+///
+/// 記憶體中的憑證與任務清單仍是下載前的內容（見 `Worker::relock_after_pull`），
+/// 因此不能留在主畫面繼續操作——那會用舊內容覆寫剛下載的檔案。重新解鎖也會
+/// 當場驗證下載的憑證檔能否以目前口令解開。
+fn apply_sync_relocked(app: &mut App) {
+    app.login = None;
+    app.login_cancel_pending = false;
+    app.clear_site_modes();
+    app.invalidate_data(true);
+    app.set_screen(Screen::Unlock(FormState::unlock()));
+    app.set_message("已下载云端内容，请重新输入加密口令解锁以应用");
 }
 
 /// 需要圖片驗證碼：保留上一次的錯誤訊息，輸入框清空。

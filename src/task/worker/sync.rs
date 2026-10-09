@@ -145,6 +145,9 @@ impl Worker {
             }
         }
         self.finish_sync(&conflicts, uploaded, downloaded);
+        if downloaded > 0 {
+            self.relock_after_pull();
+        }
         Ok(())
     }
 
@@ -224,7 +227,39 @@ impl Worker {
         self.emit(Event::SyncDone {
             summary: format!("已下载 {downloaded} 个文件"),
         });
+        if downloaded > 0 {
+            self.relock_after_pull();
+        }
         Ok(())
+    }
+
+    /// 下載已覆寫本機檔案：丟棄金鑰與會話，請介面回到解鎖畫面重新輸入口令。
+    ///
+    /// 記憶體中的憑證與任務清單仍是下載**前**的版本。不重建工作階段的話：
+    ///
+    /// - 任務服務的 `save()` 會用記憶體中的舊清單覆寫剛下載的 `tasks.vault`，
+    ///   而緊接著的自動同步又會把舊清單上傳回雲端——兩邊的資料都被舊的蓋掉；
+    /// - 憑證仍會沿用舊帳號，直到使用者自行重啟程式。
+    ///
+    /// 這裡把會話與任務／同步金鑰一併丟棄（任務內容仍在記憶體，但重新解鎖時
+    /// `TaskStore::init` 會以磁碟上的新檔案完整覆寫）。重新解鎖同時是對下載
+    /// 內容的驗證：口令不符或檔案不是本程式的容器都會當場回報，而不是安靜地
+    /// 沿用舊狀態。
+    fn relock_after_pull(&mut self) {
+        self.session = None;
+        self.credentials = None;
+        self.flow = None;
+        self.retry = None;
+        self.pending_vault = None;
+        self.pending_data.clear();
+        self.tasks.lock();
+        self.sync.lock();
+        self.generation += 1;
+        self.cache.clear();
+        self.schedule_cache = None;
+        self.schedule_week = None;
+        self.known_term = None;
+        self.emit(Event::SyncRelocked);
     }
 
     /// 儲存連線設定：先測試連線，通過才保存（「測試連線通過才啟用」）。

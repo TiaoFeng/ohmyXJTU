@@ -7608,6 +7608,14 @@ fn sync_now_uploads_local_files_when_the_remote_is_empty() {
         "应回报同步完成：{events:?}"
     );
     assert!(harness.sync_path().is_file(), "同步设置应已写入磁盘");
+    // 只有上傳時不該動到工作階段：使用者可以繼續操作。
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::SyncRelocked)),
+        "纯上传不应锁定会话：{events:?}"
+    );
+    assert!(harness.worker.session.is_some(), "纯上传后会话应保留");
 }
 
 #[test]
@@ -7706,5 +7714,73 @@ fn sync_now_reports_a_conflict_when_the_upload_is_rejected() {
             .iter()
             .any(|event| matches!(event, Event::SyncDone { .. })),
         "冲突时不该回报同步完成：{events:?}"
+    );
+}
+
+/// 下載會覆寫本機檔案：工作者必須丟棄金鑰與會話，並要求使用者重新解鎖。
+///
+/// 記憶體中的任務清單仍是下載**前**的版本，任務服務的 `save()` 會用它覆寫
+/// 剛下載的 `tasks.vault`（下一次自動同步再把舊清單上傳回雲端）；憑證也會
+/// 沿用舊帳號。這裡以「重新解鎖前不得再寫入同步記錄」驗證金鑰真的被丟棄。
+#[test]
+fn sync_pull_locks_the_session_and_demands_a_new_unlock() {
+    let remote = crate::credentials::envelope::seal("secret123", "ohmyXJTU-vault", b"remote-vault")
+        .expect("建立远端容器")
+        .0;
+
+    let mut harness = Harness::new(|_| Ok(html("")));
+    harness.seed_vault("secret123", &Credentials::new("3120000001", "pw-12345"));
+    harness
+        .dispatch(Job::Unlock {
+            passphrase: "secret123".into(),
+        })
+        .expect("解锁应成功");
+    assert!(harness.worker.session.is_some(), "解锁后应有会话");
+
+    // 連線測試的探測檔可寫；下載一律回同一個容器。
+    harness.set_webdav(move |request| match request.method {
+        Method::Put => Ok(HttpResponse {
+            status: 201,
+            final_url: request.url.clone(),
+            headers: vec![("ETag".to_owned(), "v1".to_owned())],
+            body: Vec::new(),
+        }),
+        Method::Get => Ok(HttpResponse {
+            status: 200,
+            final_url: request.url.clone(),
+            headers: vec![("ETag".to_owned(), "v2".to_owned())],
+            body: remote.clone(),
+        }),
+        _ => Ok(HttpResponse::new(404, request.url.clone(), b"".as_slice())),
+    });
+
+    harness
+        .dispatch(Job::SetSyncConfig {
+            config: crate::sync::config::SyncConfig::new(
+                "https://dav.example/dav/",
+                "u@example.com",
+                "app-pass",
+            ),
+        })
+        .expect("保存同步设置应成功");
+
+    harness.dispatch(Job::SyncPull).expect("下载应成功");
+    let events = harness.drain_events();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::SyncRelocked)),
+        "下载后应要求重新解锁：{events:?}"
+    );
+    assert!(harness.worker.session.is_none(), "下载后应丢弃会话");
+    assert!(
+        harness.worker.credentials.is_none(),
+        "下载后应丢弃内存中的凭证"
+    );
+
+    // 金鑰已丟棄：重新解鎖前不得再寫入同步記錄（否則會以舊記錄覆寫下載結果）。
+    assert!(
+        harness.dispatch(Job::SyncPush).is_err(),
+        "锁定后不应再写入同步记录"
     );
 }

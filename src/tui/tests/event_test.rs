@@ -1331,6 +1331,38 @@ fn disabled_session_returns_to_the_unlock_screen() {
 }
 
 #[test]
+fn sync_relocked_returns_to_the_unlock_screen() {
+    // 下載已覆寫本機檔案：工作者鎖定金鑰，介面必須離開主畫面——繼續操作會用
+    // 記憶體中的舊任務清單覆寫剛下載的檔案。
+    let mut app = app();
+    app.set_screen(Screen::Main);
+    app.set_site_mode(SiteKind::Attendance, AccessMode::Direct);
+    app.homework.start_loading("正在汇总作业…");
+    app.sync = crate::task::SyncStateView {
+        configured: true,
+        auto_sync: true,
+        ..Default::default()
+    };
+
+    apply_event(&mut app, Event::SyncRelocked);
+
+    assert_eq!(app.session_label(), "未登录", "站点登录状态应清除");
+    assert!(app.homework.is_idle(), "卡住的加载状态应解除");
+    assert!(matches!(app.screen, Screen::Unlock(_)), "{:?}", app.screen);
+    assert!(
+        app.message_text()
+            .is_some_and(|text| text.contains("重新输入加密口令")),
+        "应提示重新解锁：{:?}",
+        app.message
+    );
+    assert!(
+        app.sync.configured && app.sync.auto_sync,
+        "同步设定本身不受影响：{:?}",
+        app.sync
+    );
+}
+
+#[test]
 fn verification_retry_keeps_the_mfa_input() {
     // 簡訊驗證碼填錯：工作者仍保留登入流程，介面必須留在輸入畫面並就地顯示
     // 錯誤，否則使用者只能重新輸入帳號密碼（甚至重收簡訊）。

@@ -160,6 +160,18 @@ pub enum AppError {
     #[error("任务不存在（可能已被删除）")]
     TaskNotFound,
 
+    /// 堅果雲（WebDAV）認證失敗。
+    #[error("坚果云认证失败，请检查账号与应用密码")]
+    WebDavAuth,
+
+    /// 遠端同步文檔已被其他裝置修改（條件請求未通過）。
+    #[error("远端文档已被其他设备修改，请先同步")]
+    WebDavConflict,
+
+    /// 其他 WebDAV（堅果雲同步）錯誤。
+    #[error("坚果云同步失败：{0}")]
+    WebDav(String),
+
     /// 設定檔或路徑相關錯誤。
     #[error("配置错误：{0}")]
     Config(String),
@@ -211,6 +223,11 @@ impl AppError {
             host.to_owned()
         };
         Self::UntrustedUrl { host, reason }
+    }
+
+    /// 建立 WebDAV 錯誤。
+    pub fn webdav(message: impl Into<String>) -> Self {
+        Self::WebDav(message.into())
     }
 
     /// 是否屬於「需要重新登入」類錯誤。

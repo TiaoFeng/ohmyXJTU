@@ -58,7 +58,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 ),
                 crate::tui::app::FormKind::SyncConfig => (
                     "坚果云同步设置",
-                    "tab 切换字段 · enter 测试并保存 · esc 返回",
+                    "tab 切换字段 · enter 测试并保存（仅支持 https）· esc 返回",
                 ),
                 _ => (
                     "修改加密口令",

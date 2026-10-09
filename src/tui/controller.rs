@@ -857,8 +857,10 @@ fn sync_config_from(values: &FormValues) -> Result<SyncConfig, String> {
     if url.is_empty() {
         return Err("请输入服务器地址".to_owned());
     }
-    if !url.starts_with("https://") && !url.starts_with("http://") {
-        return Err("服务器地址必须以 http(s):// 开头".to_owned());
+    // 同步以 HTTP Basic（帳號＋應用密碼）認證，明文 HTTP 會讓憑證在網路上裸奔；
+    // 這裡只收 https（工作者會以 `sync::config::validate` 再驗一次）。
+    if !url.to_ascii_lowercase().starts_with("https://") {
+        return Err("服务器地址必须以 https:// 开头（明文 HTTP 会泄露应用密码）".to_owned());
     }
     if values.sync_account.trim().is_empty() {
         return Err("请输入坚果云账号".to_owned());

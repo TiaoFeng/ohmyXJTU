@@ -744,6 +744,32 @@ fn sync_import_reports_validation_errors_in_place() {
     assert!(state.message.is_some(), "应就地显示验证错误");
 }
 
+/// 明文 HTTP 會讓 HTTP Basic 的帳號與應用密碼在網路上裸奔：表單就要擋下。
+#[test]
+fn sync_import_rejects_a_plain_http_server_url() {
+    let (jobs, rx) = channel();
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::SyncImport(SyncImportState::new(false)));
+    // 清掉預填的 https 位址，換成明文 http。
+    press_ctrl(&mut app, &jobs, 'u');
+    type_text(&mut app, &jobs, "http://dav.example/dav/");
+    press(&mut app, &jobs, KeyCode::Tab);
+    type_text(&mut app, &jobs, "u@example.com");
+    press(&mut app, &jobs, KeyCode::Tab);
+    type_text(&mut app, &jobs, "app-pass");
+
+    press(&mut app, &jobs, KeyCode::Enter);
+    assert!(rx.try_recv().is_err(), "明文 HTTP 不应送出任务");
+    let Screen::SyncImport(state) = &app.screen else {
+        panic!("应停留在导入画面：{:?}", app.screen);
+    };
+    let message = state.message.clone().unwrap_or_default();
+    assert!(
+        message.contains("https://"),
+        "应指出必须使用 https：{message}"
+    );
+}
+
 #[test]
 fn login_captcha_submission_sends_job() {
     let (jobs, rx) = channel();

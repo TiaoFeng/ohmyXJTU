@@ -10,7 +10,7 @@ pub fn draw(frame: &mut Frame, state: &SyncImportState) {
         frame,
         &state.form,
         "从坚果云导入",
-        "tab 切换字段 · ^t 测试连接 · enter/^s 导入 · esc 返回",
+        "tab 切换字段 · ^t 测试连接 · enter/^s 导入 · esc 返回（仅支持 https）",
         state.message.as_deref(),
     );
 }

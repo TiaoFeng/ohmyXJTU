@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use crate::error::{AppError, AppResult};
-use crate::sync::config::{FileRecord, SyncConfig, SyncFile};
+use crate::sync::config::{self, FileRecord, SyncConfig, SyncFile};
 use crate::sync::engine::{self, Plan};
 use crate::sync::webdav::WebDav;
 use crate::task::protocol::{Event, SyncStateView};
@@ -74,17 +74,20 @@ impl Worker {
         self.emit(Event::SyncState(Box::new(view)));
     }
 
-    /// 已設定時的連線設定（複製）。
+    /// 已設定時的連線設定（複製）；設定不可用時回錯。
     fn require_sync_config(&self) -> AppResult<SyncConfig> {
-        self.sync
+        let config = self
+            .sync
             .config()
             .cloned()
-            .ok_or_else(|| AppError::config("尚未配置坚果云同步"))
+            .ok_or_else(|| AppError::config("尚未配置坚果云同步"))?;
+        config::validate(&config)?;
+        Ok(config)
     }
 
     /// 測試連線與寫入權限（登入畫面與設定表單共用）。
     pub(super) fn sync_test_connection(&mut self, config: SyncConfig) -> AppResult<()> {
-        let result = self.webdav_for(&config).check();
+        let result = config::validate(&config).and_then(|()| self.webdav_for(&config).check());
         let event = match result {
             Ok(()) => Event::SyncTestResult {
                 ok: true,
@@ -101,6 +104,7 @@ impl Worker {
 
     /// 從雲端導入：下載遠端檔案覆寫本機，暫存設定與記錄待解鎖後保存。
     pub(super) fn sync_import(&mut self, config: SyncConfig) -> AppResult<()> {
+        config::validate(&config)?;
         let dav = self.webdav_for(&config);
         let records = engine::import(&dav, &self.sync_local)?;
         self.pending_sync = Some(PendingSync { config, records });
@@ -225,6 +229,7 @@ impl Worker {
 
     /// 儲存連線設定：先測試連線，通過才保存（「測試連線通過才啟用」）。
     pub(super) fn set_sync_config(&mut self, mut config: SyncConfig) -> AppResult<()> {
+        config::validate(&config)?;
         self.webdav_for(&config).check()?;
         // 編輯既有設定時沿用目前的自動同步偏好，避免被重設為關閉。
         if let Some(existing) = self.sync.config() {

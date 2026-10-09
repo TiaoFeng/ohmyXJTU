@@ -95,6 +95,32 @@ impl Drop for SyncConfig {
     }
 }
 
+/// 檢查連線設定是否可用。
+///
+/// 伺服器位址**必須**使用 `https`：認證採 HTTP Basic（帳號＋應用密碼），
+/// 明文 HTTP 會讓憑證在網路上裸奔，而同步層不做任何補救（`no_redirect` 也
+/// 不會把 http 自動升級成 https）。這是第二道防線——介面表單會先擋一次，
+/// 這裡確保既有設定、導入時暫存的設定與訊息繞道都無法漏網。
+pub(crate) fn validate(config: &SyncConfig) -> AppResult<()> {
+    if !config
+        .url
+        .trim()
+        .to_ascii_lowercase()
+        .starts_with("https://")
+    {
+        return Err(AppError::config(
+            "坚果云服务器地址必须以 https:// 开头（同步以 HTTP Basic 认证传送应用密码，明文 HTTP 会泄露凭据）",
+        ));
+    }
+    if config.account.trim().is_empty() {
+        return Err(AppError::config("坚果云账号不能为空"));
+    }
+    if config.app_password.is_empty() {
+        return Err(AppError::config("坚果云应用密码不能为空"));
+    }
+    Ok(())
+}
+
 /// 單一遠端檔案上次同步的記錄。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileRecord {

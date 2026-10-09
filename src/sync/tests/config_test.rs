@@ -167,3 +167,34 @@ fn debug_does_not_leak_credentials() {
     assert!(!text.contains("secret-account"), "{text}");
     assert!(!text.contains("secret-pass"), "{text}");
 }
+
+#[test]
+fn validate_accepts_a_well_formed_https_config() {
+    assert!(validate(&config()).is_ok());
+    // 大小寫不影響判定，前後空白由設定本身修剪。
+    assert!(validate(&SyncConfig::new("HTTPS://dav.example/dav/", "u", "p")).is_ok());
+}
+
+/// 明文 HTTP 會讓 HTTP Basic 的帳號與應用密碼在網路上裸奔：一律拒絕。
+#[test]
+fn validate_rejects_plain_http_and_other_schemes() {
+    for url in [
+        "http://dav.example/dav/",
+        "HTTP://dav.example/dav/",
+        "ftp://dav.example/dav/",
+        "dav.example/dav/",
+    ] {
+        let bad = SyncConfig::new(url, "u@example.com", "app-pass");
+        let err = validate(&bad).expect_err("非 https 应被拒绝");
+        assert!(err.to_string().contains("https://"), "{err}");
+    }
+}
+
+#[test]
+fn validate_rejects_missing_account_or_password() {
+    let no_account = SyncConfig::new("https://dav.example/dav/", "   ", "app-pass");
+    assert!(validate(&no_account).is_err());
+
+    let no_password = SyncConfig::new("https://dav.example/dav/", "u@example.com", "");
+    assert!(validate(&no_password).is_err());
+}

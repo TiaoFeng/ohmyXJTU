@@ -15,7 +15,7 @@ use crate::domain::todo::{self, PageRow, Priority, SortKey, SortMode, Task};
 use crate::model::{ActivityDetailView, FlowData, ScheduleData};
 use crate::session::{AccessMode, SiteKind};
 use crate::sites::lms::{LmsActivity, LmsCourse};
-use crate::task::{FailedTarget, HomeworkIssue};
+use crate::task::{FailedTarget, HomeworkIssue, SyncStateView};
 use crate::text::{MAX_INLINE_CHARS, sanitize_inline};
 use crate::tone::Tone;
 use crate::tui::text::{InputLine, TextArea};
@@ -1211,6 +1211,8 @@ pub struct App {
     pub access_policy: AccessPolicy,
     /// 各站點目前的登入狀態（站點 → 實際訪問方式）。
     pub site_modes: HashMap<SiteKind, AccessMode>,
+    /// 目前堅果雲同步設定（供設定畫面顯示；不含秘密）。
+    pub sync: SyncStateView,
     /// 等待主迴圈以系統瀏覽器開啟的網址。
     pub pending_open: Option<String>,
     /// 目前的暫時訊息（文字、建立時間、語意色；自動過期）。
@@ -1270,6 +1272,7 @@ impl App {
             lms: LmsState::default(),
             access_policy,
             site_modes: HashMap::new(),
+            sync: SyncStateView::default(),
             pending_open: None,
             message: None,
             quit: false,
@@ -1705,6 +1708,7 @@ impl App {
             | FailedTarget::ActivityOpen
             | FailedTarget::Preload
             | FailedTarget::Settings
+            | FailedTarget::Sync
             | FailedTarget::Agreement
             | FailedTarget::Tasks => {}
         }
@@ -1734,6 +1738,7 @@ impl App {
             | FailedTarget::ActivityOpen
             | FailedTarget::Preload
             | FailedTarget::Settings
+            | FailedTarget::Sync
             | FailedTarget::Agreement
             | FailedTarget::Tasks => {}
         }

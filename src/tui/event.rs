@@ -91,6 +91,11 @@ pub(crate) fn apply_event(app: &mut App, event: Event, jobs: &Sender<Job>) {
         Event::AccessPolicyUpdated(policy) => apply_access_policy_updated(app, policy),
         Event::Notice(message) => app.set_message(message),
         Event::Warning(message) => app.set_warning_message(message),
+        Event::SyncState(view) => app.sync = *view,
+        Event::SyncTestResult { ok, message } => apply_sync_test_result(app, ok, message),
+        Event::SyncImported { message } => apply_sync_imported(app, message),
+        Event::SyncDone { summary } => app.set_message(summary),
+        Event::SyncConflict { message } => app.set_warning_message(message),
         Event::Failed {
             what,
             message,
@@ -123,6 +128,20 @@ fn apply_vault_ready(app: &mut App, jobs: &Sender<Job>) {
         controller::ensure_page(app, jobs);
     }
     app.set_message("凭证已就绪");
+}
+
+/// 堅果雲連線測試結果：通過／失敗都以底欄訊息呈現。
+fn apply_sync_test_result(app: &mut App, ok: bool, message: String) {
+    if ok {
+        app.set_message(format!("坚果云连接成功：{message}"));
+    } else {
+        app.set_warning_message(format!("坚果云连接失败：{message}"));
+    }
+}
+
+/// 已從堅果雲導入：本機憑證檔已就緒，提示使用者輸入加密口令。
+fn apply_sync_imported(app: &mut App, message: String) {
+    app.set_message(message);
 }
 
 /// 需要圖片驗證碼：保留上一次的錯誤訊息，輸入框清空。

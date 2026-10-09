@@ -4,3 +4,6 @@
 //! 個加密容器，同步層完全不接觸明文，跨裝置只要使用同一個加密口令即可解開。
 
 pub mod webdav;
+
+pub(crate) mod config;
+pub(crate) mod engine;

@@ -5,5 +5,7 @@ pub mod protocol;
 pub(crate) mod tasks;
 pub mod worker;
 
-pub use protocol::{CoursesData, Event, FailedTarget, HomeworkIssue, HomeworkUpdate, Job};
+pub use protocol::{
+    CoursesData, Event, FailedTarget, HomeworkIssue, HomeworkUpdate, Job, SyncStateView,
+};
 pub use worker::spawn;

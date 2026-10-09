@@ -32,6 +32,10 @@ impl Worker {
         self.emit(Event::VaultReady);
         // 設定檔重建的提示要等介面進到主畫面（底欄）才看得見。
         self.report_config_rebuild();
+        // 同步設定在 VaultReady 之後才載入：它的信封要重跑一次 Argon2id
+        // （數百毫秒），不能拖到主畫面出現；此後工作者才處理後續任務，
+        // 因此自動同步等請求屆時已就緒。
+        self.init_sync(passphrase);
         Ok(())
     }
 
@@ -48,6 +52,8 @@ impl Worker {
         // 設定檔重建的提示要等介面進到主畫面（底欄）才看得見。
         self.report_config_rebuild();
         self.report_vault_permissions();
+        // 同步設定在 VaultReady 之後才載入（見 `create_vault` 的說明）。
+        self.init_sync(passphrase);
         Ok(())
     }
 
@@ -130,23 +136,40 @@ impl Worker {
         }
     }
 
-    /// 修改加密口令：憑證保險庫與任務檔必須使用同一組口令。
+    /// 修改加密口令：憑證保險庫、任務檔與同步設定檔必須使用同一組口令。
     ///
-    /// 兩者是獨立的檔案，無法一起原子寫入；順序固定為「先驗舊口令 → 先寫
-    /// 任務檔 → 再寫保險庫」，保險庫寫入失敗時把任務檔換回舊口令，避免留下
-    /// 「保險庫是新口令、任務檔是舊口令」的不一致狀態。
+    /// 三者是獨立的檔案，無法一起原子寫入；順序固定為「先驗舊口令 → 寫任務檔
+    /// → 寫同步設定檔（若已設定）→ 再寫保險庫」，任一後續步驟失敗時把已換鑰的
+    /// 檔案換回舊口令，避免留下口令不一致的狀態。
     pub(super) fn change_passphrase(&mut self, old: &str, new: &str) -> AppResult<()> {
         // 先以舊口令解密，驗證口令正確（失敗會回報 [`AppError::WrongPassphrase`]）。
         let credentials = self.vault.load(old)?;
         self.tasks.rekey(&new.into())?;
-        if let Err(err) = self.vault.store(new, &credentials) {
-            // 保險庫仍是舊口令：把任務檔換回舊口令。回復失敗時把細節附在錯誤
-            // 訊息裡（見 [`AppError::PassphraseRollback`]）——另外發一則通知會
-            // 被緊接著的失敗訊息蓋掉，使用者永遠看不到。
+        // 同步設定檔若已設定，也要改用同一口令；換鑰失敗時把任務檔換回舊口令。
+        if let Err(err) = self.sync.rekey(new) {
             if let Err(rollback) = self.tasks.rekey(&old.into()) {
                 return Err(AppError::PassphraseRollback {
                     reason: err.to_string(),
                     rollback: rollback.to_string(),
+                });
+            }
+            return Err(err);
+        }
+        if let Err(err) = self.vault.store(new, &credentials) {
+            // 保險庫仍是舊口令：把任務檔與同步設定檔換回舊口令。回復失敗時把
+            // 細節附在錯誤訊息裡（見 [`AppError::PassphraseRollback`]）——另外
+            // 發一則通知會被緊接著的失敗訊息蓋掉，使用者永遠看不到。
+            let mut rollbacks = Vec::new();
+            if let Err(rollback) = self.tasks.rekey(&old.into()) {
+                rollbacks.push(format!("任务文件（{rollback}）"));
+            }
+            if let Err(rollback) = self.sync.rekey(old) {
+                rollbacks.push(format!("同步设置（{rollback}）"));
+            }
+            if !rollbacks.is_empty() {
+                return Err(AppError::PassphraseRollback {
+                    reason: err.to_string(),
+                    rollback: rollbacks.join("；"),
                 });
             }
             return Err(err);
@@ -259,6 +282,7 @@ impl Worker {
             self.session = None;
             // 會話停用後介面會回到解鎖畫面：任務金鑰一併丟棄，重新解鎖時重建。
             self.tasks.lock();
+            self.sync.lock();
             self.emit(Event::SessionDisabled(format!(
                 "无法建立新的会话，已停用当前会话：{err}"
             )));

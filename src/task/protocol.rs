@@ -20,6 +20,7 @@ use crate::domain::todo::Task;
 use crate::model::{ActivityDetailView, FlowData, ScheduleData};
 use crate::session::{AccessMode, SiteKind};
 use crate::sites::lms::{ActivityKind, LmsActivity, LmsCourse};
+use crate::sync::config::SyncConfig;
 
 /// 等待任務服務回應的上限。
 ///
@@ -262,6 +263,34 @@ pub enum Job {
     },
     /// 丟棄任務檔的記憶體金鑰（會話被停用時）。
     LockTasks,
+    /// 測試堅果雲 WebDAV 連線（登入畫面與設定表單共用；不需解鎖）。
+    SyncTestConnection {
+        /// 連線設定。
+        config: SyncConfig,
+    },
+    /// 從堅果雲導入：下載遠端檔案覆寫本機（登入畫面用；不需解鎖）。
+    SyncImport {
+        /// 連線設定。
+        config: SyncConfig,
+    },
+    /// 智慧同步：逐檔三方比對，只做無衝突的動作。
+    SyncNow,
+    /// 以本機覆蓋遠端（強制；用於解決衝突）。
+    SyncPush,
+    /// 以遠端覆蓋本機（強制；用於解決衝突）。
+    SyncPull,
+    /// 儲存連線設定（設定表單測試連線通過後）。
+    SetSyncConfig {
+        /// 連線設定。
+        config: SyncConfig,
+    },
+    /// 切換自動同步。
+    SetSyncAuto {
+        /// 是否啟用。
+        enabled: bool,
+    },
+    /// 清除同步設定與記錄。
+    ClearSyncConfig,
     /// 結束工作執行緒。
     Shutdown,
 }
@@ -298,6 +327,12 @@ impl Job {
             Self::AcceptAgreement => "用户协议".to_owned(),
             Self::CancelLogin => "取消登录".to_owned(),
             Self::InitTasks { .. } | Self::RekeyTasks { .. } | Self::LockTasks => "任务".to_owned(),
+            Self::SyncTestConnection { .. } => "测试坚果云连接".to_owned(),
+            Self::SyncImport { .. } => "从坚果云导入".to_owned(),
+            Self::SyncNow | Self::SyncPush | Self::SyncPull => "坚果云同步".to_owned(),
+            Self::SetSyncConfig { .. } => "保存坚果云设置".to_owned(),
+            Self::SetSyncAuto { .. } => "坚果云自动同步".to_owned(),
+            Self::ClearSyncConfig => "清除坚果云配置".to_owned(),
             Self::Shutdown => String::new(),
         }
     }
@@ -507,6 +542,30 @@ pub enum Event {
     Warning(String),
     /// 會話已停用（無法建立乾淨的新會話）：介面應回到解鎖畫面。
     SessionDisabled(String),
+    /// 同步設定狀態（解鎖後、設定後、清除後回報；不含秘密）。
+    SyncState(Box<SyncStateView>),
+    /// 堅果雲連線測試結果。
+    SyncTestResult {
+        /// 是否通過。
+        ok: bool,
+        /// 說明訊息。
+        message: String,
+    },
+    /// 已從堅果雲導入（本機檔案已寫入，待解鎖）。
+    SyncImported {
+        /// 說明訊息。
+        message: String,
+    },
+    /// 同步完成。
+    SyncDone {
+        /// 做了什麼的摘要。
+        summary: String,
+    },
+    /// 同步衝突（本機與遠端都變更，未自動覆蓋）。
+    SyncConflict {
+        /// 說明訊息。
+        message: String,
+    },
     /// 互動驗證（圖片驗證碼或簡訊驗證碼）未通過。
     ///
     /// 登入流程仍保留，介面應維持在原本的驗證碼／簡訊輸入畫面並就地顯示錯誤，
@@ -562,8 +621,23 @@ pub enum FailedTarget {
     Tasks,
     /// 帳戶設定（訪問模式等）。
     Settings,
+    /// 坚果云同步（測試連線、導入、上傳／下載、設定）。
+    Sync,
     /// 用户协议閱讀門（顯示與同意）。
     Agreement,
+}
+
+/// 供介面顯示的同步設定狀態（不含秘密）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SyncStateView {
+    /// 是否已設定同步。
+    pub configured: bool,
+    /// 伺服器位址。
+    pub url: String,
+    /// 帳號。
+    pub account: String,
+    /// 是否啟用自動同步。
+    pub auto_sync: bool,
 }
 
 /// 課程列表與當前學期（供介面分區顯示）。
@@ -675,6 +749,14 @@ pub(super) fn failed_target_of(job: &Job) -> FailedTarget {
         | Job::DeleteTask { .. }
         | Job::DeleteTasks { .. }
         | Job::DeleteCompletedTasks => FailedTarget::Tasks,
+        Job::SyncTestConnection { .. }
+        | Job::SyncImport { .. }
+        | Job::SyncNow
+        | Job::SyncPush
+        | Job::SyncPull
+        | Job::SetSyncConfig { .. }
+        | Job::SetSyncAuto { .. }
+        | Job::ClearSyncConfig => FailedTarget::Sync,
         _ => FailedTarget::Settings,
     }
 }

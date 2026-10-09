@@ -33,6 +33,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::thread;
 use std::time::Instant;
@@ -42,7 +43,10 @@ use crate::config::Config;
 use crate::credentials::{Credentials, Secret, Vault};
 use crate::domain::semester::TermCode;
 use crate::error::{AppError, AppResult};
+use crate::http::{HttpClient, ReqwestClient};
+use crate::session::site::DESKTOP_USER_AGENT;
 use crate::session::{AccessMode, SessionManager, SiteKind};
+use crate::sync::config::{SyncFile, SyncStore};
 use crate::task::protocol::{
     DataKey, Event, FailedTarget, Job, failed_target_of, is_account_switch_step,
     login_step_breaks_the_flow, resource_of, site_of,
@@ -55,6 +59,7 @@ mod data;
 mod homework;
 mod login;
 mod preload;
+mod sync;
 mod timing;
 
 use cache::{LmsCache, ScheduleCache};
@@ -250,6 +255,14 @@ struct Worker {
     timing: LoadTiming,
     /// 最近一次自動重新登入的起點（診斷用）。
     login_started: Option<Instant>,
+    /// 堅果雲同步設定與記錄（加密檔案）。
+    sync: SyncStore,
+    /// 堅果雲 WebDAV 的 HTTP 客戶端（與站點會話分開，不共用 cookie）。
+    webdav: Arc<dyn HttpClient>,
+    /// 導入時暫存的設定與記錄：解鎖後才寫得進 `sync.vault`。
+    pending_sync: Option<sync::PendingSync>,
+    /// 受同步的檔案（遠端代號 → 本機路徑）；由建構時的實際路徑決定。
+    sync_local: Vec<(SyncFile, PathBuf)>,
     /// 已收到結束指令；[`Worker::run`] 於迴圈開頭立即返回。
     shutdown: bool,
 }
@@ -260,7 +273,14 @@ struct Worker {
 /// 由服務自行處理（純本機，不會等網路），其餘任務原封不動轉給這裡的工作
 /// 執行緒。介面因此只面對一條通道，卻不必和網路請求搶排隊。
 pub fn spawn(config: Config, vault: Vault) -> AppResult<(Sender<Job>, Receiver<Event>)> {
-    spawn_with_tasks(config, vault, crate::io::tasks_path()?)
+    let webdav: Arc<dyn HttpClient> = Arc::new(ReqwestClient::new(DESKTOP_USER_AGENT)?);
+    spawn_with_tasks(
+        config,
+        vault,
+        crate::io::tasks_path()?,
+        crate::io::sync_path()?,
+        webdav,
+    )
 }
 
 /// 啟動背景工作執行緒與任務服務，並指定任務檔路徑。
@@ -270,10 +290,18 @@ pub(crate) fn spawn_with_tasks(
     config: Config,
     vault: Vault,
     tasks_path: PathBuf,
+    sync_path: PathBuf,
+    webdav: Arc<dyn HttpClient>,
 ) -> AppResult<(Sender<Job>, Receiver<Event>)> {
     let (job_tx, job_rx) = channel();
     let (worker_tx, worker_rx) = channel();
     let (event_tx, event_rx) = channel();
+
+    // 受同步的檔案路徑以建構時的實際路徑為準（測試隔離資料目錄）。
+    let sync_local = vec![
+        (SyncFile::Credentials, vault.path().to_path_buf()),
+        (SyncFile::Tasks, tasks_path.clone()),
+    ];
 
     tasks::serve(event_tx.clone(), worker_tx, job_rx, tasks_path)?;
     let tasks = TaskHandle::new(job_tx.clone());
@@ -306,6 +334,10 @@ pub(crate) fn spawn_with_tasks(
         chosen_term: None,
         timing: LoadTiming::default(),
         login_started: None,
+        sync: SyncStore::at(sync_path),
+        webdav,
+        pending_sync: None,
+        sync_local,
         shutdown: false,
         tasks,
     };
@@ -563,6 +595,14 @@ impl Worker {
             | Job::InitTasks { .. }
             | Job::RekeyTasks { .. }
             | Job::LockTasks => Ok(()),
+            Job::SyncTestConnection { config } => self.sync_test_connection(config),
+            Job::SyncImport { config } => self.sync_import(config),
+            Job::SyncNow => self.sync_now(),
+            Job::SyncPush => self.sync_push(),
+            Job::SyncPull => self.sync_pull(),
+            Job::SetSyncConfig { config } => self.set_sync_config(config),
+            Job::SetSyncAuto { enabled } => self.set_sync_auto(enabled),
+            Job::ClearSyncConfig => self.clear_sync_config(),
             // 資料任務由 [`Self::run_data_job`] 負責。
             Job::LoadSchedule { .. }
             | Job::LoadHomework { .. }

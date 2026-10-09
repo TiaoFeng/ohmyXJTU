@@ -177,6 +177,9 @@ impl Harness {
         )
         .expect("启动任务服务");
         let tasks = crate::task::tasks::TaskHandle::new(task_tx.clone());
+        let webdav: Arc<dyn HttpClient> = fake_client(Arc::new(|_: &HttpRequest| {
+            Err(AppError::config("测试未注入 WebDAV 后端"))
+        }));
 
         Self {
             worker: Worker {
@@ -207,6 +210,19 @@ impl Harness {
                 chosen_term: None,
                 timing: LoadTiming::default(),
                 login_started: None,
+                sync: crate::sync::config::SyncStore::at(dir.path().join("sync.vault")),
+                webdav,
+                pending_sync: None,
+                sync_local: vec![
+                    (
+                        crate::sync::config::SyncFile::Credentials,
+                        vault.path().to_path_buf(),
+                    ),
+                    (
+                        crate::sync::config::SyncFile::Tasks,
+                        dir.path().join("tasks.vault"),
+                    ),
+                ],
                 shutdown: false,
                 tasks,
             },
@@ -233,6 +249,19 @@ impl Harness {
     /// 測試用任務檔路徑。
     fn tasks_path(&self) -> std::path::PathBuf {
         self._dir.path().join("tasks.vault")
+    }
+
+    /// 測試用同步設定檔路徑。
+    fn sync_path(&self) -> std::path::PathBuf {
+        self._dir.path().join("sync.vault")
+    }
+
+    /// 以指定的回應取代 WebDAV 後端（同步測試用）。
+    fn set_webdav(
+        &mut self,
+        responder: impl Fn(&HttpRequest) -> AppResult<HttpResponse> + Send + Sync + 'static,
+    ) {
+        self.worker.webdav = fake_client(Arc::new(responder));
     }
 
     /// 直接標記考勤與思源學堂都已登入（跳過登入流程）。
@@ -7487,9 +7516,15 @@ fn interface_sender_reaches_the_task_service() {
         ..Config::default()
     };
 
-    let (jobs, events) =
-        crate::task::worker::spawn_with_tasks(config, vault, dir.path().join("tasks.vault"))
-            .expect("启动工作者与任务服务");
+    let webdav: Arc<dyn HttpClient> = Arc::new(FakeClient::new(Vec::new()));
+    let (jobs, events) = crate::task::worker::spawn_with_tasks(
+        config,
+        vault,
+        dir.path().join("tasks.vault"),
+        dir.path().join("sync.vault"),
+        webdav,
+    )
+    .expect("启动工作者与任务服务");
 
     jobs.send(Job::Unlock {
         passphrase: "secret123".into(),
@@ -7530,4 +7565,46 @@ fn interface_sender_reaches_the_task_service() {
     let mut store = TaskStore::at(dir.path().join("tasks.vault"));
     store.init("secret123").expect("以同一口令载入");
     assert_eq!(store.tasks().len(), 1);
+}
+
+#[test]
+fn sync_now_uploads_local_files_when_the_remote_is_empty() {
+    let mut harness = Harness::new(|_| Ok(html("")));
+    harness.seed_vault("secret123", &Credentials::new("3120000001", "pw-12345"));
+    harness
+        .dispatch(Job::Unlock {
+            passphrase: "secret123".into(),
+        })
+        .expect("解锁应成功");
+    harness
+        .dispatch(Job::SetSyncConfig {
+            config: crate::sync::config::SyncConfig::new(
+                "https://dav.example/dav/",
+                "u@example.com",
+                "app-pass",
+            ),
+        })
+        .expect("保存同步设置应成功");
+
+    // 遠端沒有任何檔案：本機憑證檔會被上傳，任務檔不存在則略過。
+    harness.set_webdav(|request| match request.method {
+        Method::Head => Ok(HttpResponse::new(404, request.url.clone(), b"".as_slice())),
+        Method::Put => Ok(HttpResponse {
+            status: 201,
+            final_url: request.url.clone(),
+            headers: vec![("ETag".to_owned(), "v1".to_owned())],
+            body: Vec::new(),
+        }),
+        _ => Ok(html("")),
+    });
+
+    harness.dispatch(Job::SyncNow).expect("同步应成功");
+    let events = harness.drain_events();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::SyncDone { .. })),
+        "应回报同步完成：{events:?}"
+    );
+    assert!(harness.sync_path().is_file(), "同步设置应已写入磁盘");
 }

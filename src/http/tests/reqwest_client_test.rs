@@ -733,6 +733,32 @@ fn plan_redirect_validates_the_webvpn_proxy_target() {
     assert!(err.to_string().contains("代理目标无法解析"), "{err}");
 }
 
+/// 重導的方法判定：HEAD 不得被改成下載主體；一般重導把 POST/PUT/DELETE 改成 GET。
+#[test]
+fn redirect_method_keeps_head_and_downgrades_writes() {
+    use super::redirect_method;
+    use crate::http::Method;
+
+    for status in [301, 302, 303] {
+        assert_eq!(redirect_method(status, Method::Head), Method::Head);
+        assert_eq!(redirect_method(status, Method::Get), Method::Get);
+        assert_eq!(redirect_method(status, Method::Post), Method::Get);
+        assert_eq!(redirect_method(status, Method::Put), Method::Get);
+        assert_eq!(redirect_method(status, Method::Delete), Method::Get);
+    }
+    for status in [307, 308] {
+        for method in [
+            Method::Get,
+            Method::Post,
+            Method::Put,
+            Method::Delete,
+            Method::Head,
+        ] {
+            assert_eq!(redirect_method(status, method), method);
+        }
+    }
+}
+
 /// 重定向目的主機的信任判斷。
 #[test]
 fn trusted_redirect_hosts() {

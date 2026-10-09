@@ -92,3 +92,32 @@ fn url_userinfo_is_redacted() {
     assert!(!both.contains("pass"), "不得输出密码：{both}");
     assert!(both.contains("?<redacted>"), "查询串仍应遮蔽：{both}");
 }
+
+/// 新增的 PUT／DELETE／HEAD 建構子設定正確的方法與主體。
+#[test]
+fn put_delete_head_builders_set_method_and_body() {
+    let put = HttpRequest::put("https://dav.example/x.vault", vec![1, 2, 3]);
+    assert_eq!(put.method, Method::Put);
+    assert!(matches!(put.body, Some(Body::Bytes(ref bytes)) if bytes == &[1, 2, 3]));
+
+    let delete = HttpRequest::delete("https://dav.example/x.vault");
+    assert_eq!(delete.method, Method::Delete);
+    assert!(delete.body.is_none());
+
+    let head = HttpRequest::head("https://dav.example/x.vault");
+    assert_eq!(head.method, Method::Head);
+    assert!(head.body.is_none());
+}
+
+/// 原始位元組主體（同步的加密文檔）不得出現在 `Debug` 輸出裡。
+#[test]
+fn bytes_body_debug_hides_the_content() {
+    let payload = b"OMXJTU1\nsecret-ciphertext".to_vec();
+    let text = format!("{:?}", Body::Bytes(payload.clone()));
+    assert!(!text.contains("secret-ciphertext"), "{text}");
+    assert!(text.contains("Bytes"), "{text}");
+    assert!(
+        text.contains(&payload.len().to_string()),
+        "应输出长度：{text}"
+    );
+}

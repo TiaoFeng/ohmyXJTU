@@ -25,6 +25,12 @@ pub enum Method {
     Get,
     /// `POST`
     Post,
+    /// `PUT`
+    Put,
+    /// `DELETE`
+    Delete,
+    /// `HEAD`
+    Head,
 }
 
 /// 請求主體。
@@ -37,6 +43,8 @@ pub enum Body {
     Form(Vec<(String, String)>),
     /// `application/json`。
     Json(serde_json::Value),
+    /// 原始位元組（例如 WebDAV 同步的加密文檔）。
+    Bytes(Vec<u8>),
 }
 
 impl fmt::Debug for Body {
@@ -48,6 +56,8 @@ impl fmt::Debug for Body {
                 .finish(),
             // JSON 主體含業務資料與識別碼，只描述型別。
             Self::Json(_) => formatter.write_str("Json(<redacted>)"),
+            // 原始位元組（例如同步的加密文檔）不得印出內容，只輸出長度。
+            Self::Bytes(bytes) => formatter.debug_tuple("Bytes").field(&bytes.len()).finish(),
         }
     }
 }
@@ -154,6 +164,42 @@ impl HttpRequest {
             url: url.into(),
             headers: Vec::new(),
             body: Some(Body::Json(value)),
+            timeout: None,
+            follow_redirects: true,
+        }
+    }
+
+    /// 建立 PUT 請求（原始位元組主體）。
+    pub fn put(url: impl Into<String>, body: impl Into<Vec<u8>>) -> Self {
+        Self {
+            method: Method::Put,
+            url: url.into(),
+            headers: Vec::new(),
+            body: Some(Body::Bytes(body.into())),
+            timeout: None,
+            follow_redirects: true,
+        }
+    }
+
+    /// 建立 DELETE 請求。
+    pub fn delete(url: impl Into<String>) -> Self {
+        Self {
+            method: Method::Delete,
+            url: url.into(),
+            headers: Vec::new(),
+            body: None,
+            timeout: None,
+            follow_redirects: true,
+        }
+    }
+
+    /// 建立 HEAD 請求。
+    pub fn head(url: impl Into<String>) -> Self {
+        Self {
+            method: Method::Head,
+            url: url.into(),
+            headers: Vec::new(),
+            body: None,
             timeout: None,
             follow_redirects: true,
         }

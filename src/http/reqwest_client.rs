@@ -102,6 +102,9 @@ impl ReqwestClient {
         let mut builder = match request.method {
             Method::Get => self.client.get(&request.url),
             Method::Post => self.client.post(&request.url),
+            Method::Put => self.client.put(&request.url),
+            Method::Delete => self.client.delete(&request.url),
+            Method::Head => self.client.head(&request.url),
         };
 
         for (name, value) in &request.headers {
@@ -113,6 +116,7 @@ impl ReqwestClient {
         builder = match &request.body {
             Some(Body::Form(fields)) => builder.form(fields),
             Some(Body::Json(value)) => builder.json(value),
+            Some(Body::Bytes(bytes)) => builder.body(bytes.clone()),
             None => builder,
         };
 
@@ -326,10 +330,24 @@ fn plan_redirect(
 
     Ok(RedirectPlan {
         url: next.to_string(),
-        method: if keeps_method { method } else { Method::Get },
+        method: redirect_method(status, method),
         keep_body: resend_body,
         keep_headers: same_origin,
     })
+}
+
+/// 依狀態碼決定下一跳的方法。
+///
+/// 307/308 保留原方法（與主體，見上）；301/302/303 對 HEAD 保留 HEAD，否則
+/// HEAD 會變成下載主體；其餘（含 POST／PUT／DELETE 的一般重導）一律改用 GET。
+fn redirect_method(status: u16, method: Method) -> Method {
+    if matches!(status, 307 | 308) {
+        return method;
+    }
+    match method {
+        Method::Get | Method::Head => method,
+        Method::Post | Method::Put | Method::Delete => Method::Get,
+    }
 }
 
 /// 網址的可比較來源（協定 ＋ 主機 ＋ 有效埠）。

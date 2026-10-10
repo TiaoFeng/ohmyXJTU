@@ -204,8 +204,10 @@ pub(crate) fn push(
 /// 用於登入畫面的「從堅果雲導入」——此時尚無加密口令，無法讀寫 `sync.vault`，
 /// 因此只回傳記錄，待解鎖後再存回。遠端缺少個別檔案時略過；一個都沒有時回錯。
 ///
-/// **先全部下載並驗證、再一起落盤**：任一檔案下載失敗或不是本程式的容器時，
-/// 本機檔案完全不動。若邊下載邊寫入，中途失敗會留下「一半新一半舊」的本機檔，
+/// **先全部下載並驗證 → 再把所有暫存檔寫好 → 最後才逐一覆蓋**：下載失敗、不是
+/// 本程式的容器，或寫暫存檔時的失敗（磁碟已滿、權限等）都發生在覆蓋之前，本機
+/// 檔案完全不動；剩下的 [`crate::io::StagedWrite::commit`] 只做同目錄 `rename`，是唯一可能
+/// 留下部分更新的窄窗。若邊下載邊寫入，中途失敗會留下「一半新一半舊」的本機檔，
 /// 而導入又不儲存記錄，之後的同步會以錯誤的基準比對。
 pub(crate) fn import(
     webdav: &WebDav,
@@ -223,10 +225,14 @@ pub(crate) fn import(
     if fetched.is_empty() {
         return Err(AppError::webdav("云端没有可导入的同步数据"));
     }
-    // 全部驗證通過後才落盤。
+    // 全部驗證通過後才落盤：先把每個目標寫成同目錄暫存檔（失敗時目標未動）。
+    let staged = fetched
+        .iter()
+        .map(|(_, path, bytes, _)| io::stage_private(path, bytes))
+        .collect::<AppResult<Vec<_>>>()?;
     let mut records = Vec::new();
-    for (file, path, bytes, meta) in &fetched {
-        io::write_private_atomic(path, bytes)?;
+    for ((file, _, bytes, meta), staged) in fetched.iter().zip(staged) {
+        staged.commit()?;
         records.push((
             *file,
             FileRecord {

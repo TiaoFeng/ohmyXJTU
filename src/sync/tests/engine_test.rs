@@ -188,6 +188,34 @@ fn import_refuses_foreign_content() {
     assert!(!tasks.exists(), "后续文件不应被写入");
 }
 
+/// 落盤階段失敗不得留下半套結果：先把所有目標寫成暫存檔，任一個失敗時本機檔案
+/// 完全不動——舊行為會先覆寫第一個檔案，才在第二個檔案失敗。
+#[test]
+fn import_leaves_every_target_untouched_when_staging_fails() {
+    let dir = tempdir().unwrap();
+    let credentials = dir.path().join("credentials.vault");
+    std::fs::write(&credentials, b"local-cred").unwrap();
+    // 第二個目標的父路徑是一個「檔案」：建立目錄／寫暫存檔必定失敗。
+    let blocker = dir.path().join("blocker");
+    std::fs::write(&blocker, b"not a dir").unwrap();
+    let tasks = blocker.join("tasks.vault");
+
+    let (_client, dav) = dav(vec![
+        response(200, &[("ETag", "c1")], &container(b"remote-cred")),
+        response(200, &[("ETag", "t1")], &container(b"remote-task")),
+    ]);
+    let targets: Vec<(SyncFile, PathBuf)> = vec![
+        (SyncFile::Credentials, credentials.clone()),
+        (SyncFile::Tasks, tasks),
+    ];
+    assert!(import(&dav, &targets).is_err(), "暂存失败应使导入失败");
+    assert_eq!(
+        std::fs::read(&credentials).unwrap(),
+        b"local-cred",
+        "第一个目标不得被覆盖"
+    );
+}
+
 #[test]
 fn push_sends_local_content_and_records_the_version() {
     let dir = tempdir().unwrap();

@@ -23,6 +23,37 @@ fn write_private_atomic_creates_a_private_directory() {
     assert_eq!(file.permissions().mode() & 0o777, 0o600, "文件仍为 0600");
 }
 
+/// 兩階段落盤：`stage_private` 只寫暫存檔，目標內容在 `commit` 之前不變。
+#[test]
+fn stage_private_leaves_the_target_until_commit() {
+    let root = tempfile::tempdir().expect("临时目录");
+    let target = root.path().join("config.json");
+    std::fs::write(&target, b"old").expect("前置内容");
+
+    let staged = stage_private(&target, b"new").expect("暂存应当成功");
+    assert_eq!(
+        std::fs::read(&target).expect("读取"),
+        b"old",
+        "commit 前不得改动目标"
+    );
+
+    staged.commit().expect("落盘应当成功");
+    assert_eq!(std::fs::read(&target).expect("读取"), b"new");
+}
+
+/// 丟棄暫存檔（不 commit）時目標維持原狀。
+#[test]
+fn dropping_a_staged_write_keeps_the_target() {
+    let root = tempfile::tempdir().expect("临时目录");
+    let target = root.path().join("config.json");
+    std::fs::write(&target, b"old").expect("前置内容");
+
+    let staged = stage_private(&target, b"new").expect("暂存应当成功");
+    drop(staged);
+
+    assert_eq!(std::fs::read(&target).expect("读取"), b"old");
+}
+
 /// 已存在的目錄不改權限：那可能是使用者的安排，程式只保證自己建立的部分。
 #[cfg(unix)]
 #[test]

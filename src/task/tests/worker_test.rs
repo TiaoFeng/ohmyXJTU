@@ -4854,10 +4854,15 @@ fn only_open_activity_is_interactive() {
     }
 }
 
-/// 只有發送簡訊驗證碼不適合自動重送：重送可能讓使用者收到兩條簡訊。
+/// 兩類任務不適合自動重送：發簡訊有可見副作用，下載型同步失敗時狀態可能已改變。
 #[test]
-fn only_the_sms_send_is_not_replayable() {
+fn the_sms_send_and_the_pulling_sync_jobs_are_not_replayable() {
+    // 重送可能讓使用者收到兩條簡訊。
     assert!(!Job::SendMfaCode.is_replayable(), "发送短信有可见副作用");
+    // 下載可能已覆寫本機並重新鎖定金鑰：重試會在已鎖定的存儲上再跑一次。
+    for job in [Job::SyncNow, Job::SyncPull] {
+        assert!(!job.is_replayable(), "{job:?} 不应自动重送");
+    }
 
     for job in [
         Job::RefreshCaptcha,
@@ -4872,9 +4877,68 @@ fn only_the_sms_send_is_not_replayable() {
             course_id: None,
             kind: lms::ActivityKind::Homework,
         },
+        // 純上傳、連線測試與導入都是冪等的，也不會重新鎖定金鑰。
+        Job::SyncPush,
+        Job::SyncTestConnection {
+            config: crate::sync::config::SyncConfig::new("https://dav.example/dav/", "u", "p"),
+        },
+        Job::SyncImport {
+            config: crate::sync::config::SyncConfig::new("https://dav.example/dav/", "u", "p"),
+        },
     ] {
         assert!(job.is_replayable(), "{job:?} 可以原样重送");
     }
+}
+
+/// 下載型同步失敗不自動重送（重送只會再下載一次，並在已鎖定的存儲上失敗）。
+#[test]
+fn connection_errors_do_not_replay_the_sync_download() {
+    let mut harness = Harness::new(|_| Ok(html("")));
+    harness.seed_vault("secret123", &Credentials::new("3120000001", "pw-12345"));
+    harness
+        .dispatch(Job::Unlock {
+            passphrase: "secret123".into(),
+        })
+        .expect("解锁应成功");
+
+    // 下載一律以連線層失敗回應：那正是預設會自動重試的類別。
+    let gets = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&gets);
+    harness.set_webdav(move |request| match request.method {
+        Method::Get => {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Err(AppError::network_kind(
+                NetworkKind::Timeout,
+                "测试注入：下载超时",
+            ))
+        }
+        Method::Put => Ok(HttpResponse {
+            status: 201,
+            final_url: request.url.clone(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        }),
+        _ => Ok(html("")),
+    });
+    harness
+        .dispatch(Job::SetSyncConfig {
+            config: crate::sync::config::SyncConfig::new(
+                "https://dav.example/dav/",
+                "u@example.com",
+                "app-pass",
+            ),
+        })
+        .expect("保存同步设置应成功");
+
+    assert!(
+        harness.dispatch(Job::SyncPull).is_err(),
+        "下载失败应向上报错"
+    );
+    assert_eq!(
+        gets.load(Ordering::SeqCst),
+        1,
+        "同步失败不得自动重送（每次重送都会再下载一次）"
+    );
 }
 
 /// 送碼端點連線失敗時直接回報，不自動重送（免得發出兩條簡訊）。

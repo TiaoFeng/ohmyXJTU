@@ -349,19 +349,11 @@ impl Worker {
     /// 內容的驗證：口令不符或檔案不是本程式的容器都會當場回報，而不是安靜地
     /// 沿用舊狀態。
     fn relock_after_pull(&mut self) {
-        self.session = None;
+        self.reset_session_for_unlock();
+        // 憑證檔本身也剛被雲端內容取代：記憶體中的憑證必須一併丟棄，否則它會
+        // 反過來覆寫下載結果（見 `set_sync_config` 對「下載後重新解鎖」的說明）。
+        // `discard_pending_vault` 共用同一段清理時刻意保留憑證，因此這一行留在這裡。
         self.credentials = None;
-        self.flow = None;
-        self.retry = None;
-        self.pending_vault = None;
-        self.pending_data.clear();
-        self.tasks.lock();
-        self.sync.lock();
-        self.generation += 1;
-        self.cache.clear();
-        self.schedule_cache = None;
-        self.schedule_week = None;
-        self.known_term = None;
         self.emit(Event::SyncRelocked);
     }
 

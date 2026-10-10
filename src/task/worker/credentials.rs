@@ -253,6 +253,37 @@ impl Worker {
         Ok(())
     }
 
+    /// 丟棄整個工作階段的狀態（回到解鎖畫面前用）。
+    ///
+    /// 兩條路徑共用：同步下載已覆寫本機檔案後重新鎖定
+    ///（[`super::sync::Worker::relock_after_pull`]）與會話停用
+    ///（[`Self::discard_pending_vault`] 重建後端失敗時）。兩者都要回到解鎖畫面，
+    /// 而站點會話與金鑰此時都不可再用。
+    ///
+    /// 少清一個欄位就會讓舊帳號的狀態活到下一次登入；多清是安全的——下次解鎖時
+    /// [`Self::start_session`] 會以磁碟上的內容重建全部狀態，這份清單是它的子集。
+    /// **不動 `credentials`**：它由呼叫端決定——會話停用時要保留還原後的舊憑證
+    ///（否則使用者得重新解鎖才拿得回來），同步下載後則必須丟棄（憑證檔已被雲端
+    /// 內容取代）。事件也由呼叫端各自發出（`SyncRelocked`／`SessionDisabled`）。
+    pub(super) fn reset_session_for_unlock(&mut self) {
+        self.session = None;
+        self.flow = None;
+        self.retry = None;
+        self.pending_vault = None;
+        self.pending_data.clear();
+        // 金鑰丟棄後存儲一律拒絕寫入，直到重新解鎖。
+        self.tasks.lock();
+        self.sync.lock();
+        // 進行中的資料任務不再回報，站點快取與「當前學期」都屬於已作廢的會話。
+        self.generation += 1;
+        self.cache.clear();
+        self.schedule_cache = None;
+        self.schedule_week = None;
+        self.known_term = None;
+        // 舊帳號的登入失敗計數不再適用（同一帳號重試則保留 `login_failures`）。
+        self.login_failure_key = None;
+    }
+
     /// 丟棄待存憑證，還原舊憑證，並作廢切換期間建立的新會話。
     ///
     /// 新憑證只有在登入成功後才寫入保險庫；取消、憑證被拒或流程失敗時，
@@ -279,13 +310,13 @@ impl Worker {
         // 畫面顯示成新帳號的資料。此時直接停用會話，並請使用者重新解鎖。
         let reset = self.session.as_mut().map(|session| session.reset_session());
         if let Some(Err(err)) = reset {
-            self.session = None;
-            // 會話停用後介面會回到解鎖畫面：任務金鑰一併丟棄，重新解鎖時重建。
-            self.tasks.lock();
-            self.sync.lock();
+            // 會話停用後介面會回到解鎖畫面：憑證、任務金鑰與站點狀態一併作廢，
+            // 重新解鎖時以磁碟上的內容重建（含下面這段共同清理）。
+            self.reset_session_for_unlock();
             self.emit(Event::SessionDisabled(format!(
                 "无法建立新的会话，已停用当前会话：{err}"
             )));
+            return;
         }
         // 切換期間取得的資料與進行中的任務都屬於新帳號：一併作廢。
         // （排隊中的資料任務不在此列：它們會以還原後的帳號重新執行。）

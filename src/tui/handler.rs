@@ -535,7 +535,7 @@ fn handle_sync_menu(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
     let Screen::SyncMenu(mut state) = app.screen else {
         return;
     };
-    let actions = SyncMenuAction::items(app.sync.configured);
+    let actions = SyncMenuAction::items(app.sync.configured, app.sync.unavailable);
     state.index = state.index.min(actions.len().saturating_sub(1));
 
     match key.code {

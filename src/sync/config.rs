@@ -228,6 +228,15 @@ impl SyncStore {
         self.content.config.as_ref()
     }
 
+    /// 本會話無法使用存儲時的原因（設定檔讀不開）；可用時回 `None`。
+    ///
+    /// 供介面判斷是否只剩下「清除同步配置」這條出路（見 [`SyncStateView`]）。
+    ///
+    /// [`SyncStateView`]: crate::task::protocol::SyncStateView
+    pub(crate) fn unavailable_reason(&self) -> Option<&str> {
+        self.unavailable.as_deref()
+    }
+
     /// 指定檔案的同步記錄。
     pub(crate) fn record(&self, file: SyncFile) -> &FileRecord {
         self.content.record(file)

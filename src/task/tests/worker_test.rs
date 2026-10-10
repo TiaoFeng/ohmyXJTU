@@ -8192,3 +8192,60 @@ fn a_missing_remote_file_is_pushed_instead_of_becoming_a_noop() {
         "新的空目标不该报冲突：{events:?}"
     );
 }
+
+/// 取出事件中的最後一則同步狀態。
+fn sync_state(events: &[Event]) -> Option<crate::task::protocol::SyncStateView> {
+    events.iter().rev().find_map(|event| match event {
+        Event::SyncState(view) => Some(view.as_ref().clone()),
+        _ => None,
+    })
+}
+
+/// 同步設定檔讀不開（口令不符／檔案損毀）時必須回報，且仍能清除設定。
+///
+/// 這個狀態下同步與「重新設定」都會被存儲拒絕；介面若不知道（`configured`
+/// 為 false 又沒有 `unavailable`），就只能顯示一個必定失敗的「配置并启用
+/// 同步」，使用者得自己找到檔案刪掉再重啟。
+#[test]
+fn an_unreadable_sync_file_is_reported_and_can_still_be_cleared() {
+    let mut harness = Harness::new(|_| Ok(html("")));
+    harness.seed_vault("secret123", &Credentials::new("3120000001", "pw-12345"));
+    // 以另一個口令加密的 sync.vault：以本次口令必定解不開。
+    let sealed = crate::credentials::envelope::seal("another-passphrase", "ohmyXJTU-sync", b"{}")
+        .expect("建立同步档")
+        .0;
+    let sync_path = harness.sync_path();
+    std::fs::write(&sync_path, &sealed).expect("写入同步档");
+
+    harness
+        .dispatch(Job::Unlock {
+            passphrase: "secret123".into(),
+        })
+        .expect("解锁应成功");
+
+    let events = harness.drain_events();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Warning(message) if message.contains("同步配置文件无法读取")
+        )),
+        "应提示同步设置不可用：{events:?}"
+    );
+    let view = sync_state(&events).expect("应回报同步状态");
+    assert!(view.unavailable, "应回报不可用：{view:?}");
+    assert!(!view.configured, "读不开时不算已设定：{view:?}");
+    assert_eq!(
+        std::fs::read(&sync_path).unwrap(),
+        sealed,
+        "读不开时不得改动原档"
+    );
+
+    // 清除：档案删除，状态回到「未设定但可用」。
+    harness
+        .dispatch(Job::ClearSyncConfig)
+        .expect("清除同步设置应成功");
+    let events = harness.drain_events();
+    let view = sync_state(&events).expect("应回报同步状态");
+    assert!(!view.unavailable && !view.configured, "{view:?}");
+    assert!(!sync_path.exists(), "清除后文件应删除");
+}

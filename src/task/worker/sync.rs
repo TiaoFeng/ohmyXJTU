@@ -47,8 +47,9 @@ impl Worker {
         {
             self.emit(Event::Warning(format!("同步设置保存失败：{err}")));
         }
-        // 未設定同步時不必打擾介面（預設就是未設定）。
-        if self.sync.config().is_some() {
+        // 未設定且存儲可用時不必打擾介面（預設就是未設定）；存儲不可用時一定要
+        // 回報，否則介面只會顯示「配置并启用同步」，而那個動作必定失敗。
+        if self.sync.config().is_some() || self.sync.unavailable_reason().is_some() {
             self.emit_sync_state();
         }
     }
@@ -63,14 +64,19 @@ impl Worker {
 
     /// 回報目前同步設定（不含秘密）。
     fn emit_sync_state(&mut self) {
+        let unavailable = self.sync.unavailable_reason().is_some();
         let view = match self.sync.config() {
             Some(config) => SyncStateView {
                 configured: true,
+                unavailable,
                 url: config.url.clone(),
                 account: config.account.clone(),
                 auto_sync: config.auto_sync,
             },
-            None => SyncStateView::default(),
+            None => SyncStateView {
+                unavailable,
+                ..SyncStateView::default()
+            },
         };
         self.emit(Event::SyncState(Box::new(view)));
     }

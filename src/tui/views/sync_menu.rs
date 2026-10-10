@@ -20,7 +20,7 @@ const HINT_HEIGHT: u16 = 1;
 
 /// 繪製同步子選單（疊在主畫面上）。
 pub fn draw(frame: &mut Frame, app: &App, state: SyncMenuState) {
-    let actions = SyncMenuAction::items(app.sync.configured);
+    let actions = SyncMenuAction::items(app.sync.configured, app.sync.unavailable);
     // 高度＝標題列與上下邊框（3）＋選項數＋提示列＋下邊框——以選項數為準。
     let height = u16::try_from(actions.len())
         .unwrap_or(MAX_HEIGHT)

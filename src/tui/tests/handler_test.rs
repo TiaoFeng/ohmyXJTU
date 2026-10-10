@@ -628,6 +628,7 @@ fn sync_menu_submits_each_action() {
     let mut app = App::new(AccessPolicy::Auto);
     app.sync = crate::task::SyncStateView {
         configured: true,
+        unavailable: false,
         url: "https://dav.example/dav/".to_owned(),
         account: "u@example.com".to_owned(),
         auto_sync: false,
@@ -673,6 +674,26 @@ fn sync_menu_submits_each_action() {
     for _ in 0..5 {
         press(&mut app, &jobs, KeyCode::Down);
     }
+    press(&mut app, &jobs, KeyCode::Enter);
+    assert!(matches!(rx.try_recv(), Ok(Job::ClearSyncConfig)));
+}
+
+/// 同步設定檔讀不開時，子選單只留「清除同步配置」。
+///
+/// 那個狀態下同步與重新設定都會被存儲拒絕（見 `SyncStore::save`）；若畫面仍
+/// 只提供「配置并启用同步」，使用者永遠回不到可用狀態。
+#[test]
+fn unavailable_sync_settings_only_offer_clear() {
+    let mut app = App::new(AccessPolicy::Auto);
+    app.sync = crate::task::SyncStateView {
+        unavailable: true,
+        ..crate::task::SyncStateView::default()
+    };
+
+    // 唯一項目就是清除：上下鍵不會跑出別的動作，enter 送出清除。
+    let (jobs, rx) = channel();
+    app.set_screen(Screen::SyncMenu(crate::tui::app::SyncMenuState::default()));
+    press(&mut app, &jobs, KeyCode::Down);
     press(&mut app, &jobs, KeyCode::Enter);
     assert!(matches!(rx.try_recv(), Ok(Job::ClearSyncConfig)));
 }

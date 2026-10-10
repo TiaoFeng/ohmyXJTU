@@ -998,8 +998,15 @@ pub enum SyncMenuAction {
 }
 
 impl SyncMenuAction {
-    /// 依是否已設定決定可選項目。
-    pub fn items(configured: bool) -> &'static [SyncMenuAction] {
+    /// 依同步設定狀態決定可選項目。
+    ///
+    /// 設定檔讀不開時只留「清除同步配置」：同步與重新設定都會被存儲拒絕
+    ///（見 `SyncStore::save`），而清除不依賴檔案內容——那是使用者唯一能回到
+    /// 可用狀態的動作。
+    pub fn items(configured: bool, unavailable: bool) -> &'static [SyncMenuAction] {
+        if unavailable {
+            return &[Self::Clear];
+        }
         if configured {
             &[
                 Self::SyncNow,

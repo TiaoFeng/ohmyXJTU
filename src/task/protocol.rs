@@ -650,10 +650,16 @@ pub enum FailedTarget {
 }
 
 /// 供介面顯示的同步設定狀態（不含秘密）。
+///
+/// `unavailable` 代表同步設定檔**存在卻讀不開**（口令不符或檔案損毀）：此時
+/// 同步與「重新設定」都會被存儲拒絕，介面必須保留「清除同步配置」這條出路
+/// （清除不依賴檔案內容），否則使用者只能自己找到檔案刪掉再重啟。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SyncStateView {
     /// 是否已設定同步。
     pub configured: bool,
+    /// 同步設定檔是否無法使用（讀不開）。
+    pub unavailable: bool,
     /// 伺服器位址。
     pub url: String,
     /// 帳號。

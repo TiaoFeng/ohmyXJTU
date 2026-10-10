@@ -198,3 +198,71 @@ fn validate_rejects_missing_account_or_password() {
     let no_password = SyncConfig::new("https://dav.example/dav/", "u@example.com", "");
     assert!(validate(&no_password).is_err());
 }
+
+/// 換伺服器或帳號要作廢同步記錄：它們指的是另一個雲端上的版本。
+///
+/// 留著舊記錄會讓新目標的比對失真——新伺服器上「沒有這個檔案」會被誤判成
+/// 「遠端沒變」，本機指紋又與記錄相符，於是「立即同步」什麼都不做。
+#[test]
+fn changing_the_target_drops_the_records() {
+    let dir = tempdir().unwrap();
+    let mut store = new_store(&dir);
+    let record = |version: &str| FileRecord {
+        version: Some(version.to_owned()),
+        etag: Some(format!("\"{version}\"")),
+        hash: Some(format!("h-{version}")),
+    };
+    store.init(PASSPHRASE).unwrap();
+    store.set_config(config()).unwrap();
+    store.set_record(SyncFile::Tasks, record("v1")).unwrap();
+
+    // 只換應用密碼：同一個目標，記錄保留（否則每次輪替密碼都要重新上傳）。
+    store
+        .set_config(SyncConfig::new(
+            "https://dav.jianguoyun.com/dav/",
+            "a@b.com",
+            "rotated-pass",
+        ))
+        .unwrap();
+    assert_eq!(
+        store.record(SyncFile::Tasks).version.as_deref(),
+        Some("v1"),
+        "只换应用密码不该清空记录"
+    );
+
+    // 換位址：兩個檔案的記錄都作廢。
+    store
+        .set_config(SyncConfig::new(
+            "https://dav.example/dav/",
+            "a@b.com",
+            "rotated-pass",
+        ))
+        .unwrap();
+    assert_eq!(
+        store.record(SyncFile::Tasks),
+        &FileRecord::default(),
+        "换服务器应清空记录"
+    );
+
+    // 換帳號：同樣作廢。
+    store.set_record(SyncFile::Tasks, record("v2")).unwrap();
+    store
+        .set_config(SyncConfig::new(
+            "https://dav.example/dav/",
+            "other@example.com",
+            "rotated-pass",
+        ))
+        .unwrap();
+    assert_eq!(
+        store.record(SyncFile::Tasks),
+        &FileRecord::default(),
+        "换账号应清空记录"
+    );
+    assert_eq!(store.record(SyncFile::Credentials), &FileRecord::default());
+
+    // 清空後仍可正常保存並讀回。
+    let mut reloaded = new_store(&dir);
+    reloaded.init(PASSPHRASE).unwrap();
+    assert_eq!(reloaded.config().unwrap().account, "other@example.com");
+    assert_eq!(reloaded.record(SyncFile::Tasks).version, None);
+}

@@ -234,8 +234,21 @@ impl SyncStore {
     }
 
     /// 寫入連線設定。
+    ///
+    /// 換了伺服器位址或帳號時一併清空同步記錄：那些記錄指的是**另一個雲端**上
+    /// 的版本，留著會讓新目標的比對全部失真（例如把「新伺服器上沒有這個檔案」
+    /// 誤判成「遠端沒變」）。清空後新目標被當成第一次同步：本機有檔就上傳，
+    /// 兩邊都有內容則報衝突交由使用者決定。只換應用密碼不算換目標。
     pub(crate) fn set_config(&mut self, config: SyncConfig) -> AppResult<()> {
         self.mutate(move |content| {
+            if content
+                .config
+                .as_ref()
+                .is_some_and(|old| old.url != config.url || old.account != config.account)
+            {
+                content.credentials = FileRecord::default();
+                content.tasks = FileRecord::default();
+            }
             content.config = Some(config);
             Ok(())
         })

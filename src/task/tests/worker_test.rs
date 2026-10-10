@@ -8115,3 +8115,80 @@ fn a_queued_change_passphrase_cannot_overwrite_a_downloaded_task_file() {
         .load("secret123")
         .expect("凭证应仍以原口令可解");
 }
+
+/// 遠端沒有這個檔案時一律由本機補上（雲端檔案被刪除、或換到新的空伺服器）。
+///
+/// 舊碼把「遠端 404」當成「遠端沒變」：本機指紋與上次記錄相符時整個同步成了
+/// `Noop`——「立即同步」回報「上传 0，下载 0」，雲端卻始終是空的。
+#[test]
+fn a_missing_remote_file_is_pushed_instead_of_becoming_a_noop() {
+    let mut harness = Harness::new(|_| Ok(html("")));
+    harness.seed_vault("secret123", &Credentials::new("3120000001", "pw-12345"));
+    harness
+        .dispatch(Job::Unlock {
+            passphrase: "secret123".into(),
+        })
+        .expect("解锁应成功");
+
+    // 伺服器永遠回報「檔案不存在」，但接受上傳。
+    harness.set_webdav(|request| match request.method {
+        Method::Head => Ok(HttpResponse::new(404, request.url.clone(), b"".as_slice())),
+        Method::Put => Ok(HttpResponse {
+            status: 201,
+            final_url: request.url.clone(),
+            headers: vec![("ETag".to_owned(), "v1".to_owned())],
+            body: Vec::new(),
+        }),
+        _ => Ok(html("")),
+    });
+    let config = |url: &str| crate::sync::config::SyncConfig::new(url, "u@example.com", "app-pass");
+    harness
+        .dispatch(Job::SetSyncConfig {
+            config: config("https://dav.one/dav/"),
+        })
+        .expect("保存同步设置应成功");
+
+    // 第一次同步：本機有檔、遠端沒有 → 上傳。
+    harness.dispatch(Job::SyncNow).expect("同步应成功");
+    let events = harness.drain_events();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::SyncDone { summary } if summary.contains("上传 1，下载 0")
+        )),
+        "云端没有档案时应上传本机：{events:?}"
+    );
+
+    // 再同步一次：遠端仍然沒有這個檔案（例如雲端被刪除），記錄不得讓它變成 Noop。
+    harness.dispatch(Job::SyncNow).expect("同步应成功");
+    let events = harness.drain_events();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::SyncDone { summary } if summary.contains("上传 1，下载 0")
+        )),
+        "远端档案不存在时不得变成 Noop：{events:?}"
+    );
+
+    // 換到另一台（空的）伺服器：舊記錄屬於舊雲端，必須作廢並重新上傳。
+    harness
+        .dispatch(Job::SetSyncConfig {
+            config: config("https://dav.two/dav/"),
+        })
+        .expect("保存第二台伺服器的设置");
+    harness.dispatch(Job::SyncNow).expect("同步应成功");
+    let events = harness.drain_events();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::SyncDone { summary } if summary.contains("上传 1，下载 0")
+        )),
+        "换服务器后应重新上传本机档案：{events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::SyncConflict { .. })),
+        "新的空目标不该报冲突：{events:?}"
+    );
+}

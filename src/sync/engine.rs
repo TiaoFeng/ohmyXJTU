@@ -79,10 +79,50 @@ impl Evaluation {
 /// 評估時定的，而評估到暫停生效之間使用者仍可能寫入本機檔案；下載前以同一個
 /// 判準重驗，就能避免用雲端覆寫剛保存的修改。
 pub(crate) fn local_changed(local_path: &Path, record: &FileRecord) -> AppResult<bool> {
-    match (read_local(local_path)?, &record.hash) {
-        (Some(bytes), Some(hash)) => Ok(&fingerprint(&bytes) != hash),
-        (Some(_), None) => Ok(true),
-        (None, _) => Ok(false),
+    Ok(local_differs(read_local(local_path)?.as_deref(), record))
+}
+
+/// 由已讀出的本機內容判斷是否變更（純函式）。
+fn local_differs(local: Option<&[u8]>, record: &FileRecord) -> bool {
+    match (local, &record.hash) {
+        (Some(bytes), Some(hash)) => fingerprint(bytes) != hash.as_str(),
+        // 記錄沒有指紋（從未同步）卻有本機檔：視為已變更。
+        (Some(_), None) => true,
+        // 本機沒有這個檔案：不算變更（有沒有東西可同步由 [`evaluate`] 決定）。
+        (None, _) => false,
+    }
+}
+
+/// 遠端相對上次同步記錄是否已變更（純函式）。
+///
+/// 遠端檔案**不存在**也算「已變更」：上次同步之後它從雲端消失了（或在新的
+/// 伺服器上根本沒有），這是與上次不同的狀態。若把它當成「沒動」，本機未變更
+/// 時整個同步就成了 [`Plan::Noop`]——「立即同步」回報成功卻什麼都沒上傳，
+/// 使用者換伺服器或雲端檔案被刪除後都會踩到。
+fn remote_differs(remote: &RemoteMeta, record: &FileRecord) -> bool {
+    match (remote_version(remote), &record.version) {
+        (Some(current), Some(previous)) => current != previous.as_str(),
+        // 遠端有內容而上次沒有版本記錄（首次同步）：有檔案即有變更。
+        (Some(_), None) => remote.exists,
+        // 上次有版本、現在遠端不存在：被刪除。
+        (None, Some(_)) => !remote.exists,
+        // 兩邊都沒有版本可比（伺服器不回 `ETag`／`Last-Modified`）：無法偵測。
+        (None, None) => false,
+    }
+}
+
+/// 遠端不存在時的計畫：本機有檔且任一邊有變更，就由本機補上。
+///
+/// 遠端已經沒有內容可下載，而這兩個檔案（憑證／任務）都是本機一定會保留的
+/// 資料——上傳只是把雲端的鏡像補回來，不會覆蓋雲端的任何內容，因此不需要
+/// 使用者介入（`remote_absent` 會讓前置條件成為「必須不存在」，其他裝置同時
+/// 補上時仍會以衝突收場）。兩邊都沒有變更（本機沒有檔、或無法得知遠端版本）
+/// 時維持 [`Plan::Noop`]。
+fn plan_absent_remote(local_present: bool, changed: bool) -> Plan {
+    if local_present && changed {
+        Plan::Push
+    } else {
+        Plan::Noop
     }
 }
 
@@ -93,15 +133,17 @@ pub(crate) fn evaluate(
     local_path: &Path,
     record: &FileRecord,
 ) -> AppResult<Evaluation> {
-    let local_changed = local_changed(local_path, record)?;
+    let local = read_local(local_path)?;
+    let local_changed = local_differs(local.as_deref(), record);
     let remote = webdav.head(file.remote_name())?;
-    let remote_changed = match (remote_version(&remote), &record.version) {
-        (Some(current), Some(previous)) => current != previous.as_str(),
-        (Some(_), None) => remote.exists,
-        (None, _) => false,
+    let remote_changed = remote_differs(&remote, record);
+    let plan = if remote.exists {
+        plan(local_changed, remote_changed)
+    } else {
+        plan_absent_remote(local.is_some(), local_changed || remote_changed)
     };
     Ok(Evaluation {
-        plan: plan(local_changed, remote_changed),
+        plan,
         remote_absent: !remote.exists,
     })
 }

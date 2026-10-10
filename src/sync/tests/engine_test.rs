@@ -327,3 +327,62 @@ fn evaluate_prefers_must_not_exist_only_when_the_remote_is_absent() {
         Precondition::Match("\"v1\"")
     );
 }
+
+/// 雲端檔案消失（被刪除，或換到新的空伺服器）時，本機有檔就要補上。
+///
+/// 舊碼把「遠端 404」與「遠端沒變」混為一談：本機指紋與記錄相符時整個同步
+/// 成了 `Noop`，「立即同步」回報成功卻什麼都沒上傳，雲端永遠補不回來。
+#[test]
+fn evaluate_pushes_when_the_remote_file_disappeared() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("tasks.vault");
+    std::fs::write(&path, b"content").unwrap();
+    // 上次同步成功（版本與本機指紋都有記錄），此後本機未再變更。
+    let record = FileRecord {
+        version: Some("v1".to_owned()),
+        etag: Some("\"v1\"".to_owned()),
+        hash: Some(fingerprint(b"content")),
+    };
+    let (_client, dav) = dav(vec![response(404, &[], b"")]);
+    let evaluation = evaluate(&dav, SyncFile::Tasks, &path, &record).unwrap();
+    assert_eq!(evaluation.plan, Plan::Push, "远端消失时应由本机补上");
+    assert!(evaluation.remote_absent);
+    assert_eq!(
+        evaluation.precondition(record.etag.as_deref()),
+        Precondition::MustNotExist,
+        "补上远端缺失的档案时应要求必须不存在"
+    );
+}
+
+/// 兩邊都沒有內容（本機沒有檔、遠端也沒有）時不得動作。
+#[test]
+fn evaluate_stays_noop_when_neither_side_has_content() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("tasks.vault");
+    let record = FileRecord::default();
+    let (_client, dav) = dav(vec![response(404, &[], b"")]);
+    let evaluation = evaluate(&dav, SyncFile::Tasks, &path, &record).unwrap();
+    assert_eq!(evaluation.plan, Plan::Noop, "两边都没有东西时不该动作");
+    assert!(evaluation.remote_absent);
+}
+
+/// 伺服器完全不提供版本資訊時無法偵測遠端變更（已知限制，鎖住行為）。
+#[test]
+fn evaluate_cannot_detect_remote_changes_without_any_version() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("tasks.vault");
+    std::fs::write(&path, b"content").unwrap();
+    let record = FileRecord {
+        version: None,
+        etag: None,
+        hash: Some(fingerprint(b"content")),
+    };
+    let (_client, dav) = dav(vec![response(200, &[], b"")]);
+    let evaluation = evaluate(&dav, SyncFile::Tasks, &path, &record).unwrap();
+    assert_eq!(
+        evaluation.plan,
+        Plan::Noop,
+        "没有版本可比时只能假设远端没变"
+    );
+    assert!(!evaluation.remote_absent);
+}

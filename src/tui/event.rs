@@ -16,6 +16,7 @@ use crate::session::{AccessMode, SiteKind};
 use crate::sites::lms::LmsActivity;
 use crate::task::{CoursesData, Event, FailedTarget, HomeworkUpdate, Job, SyncStateView};
 use crate::text::{MAX_INLINE_CHARS, sanitize_inline};
+use crate::tone::Tone;
 
 use super::app::{
     App, FormKind, FormState, HomeworkData, LmsLevel, LoginScreen, Page, Screen, SettingsState,
@@ -85,9 +86,11 @@ pub(crate) fn apply_event(app: &mut App, event: Event, jobs: &Sender<Job>) {
                 app.set_screen(Screen::Main);
             }
             app.set_message("账号已更新");
+            // 憑證檔剛被改寫：自動同步開啟時一併上傳（見 `request_auto_sync`）。
+            request_auto_sync(app, jobs);
         }
         Event::CredentialSaveFailed(message) => apply_credential_save_failed(app, message),
-        Event::PassphraseUpdated => apply_passphrase_updated(app),
+        Event::PassphraseUpdated => apply_passphrase_updated(app, jobs),
         Event::AccessPolicyUpdated(policy) => apply_access_policy_updated(app, policy),
         Event::Notice(message) => app.set_message(message),
         Event::Warning(message) => app.set_warning_message(message),
@@ -152,9 +155,10 @@ fn apply_sync_test_result(app: &mut App, ok: bool, message: String) {
     } else {
         format!("连接失败：{message}")
     };
+    let tone = if ok { Tone::Success } else { Tone::Danger };
     if let Screen::SyncImport(state) = &mut app.screen {
         state.busy = false;
-        state.message = Some(text);
+        state.message = Some((text, tone));
         return;
     }
     if ok {
@@ -425,10 +429,8 @@ fn apply_tasks(app: &mut App, tasks: Vec<Task>, jobs: &Sender<Job>) {
         selection.retain(|id| alive.contains(id));
     }
     app.anchor_task_selection(previous);
-    // 自動同步已開啟：任務變更後把本機變更自動上傳（工作者在無變更時不動作）。
-    if app.sync.auto_sync {
-        let _ = jobs.send(Job::SyncAuto);
-    }
+    // 任務清單剛被改寫：自動同步已開啟時一併上傳（見 `request_auto_sync`）。
+    request_auto_sync(app, jobs);
 }
 
 /// 課程清單更新：以穩定的課程識別碼重新定位目前課程。
@@ -520,7 +522,7 @@ fn apply_credential_save_failed(app: &mut App, message: String) {
 }
 
 /// 修改口令成功：離開處理中狀態並回到設定選單。
-fn apply_passphrase_updated(app: &mut App) {
+fn apply_passphrase_updated(app: &mut App, jobs: &Sender<Job>) {
     if matches!(
         &app.screen,
         Screen::SettingsForm(form) if form.kind == FormKind::ChangePassphrase
@@ -528,6 +530,20 @@ fn apply_passphrase_updated(app: &mut App) {
         app.set_screen(Screen::Settings(SettingsState::open(app.access_policy)));
     }
     app.set_message("加密口令已更新");
+    // 憑證檔（連同任務檔）已用新口令重新加密：自動同步開啟時一併上傳。
+    request_auto_sync(app, jobs);
+}
+
+/// 本機受同步的檔案剛被改寫：自動同步已開啟時請工作者上傳。
+///
+/// 涵蓋三條寫入路徑——任務變更（`Event::Tasks`）、修改帳號（`Event::AccountUpdated`）
+/// 與修改加密口令（`Event::PassphraseUpdated`）。少了後兩者的話，改完帳號或口令
+/// 之後雲端會一直留著舊憑證，直到下一次動到任務或手動同步。工作者在沒有變更時
+/// 不動作（只做一次 `HEAD`），因此這裡不必自行比對。
+fn request_auto_sync(app: &App, jobs: &Sender<Job>) {
+    if app.sync.auto_sync {
+        let _ = jobs.send(Job::SyncAuto);
+    }
 }
 
 /// 訪問模式已保存：設定彈窗若開著，更新草稿並解除「保存中」，彈窗不關閉。
@@ -574,7 +590,7 @@ fn apply_failure(
                     }
                     Screen::SyncImport(state) => {
                         state.busy = false;
-                        state.message = Some(text.clone());
+                        state.message = Some((text.clone(), Tone::Danger));
                     }
                     _ => {}
                 }

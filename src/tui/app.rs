@@ -955,8 +955,8 @@ pub struct SyncImportState {
     pub from_setup: bool,
     /// 是否正在測試連線或導入。
     pub busy: bool,
-    /// 測試連線的結果或錯誤訊息。
-    pub message: Option<String>,
+    /// 測試連線的結果或錯誤訊息，附帶語意色（成功用綠、失敗用紅）。
+    pub message: Option<(String, Tone)>,
 }
 
 impl SyncImportState {

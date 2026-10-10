@@ -11,25 +11,27 @@ use crate::tui::ui::{centered_rect, hint_line, menu_item, popup_surface};
 
 /// 彈窗寬度。
 const WIDTH: u16 = 52;
-/// 彈窗最大高度（含邊框）。
+/// 彈窗高度上限（選項再多也不超過）。
 const MAX_HEIGHT: u16 = 14;
-/// 選項區的最小高度。
-const BODY_MIN_HEIGHT: u16 = 1;
+/// 彈窗上下框線佔用的列數。
+const CHROME_HEIGHT: u16 = 2;
 /// 提示列高度。
 const HINT_HEIGHT: u16 = 1;
+/// 選項再多也要留一列。
+const MIN_BODY_HEIGHT: u16 = 1;
 
 /// 繪製同步子選單（疊在主畫面上）。
 pub fn draw(frame: &mut Frame, app: &App, state: SyncMenuState) {
     let actions = SyncMenuAction::items(app.sync.configured, app.sync.unavailable);
-    // 高度＝標題列與上下邊框（3）＋選項數＋提示列＋下邊框——以選項數為準。
-    let height = u16::try_from(actions.len())
-        .unwrap_or(MAX_HEIGHT)
-        .saturating_add(5)
+    // 高度＝框線＋選項數＋提示列（選項數依設定狀態而變：只有「清除」時是 1）。
+    let body_height = u16::try_from(actions.len()).unwrap_or(MAX_HEIGHT);
+    let height = body_height
+        .saturating_add(CHROME_HEIGHT + HINT_HEIGHT)
         .min(MAX_HEIGHT);
     let area = centered_rect(frame.area(), WIDTH, height);
     let inner = popup_surface(frame, area, "坚果云同步");
     let chunks = Layout::vertical([
-        Constraint::Min(BODY_MIN_HEIGHT),
+        Constraint::Min(MIN_BODY_HEIGHT),
         Constraint::Length(HINT_HEIGHT),
     ])
     .split(inner);

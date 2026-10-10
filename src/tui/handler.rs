@@ -11,6 +11,7 @@ use crate::credentials::Secret;
 use crate::domain::todo::{self, SortMode};
 use crate::session::SiteKind;
 use crate::task::Job;
+use crate::tone::Tone;
 use crate::tui::app::{
     App, FormKind, FormState, LoginScreen, NavItem, Screen, SettingsState, SyncImportState,
     SyncMenuAction, SyncMenuState, TaskBatchOp, TaskConfirmState, TaskField, TaskMenuKind,
@@ -578,9 +579,13 @@ fn run_sync_action(app: &mut App, jobs: &Sender<Job>, action: SyncMenuAction) {
             let _ = jobs.send(Job::SyncPull);
         }
         SyncMenuAction::ToggleAuto => {
-            let _ = jobs.send(Job::SetSyncAuto {
-                enabled: !app.sync.auto_sync,
-            });
+            let enabled = !app.sync.auto_sync;
+            let _ = jobs.send(Job::SetSyncAuto { enabled });
+            if enabled {
+                // 剛開啟時先對齊一次：否則要等到下一次任務變更才會上傳，期間本機
+                // 既有的變更（例如剛才改過的口令）不會進到雲端。
+                let _ = jobs.send(Job::SyncAuto);
+            }
         }
         SyncMenuAction::Clear => {
             let _ = jobs.send(Job::ClearSyncConfig);
@@ -642,7 +647,7 @@ fn submit_sync_import(app: &mut App, jobs: &Sender<Job>, test: bool) {
     let config = match controller::sync_config_from_form(&state.form) {
         Ok(config) => config,
         Err(message) => {
-            state.message = Some(message);
+            state.message = Some((message, Tone::Danger));
             return;
         }
     };

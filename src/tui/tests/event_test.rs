@@ -54,6 +54,37 @@ fn tasks_event_auto_uploads_only_when_enabled() {
     assert!(matches!(rx.try_iter().next(), Some(Job::SyncAuto)));
 }
 
+/// 憑證檔被改寫（改帳號、改口令）同樣要觸發自動上傳。
+///
+/// 改帳號與改口令都會重寫 `credentials.vault`（改口令還會重寫 `tasks.vault`）；
+/// 只在任務事件上掛自動同步的話，雲端會一直留著舊憑證，直到下一次動到任務或
+/// 使用者手動同步。
+#[test]
+fn credential_updates_auto_upload_only_when_enabled() {
+    let mut app = app();
+    app.sync = crate::task::SyncStateView {
+        configured: true,
+        auto_sync: true,
+        ..Default::default()
+    };
+
+    for event in [Event::AccountUpdated, Event::PassphraseUpdated] {
+        let (jobs, rx) = channel();
+        apply_event_with_jobs(&mut app, event, &jobs);
+        assert!(
+            matches!(rx.try_iter().next(), Some(Job::SyncAuto)),
+            "凭据变更应触发自动同步"
+        );
+    }
+
+    // 未開啟自動同步：兩者都不送任務。
+    app.sync.auto_sync = false;
+    let (jobs, rx) = channel();
+    apply_event_with_jobs(&mut app, Event::AccountUpdated, &jobs);
+    apply_event_with_jobs(&mut app, Event::PassphraseUpdated, &jobs);
+    assert!(rx.try_iter().next().is_none(), "未开启时不应触发自动同步");
+}
+
 #[test]
 fn vault_ready_moves_to_main_and_starts_loading() {
     let mut app = app();

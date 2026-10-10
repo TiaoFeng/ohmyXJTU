@@ -7,6 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::text::display_width;
+use crate::tone::Tone;
 use crate::tui::app::{FormState, LoginScreen};
 use crate::tui::text::InputLine;
 use crate::tui::theme::THEME;
@@ -217,7 +218,16 @@ pub fn draw_field(
 }
 
 /// 繪製表單彈窗；`note` 不為空時顯示在欄位上方（例如上一次的登入失敗原因）。
-pub fn draw_form(frame: &mut Frame, form: &FormState, title: &str, hint: &str, note: Option<&str>) {
+///
+/// `note` 帶著語意色：登入失敗是 [`Tone::Danger`]，同步連線成功則是
+/// [`Tone::Success`]——不該讓成功訊息以錯誤色呈現。
+pub fn draw_form(
+    frame: &mut Frame,
+    form: &FormState,
+    title: &str,
+    hint: &str,
+    note: Option<(&str, Tone)>,
+) {
     let note_rows = u16::from(note.is_some()) * FIELD_HEIGHT;
     let content_height = u16::try_from(form.fields.len()).unwrap_or(0) * FIELD_HEIGHT
         + note_rows
@@ -235,11 +245,11 @@ pub fn draw_form(frame: &mut Frame, form: &FormState, title: &str, hint: &str, n
     let chunks = Layout::vertical(constraints).split(inner);
 
     let offset = usize::from(note.is_some());
-    if let Some(note) = note {
+    if let Some((note, tone)) = note {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 note.to_owned(),
-                THEME.error_style(),
+                THEME.status_style(tone),
             )))
             .style(THEME.surface_style())
             .wrap(Wrap { trim: true }),
@@ -300,7 +310,7 @@ pub fn draw_login(frame: &mut Frame, screen: &LoginScreen) {
             form,
             "重新输入账号密码",
             "tab 切换字段 · enter 登录（成功后写入凭证） · esc 返回 · ^u 清空当前字段",
-            Some(&note),
+            Some((&note, Tone::Danger)),
         );
         return;
     }

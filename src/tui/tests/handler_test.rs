@@ -13,6 +13,7 @@ use crate::domain::todo::{Priority, SortMode, Task};
 use crate::model::{ActivityDetailView, ScheduleData};
 use crate::sites::lms::{ActivityKind, LmsActivity, LmsCourse};
 use crate::task::Job;
+use crate::tone::Tone;
 use crate::tui::app::{
     AgreementState, App, FormKind, FormState, HomeworkData, LmsLevel, LoginScreen, NavItem, Page,
     Screen, SettingsState, SyncImportState, TaskConfirmState, TaskEntry, TaskField, TaskFormMode,
@@ -784,11 +785,12 @@ fn sync_import_rejects_a_plain_http_server_url() {
     let Screen::SyncImport(state) = &app.screen else {
         panic!("应停留在导入画面：{:?}", app.screen);
     };
-    let message = state.message.clone().unwrap_or_default();
+    let (message, tone) = state.message.clone().expect("应就地显示验证错误");
     assert!(
         message.contains("https://"),
         "应指出必须使用 https：{message}"
     );
+    assert_eq!(tone, Tone::Danger, "验证错误应以错误色显示");
 }
 
 #[test]

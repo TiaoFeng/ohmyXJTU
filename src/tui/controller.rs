@@ -10,7 +10,7 @@ use std::sync::mpsc::Sender;
 use crate::credentials::{Credentials, Secret};
 use crate::domain::todo::{self, SortMode, Task};
 use crate::sites::lms::ActivityKind;
-use crate::sync::config::SyncConfig;
+use crate::sync::config::{SyncConfig, validate_url};
 use crate::task::Job;
 use crate::tui::app::{
     App, FieldRole, FormKind, FormState, LmsLevel, NavItem, Screen, TaskBatchMenuState, TaskEntry,
@@ -853,15 +853,10 @@ pub(super) fn sync_config_from_form(form: &FormState) -> Result<SyncConfig, Stri
 
 /// 由表單值組出連線設定（驗證失敗時回傳訊息）。
 fn sync_config_from(values: &FormValues) -> Result<SyncConfig, String> {
+    // 位址規則與工作者共用（sync::config::validate_url）：https、且不得帶查詢
+    // 參數、片段或 userinfo——同步層是以字串拼接把固定檔名接在位址之後。
+    validate_url(&values.sync_url)?;
     let url = values.sync_url.trim();
-    if url.is_empty() {
-        return Err("请输入服务器地址".to_owned());
-    }
-    // 同步以 HTTP Basic（帳號＋應用密碼）認證，明文 HTTP 會讓憑證在網路上裸奔；
-    // 這裡只收 https（工作者會以 `sync::config::validate` 再驗一次）。
-    if !url.to_ascii_lowercase().starts_with("https://") {
-        return Err("服务器地址必须以 https:// 开头（明文 HTTP 会泄露应用密码）".to_owned());
-    }
     if values.sync_account.trim().is_empty() {
         return Err("请输入坚果云账号".to_owned());
     }

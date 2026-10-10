@@ -865,6 +865,31 @@ fn sync_import_rejects_a_plain_http_server_url() {
     assert_eq!(tone, Tone::Danger, "验证错误应以错误色显示");
 }
 
+/// 位址帶查詢參數會讓固定檔名被拼進查詢字串、請求打到錯的目標：表單就要擋下。
+#[test]
+fn sync_import_rejects_a_server_url_with_a_query() {
+    let (jobs, rx) = channel();
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::SyncImport(SyncImportState::new(false)));
+    press_ctrl(&mut app, &jobs, 'u');
+    type_text(&mut app, &jobs, "https://dav.example/dav/?x=1");
+    press(&mut app, &jobs, KeyCode::Tab);
+    type_text(&mut app, &jobs, "u@example.com");
+    press(&mut app, &jobs, KeyCode::Tab);
+    type_text(&mut app, &jobs, "app-pass");
+
+    press(&mut app, &jobs, KeyCode::Enter);
+    assert!(rx.try_recv().is_err(), "带查询参数的地址不应送出任务");
+    let Screen::SyncImport(state) = &app.screen else {
+        panic!("应停留在导入画面：{:?}", app.screen);
+    };
+    let (message, _) = state.message.clone().expect("应就地显示验证错误");
+    assert!(
+        message.contains("查询参数"),
+        "应指出不得带查询参数：{message}"
+    );
+}
+
 #[test]
 fn login_captcha_submission_sends_job() {
     let (jobs, rx) = channel();

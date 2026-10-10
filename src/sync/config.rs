@@ -95,23 +95,46 @@ impl Drop for SyncConfig {
     }
 }
 
+/// 檢查伺服器位址是否可用，回傳面向使用者的訊息（供設定與表單共用）。
+///
+/// 位址**必須**使用 `https`：認證採 HTTP Basic（帳號＋應用密碼），明文 HTTP
+/// 會讓憑證在網路上裸奔，而同步層不做任何補救（`no_redirect` 也不會把 http
+/// 自動升級成 https）。
+///
+/// 位址還必須是**單純的基礎路徑**：同步層是以字串拼接把檔名接在位址之後
+///（見 [`crate::sync::webdav::WebDav::url_for`]），因此查詢字串或片段會讓請求
+/// 打到錯的目標（`…/dav/?x=1` 會讓整條固定檔名掉進查詢字串、path 只剩 `/dav/`），
+/// userinfo 則會讓憑證混進 URL。一律在此擋下。
+pub(crate) fn validate_url(url: &str) -> Result<(), String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return Err("请输入服务器地址".to_owned());
+    }
+    if !trimmed.to_ascii_lowercase().starts_with("https://") {
+        return Err("服务器地址必须以 https:// 开头（明文 HTTP 会泄露应用密码）".to_owned());
+    }
+    let parsed = url::Url::parse(trimmed).map_err(|_| "服务器地址无法解析为有效网址".to_owned())?;
+    if parsed.host_str().is_none() {
+        return Err("服务器地址缺少主机名".to_owned());
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("服务器地址不能包含用户名或密码（请在账号与应用密码栏填写）".to_owned());
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(
+            "服务器地址不能包含查询参数或片段（请只填同步目录，例如 https://dav.jianguoyun.com/dav/）"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
 /// 檢查連線設定是否可用。
 ///
-/// 伺服器位址**必須**使用 `https`：認證採 HTTP Basic（帳號＋應用密碼），
-/// 明文 HTTP 會讓憑證在網路上裸奔，而同步層不做任何補救（`no_redirect` 也
-/// 不會把 http 自動升級成 https）。這是第二道防線——介面表單會先擋一次，
-/// 這裡確保既有設定、導入時暫存的設定與訊息繞道都無法漏網。
+/// 這是第二道防線——介面表單會先擋一次（共用 [`validate_url`]），這裡確保
+/// 既有設定、導入時暫存的設定與訊息繞道都無法漏網。
 pub(crate) fn validate(config: &SyncConfig) -> AppResult<()> {
-    if !config
-        .url
-        .trim()
-        .to_ascii_lowercase()
-        .starts_with("https://")
-    {
-        return Err(AppError::config(
-            "坚果云服务器地址必须以 https:// 开头（同步以 HTTP Basic 认证传送应用密码，明文 HTTP 会泄露凭据）",
-        ));
-    }
+    validate_url(&config.url).map_err(AppError::config)?;
     if config.account.trim().is_empty() {
         return Err(AppError::config("坚果云账号不能为空"));
     }

@@ -190,6 +190,36 @@ fn validate_rejects_plain_http_and_other_schemes() {
     }
 }
 
+/// 同步層以字串拼接把固定檔名接在位址之後：查詢字串、片段或 userinfo 都會讓
+/// 請求打到錯誤的目標（或讓憑證混進 URL），一律拒絕。
+#[test]
+fn validate_rejects_urls_with_query_fragment_or_userinfo() {
+    for url in [
+        "https://dav.example/dav/?x=1",
+        "https://dav.example/dav/#frag",
+        "https://user:pass@dav.example/dav/",
+        "https://user@dav.example/dav/",
+        "https://",
+    ] {
+        let bad = SyncConfig::new(url, "u@example.com", "app-pass");
+        assert!(validate(&bad).is_err(), "不应接受非基础路径的地址：{url}");
+    }
+}
+
+/// 單純的基礎路徑照常通過（尾斜線有無皆可）。
+#[test]
+fn validate_accepts_a_bare_base_path() {
+    for url in [
+        "https://dav.jianguoyun.com/dav/",
+        "https://dav.jianguoyun.com/dav",
+    ] {
+        assert!(
+            validate(&SyncConfig::new(url, "u", "p")).is_ok(),
+            "基础路径应通过：{url}"
+        );
+    }
+}
+
 #[test]
 fn validate_rejects_missing_account_or_password() {
     let no_account = SyncConfig::new("https://dav.example/dav/", "   ", "app-pass");

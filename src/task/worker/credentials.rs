@@ -150,7 +150,7 @@ impl Worker {
             if let Err(rollback) = self.tasks.rekey(&old.into()) {
                 return Err(AppError::PassphraseRollback {
                     reason: err.to_string(),
-                    rollback: rollback.to_string(),
+                    rollback: format!("任务文件（{rollback}）"),
                 });
             }
             return Err(err);

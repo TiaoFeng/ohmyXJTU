@@ -7649,7 +7649,8 @@ fn sync_now_uploads_local_files_when_the_remote_is_empty() {
         })
         .expect("解锁应成功");
     // 遠端沒有任何檔案：本機憑證檔會被上傳，任務檔不存在則略過。
-    // `set_sync_config` 會先測試連線（HEAD 404 視為可連線），因此須先注入後端。
+    // `set_sync_config` 會先測試連線與寫入權限（`WebDav::check`：PUT 探測檔後
+    // 立即 DELETE），因此須先注入後端。
     harness.set_webdav(|request| match request.method {
         Method::Head => Ok(HttpResponse::new(404, request.url.clone(), b"".as_slice())),
         Method::Put => Ok(HttpResponse {
@@ -8254,6 +8255,94 @@ fn a_missing_remote_file_is_pushed_instead_of_becoming_a_noop() {
             .iter()
             .any(|event| matches!(event, Event::SyncConflict { .. })),
         "新的空目标不该报冲突：{events:?}"
+    );
+}
+
+/// 從另一台伺服器導入時，導入當下算出的同步記錄必須留著。
+///
+/// 換目標時 `SyncStore::set_config` 會作廢舊記錄（那些指向另一個雲端）；若「先寫
+/// 記錄、再寫設定」，剛算好、指向**新**目標的記錄會被那一步清掉，之後的「立即
+/// 同步」就會把「兩邊一致」誤報成衝突。
+#[test]
+fn importing_from_another_server_keeps_the_fresh_records() {
+    let mut harness = Harness::new(|_| Ok(html("")));
+    harness.seed_vault("secret123", &Credentials::new("3120000001", "pw-12345"));
+    harness
+        .dispatch(Job::Unlock {
+            passphrase: "secret123".into(),
+        })
+        .expect("解锁应成功");
+
+    // 遠端憑證檔＝本機容器（同一口令可解開），ETag 固定不動；任務檔不存在。
+    let cred_container = std::fs::read(harness.worker.vault.path()).expect("读取本机凭证容器");
+    harness.set_webdav(move |request| {
+        let url = request.url.clone();
+        let etag = || vec![("ETag".to_owned(), "\"v1\"".to_owned())];
+        match request.method {
+            Method::Put => Ok(HttpResponse {
+                status: 201,
+                final_url: url,
+                headers: etag(),
+                body: Vec::new(),
+            }),
+            Method::Delete => Ok(HttpResponse::new(204, url, b"".as_slice())),
+            Method::Get | Method::Head if url.contains("credentials") => Ok(HttpResponse {
+                status: 200,
+                final_url: url,
+                headers: etag(),
+                body: if request.method == Method::Get {
+                    cred_container.clone()
+                } else {
+                    Vec::new()
+                },
+            }),
+            _ => Ok(HttpResponse::new(404, url, b"".as_slice())),
+        }
+    });
+
+    // 既有設定指向伺服器 A（寫進 sync.vault）。
+    harness
+        .dispatch(Job::SetSyncConfig {
+            config: crate::sync::config::SyncConfig::new(
+                "https://dav.one/dav/",
+                "u@example.com",
+                "app-pass",
+            ),
+        })
+        .expect("保存同步设置应成功");
+
+    // 從伺服器 B 導入，再以同一口令解鎖：暫存的設定與記錄在此寫回 sync.vault。
+    harness
+        .dispatch(Job::SyncImport {
+            config: crate::sync::config::SyncConfig::new(
+                "https://dav.two/dav/",
+                "u@example.com",
+                "app-pass",
+            ),
+        })
+        .expect("导入应成功");
+    harness
+        .dispatch(Job::Unlock {
+            passphrase: "secret123".into(),
+        })
+        .expect("重新解锁应成功");
+    let _ = harness.drain_events();
+
+    // 本機與遠端一致：不得報衝突，也不該重新上傳。
+    harness.dispatch(Job::SyncNow).expect("同步应成功");
+    let events = harness.drain_events();
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::SyncConflict { .. })),
+        "导入算出的记录被清掉了：{events:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::SyncDone { summary } if summary.contains("上传 0，下载 0")
+        )),
+        "两边一致时应为 Noop：{events:?}"
     );
 }
 

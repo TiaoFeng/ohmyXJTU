@@ -55,11 +55,16 @@ impl Worker {
     }
 
     /// 把導入暫存的設定與記錄寫回 `sync.vault`。
+    ///
+    /// **先寫設定、再寫記錄**：`set_config` 在換伺服器／帳號時會作廢舊記錄
+    ///（那些記錄指向另一個雲端），順序顛倒的話，導入當下剛算出、指向**新**目標的
+    /// 記錄會被那一步清掉——之後的「立即同步」就會把「兩邊一致」誤報成衝突。
     fn persist_pending_sync(&mut self, pending: PendingSync) -> AppResult<()> {
+        self.sync.set_config(pending.config)?;
         for (file, record) in pending.records {
             self.sync.set_record(file, record)?;
         }
-        self.sync.set_config(pending.config)
+        Ok(())
     }
 
     /// 回報目前同步設定（不含秘密）。
@@ -135,10 +140,23 @@ impl Worker {
             .iter()
             .any(|(_, _, evaluation)| evaluation.plan == Plan::Pull);
         if paused {
-            self.tasks.pause()?;
+            self.pause_tasks_for_sync()?;
         }
         let outcome = self.apply_plans(&dav, plans);
         self.settle_sync(outcome, paused)
+    }
+
+    /// 暫停任務服務寫入並等待確認；失敗時補送一次恢復才回報。
+    ///
+    /// 逾時（`TaskReply` 有上限）代表**不知道暫停是否已生效**：不補送恢復的話，
+    /// 存儲可能就此卡在暫停態，之後每次任務操作都失敗，直到重新解鎖。恢復是
+    /// 幂等的，服務已停止時只是再一次送不出去，不影響回報的錯誤。
+    fn pause_tasks_for_sync(&mut self) -> AppResult<()> {
+        if let Err(err) = self.tasks.pause() {
+            self.tasks.resume();
+            return Err(err);
+        }
+        Ok(())
     }
 
     /// 唯讀評估所有同步檔案（只做 `HEAD` 與本機讀取，不寫入）。
@@ -299,7 +317,7 @@ impl Worker {
         let config = self.require_sync_config()?;
         let dav = self.webdav_for(&config);
         // 強制下載一定會覆寫本機檔案：先暫停任務服務寫入。
-        self.tasks.pause()?;
+        self.pause_tasks_for_sync()?;
         let outcome = self.run_pull(&dav);
         self.settle_sync(outcome, true)
     }

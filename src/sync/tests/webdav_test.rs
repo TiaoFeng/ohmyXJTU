@@ -296,6 +296,55 @@ fn every_request_caps_the_response_body() {
     }
 }
 
+/// `HEAD` 回 `405`（伺服器不接受 `HEAD`）時改以 `GET` 判斷存在與版本。
+///
+/// 否則「伺服器不支援 HEAD」會讓整個同步不可用；退路的 `GET` 同樣受回應大小上限
+/// 約束（它是唯一會把本文讀進來的路徑）。
+#[test]
+fn head_falls_back_to_get_when_the_server_rejects_head() {
+    let (client, dav) = endpoint(vec![
+        response(405, &[], b""),
+        response(
+            200,
+            &[
+                ("ETag", "\"abc\""),
+                ("Last-Modified", "Mon, 01 Jan 2024 00:00:00 GMT"),
+            ],
+            b"ciphertext",
+        ),
+    ]);
+    let meta = dav.head("f.vault").expect("GET 退路应成功");
+    assert!(meta.exists);
+    assert_eq!(meta.etag.as_deref(), Some("abc"));
+    assert_eq!(meta.if_match.as_deref(), Some("\"abc\""));
+
+    let requests = client.requests();
+    assert_eq!(requests[0].method, Method::Head);
+    assert_eq!(requests[1].method, Method::Get);
+    assert_eq!(
+        requests[1].max_body,
+        Some(MAX_RESPONSE_BYTES),
+        "退路请求同样要限制回应大小"
+    );
+}
+
+/// 退路的 `GET` 回 `404`：檔案不存在（不是錯誤）。
+#[test]
+fn head_fallback_reports_a_missing_file() {
+    let (_client, dav) = endpoint(vec![response(405, &[], b""), response(404, &[], b"")]);
+    let meta = dav.head("f.vault").expect("404 不该是错误");
+    assert!(!meta.exists);
+}
+
+/// 退路也失敗時（例如 `GET` 回 `500`）才報錯，且訊息指出方法。
+#[test]
+fn head_fallback_failure_names_the_method() {
+    let (_client, dav) = endpoint(vec![response(405, &[], b""), response(500, &[], b"")]);
+    let text = dav.head("f.vault").expect_err("500 应报错").to_string();
+    assert!(text.contains("500"), "{text}");
+    assert!(text.contains("GET"), "{text}");
+}
+
 /// 錯誤訊息裡的網址去 userinfo 與查詢串。
 ///
 /// 使用者可能直接貼上帶憑證的 WebDAV 連線網址（`https://帳號:密碼@主機/`），

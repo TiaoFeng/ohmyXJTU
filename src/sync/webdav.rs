@@ -135,6 +135,10 @@ impl WebDav {
     }
 
     /// 讀取遠端檔案中介資料（不下載主體）。
+    ///
+    /// 少數 WebDAV 實作不允許 `HEAD`（回 `405 Method Not Allowed`）；那時改以
+    /// `GET` 判斷存在與版本（見 [`Self::head_via_get`]），否則整個同步都會因為
+    /// 「伺服器不接受 HEAD」而無法使用。
     pub fn head(&self, file: &str) -> AppResult<RemoteMeta> {
         let url = self.url_for(file);
         let response = self.send(HttpRequest::head(url.clone()))?;
@@ -142,7 +146,24 @@ impl WebDav {
             200..=299 => Ok(meta_from(&response, true)),
             404 | 409 | 410 => Ok(RemoteMeta::default()),
             401 | 403 => Err(AppError::WebDavAuth),
+            405 => self.head_via_get(&url),
             other => Err(unexpected_status("HEAD", &url, other)),
+        }
+    }
+
+    /// `HEAD` 不被允許時的退路：以 `GET` 判斷存在與版本。
+    ///
+    /// 只為了讀回應標頭，本文會被客戶端讀進來再丟掉——傳輸量因此比 `HEAD` 大
+    ///（單次上限 8 MiB，實際同步檔只有數 KB），但這是「伺服器不支援 `HEAD`」時
+    /// 唯一可行的方法：本專案刻意不引入 XML 解析，無法用 `PROPFIND` 列目錄。
+    /// `GET` 也回 `405` 時才是真正無路可走，訊息會指出方法與網址（已去識別化）。
+    fn head_via_get(&self, url: &str) -> AppResult<RemoteMeta> {
+        let response = self.send(HttpRequest::get(url.to_owned()))?;
+        match response.status {
+            200..=299 => Ok(meta_from(&response, true)),
+            404 | 409 | 410 => Ok(RemoteMeta::default()),
+            401 | 403 => Err(AppError::WebDavAuth),
+            other => Err(unexpected_status("GET", url, other)),
         }
     }
 

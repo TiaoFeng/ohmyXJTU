@@ -8346,6 +8346,64 @@ fn importing_from_another_server_keeps_the_fresh_records() {
     );
 }
 
+/// 伺服器不接受 `HEAD`（回 `405`）時整條同步仍可用（改以 `GET` 判斷存在）。
+///
+/// 修前 `head` 只認 2xx／404／401／403，405 直接報「服务器返回异常状态码」，
+/// 於是「立即同步」與自動同步在這種伺服器上完全無法使用。
+#[test]
+fn sync_works_against_a_server_that_rejects_head() {
+    let mut harness = Harness::new(|_| Ok(html("")));
+    harness.seed_vault("secret123", &Credentials::new("3120000001", "pw-12345"));
+    harness
+        .dispatch(Job::Unlock {
+            passphrase: "secret123".into(),
+        })
+        .expect("解锁应成功");
+
+    harness.set_webdav(|request| {
+        let url = request.url.clone();
+        match request.method {
+            // 伺服器不允許 HEAD；存在與否只能靠 GET 判斷（此處檔案不存在）。
+            Method::Head => Ok(HttpResponse::new(405, url, b"".as_slice())),
+            Method::Get => Ok(HttpResponse::new(404, url, b"".as_slice())),
+            Method::Put => Ok(HttpResponse {
+                status: 201,
+                final_url: url,
+                headers: vec![("ETag".to_owned(), "v1".to_owned())],
+                body: Vec::new(),
+            }),
+            Method::Delete => Ok(HttpResponse::new(204, url, b"".as_slice())),
+            _ => Ok(html("")),
+        }
+    });
+
+    harness
+        .dispatch(Job::SetSyncConfig {
+            config: crate::sync::config::SyncConfig::new(
+                "https://dav.example/dav/",
+                "u@example.com",
+                "app-pass",
+            ),
+        })
+        .expect("保存同步设置应成功");
+
+    harness.dispatch(Job::SyncNow).expect("同步应成功");
+    let events = harness.drain_events();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::SyncDone { summary } if summary.contains("上传 1，下载 0")
+        )),
+        "不接受 HEAD 的服务器上仍应上传本机档案：{events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::Failed { .. })),
+        "不应报错：{events:?}"
+    );
+}
+
 /// 取出事件中的最後一則同步狀態。
 fn sync_state(events: &[Event]) -> Option<crate::task::protocol::SyncStateView> {
     events.iter().rev().find_map(|event| match event {

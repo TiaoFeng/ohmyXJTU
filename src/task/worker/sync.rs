@@ -117,8 +117,10 @@ impl Worker {
 
     /// 智慧同步：逐檔三方比對，只做無衝突的動作。
     ///
-    /// 下載會覆寫本機檔案：**先暫停任務服務寫入**（避免它以舊清單覆寫剛下載的
-    /// 任務檔），且一旦真的下載過，錯誤路徑也必須重新鎖定（見 [`Self::settle_sync`]）。
+    /// 下載會覆寫本機檔案：只要評估出任何 `Plan::Pull`，就先暫停任務服務寫入，
+    /// 並在**暫停生效後**重新核對該檔的本機指紋（評估到暫停之間使用者仍可能
+    /// 寫入），已變更則改報衝突；且一旦真的下載過，錯誤路徑也必須重新鎖定
+    ///（見 [`Self::settle_sync`]）。
     pub(super) fn sync_now(&mut self) -> AppResult<()> {
         let config = self.require_sync_config()?;
         let dav = self.webdav_for(&config);
@@ -172,7 +174,14 @@ impl Worker {
                     }
                 }
                 Plan::Pull => {
-                    if self.pull_file(dav, file, &path)? {
+                    // 評估（`HEAD`）到暫停生效之間，使用者仍可能改動本機檔案；
+                    // 暫停已生效後重新核對指紋，已變更就改報衝突，不用雲端覆寫
+                    // 剛保存的修改。（有 Pull 計畫就一定有暫停，故重驗後到寫入
+                    // 之間不會再有並行寫入。）
+                    let record = self.sync.record(file).clone();
+                    if engine::local_changed(&path, &record)? {
+                        conflicts.push(file.remote_name());
+                    } else if self.pull_file(dav, file, &path)? {
                         downloaded += 1;
                     }
                 }

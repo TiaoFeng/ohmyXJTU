@@ -73,6 +73,19 @@ impl Evaluation {
     }
 }
 
+/// 本機檔案相對上次同步記錄是否已變更（只讀本機）。
+///
+/// 供 [`evaluate`] 與「評估後、下載前」的重新核對共用：下載計畫是在 `HEAD`
+/// 評估時定的，而評估到暫停生效之間使用者仍可能寫入本機檔案；下載前以同一個
+/// 判準重驗，就能避免用雲端覆寫剛保存的修改。
+pub(crate) fn local_changed(local_path: &Path, record: &FileRecord) -> AppResult<bool> {
+    match (read_local(local_path)?, &record.hash) {
+        (Some(bytes), Some(hash)) => Ok(&fingerprint(&bytes) != hash),
+        (Some(_), None) => Ok(true),
+        (None, _) => Ok(false),
+    }
+}
+
 /// 評估單一檔案的同步計畫（只讀不寫）。
 pub(crate) fn evaluate(
     webdav: &WebDav,
@@ -80,11 +93,7 @@ pub(crate) fn evaluate(
     local_path: &Path,
     record: &FileRecord,
 ) -> AppResult<Evaluation> {
-    let local_changed = match (read_local(local_path)?, &record.hash) {
-        (Some(bytes), Some(hash)) => &fingerprint(&bytes) != hash,
-        (Some(_), None) => true,
-        (None, _) => false,
-    };
+    let local_changed = local_changed(local_path, record)?;
     let remote = webdav.head(file.remote_name())?;
     let remote_changed = match (remote_version(&remote), &record.version) {
         (Some(current), Some(previous)) => current != previous.as_str(),

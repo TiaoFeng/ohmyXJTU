@@ -6526,6 +6526,12 @@ fn failed_account_switch_does_not_revert_a_later_passphrase_change() {
         }
         flow(request)
     });
+    // 修改口令在設定頁進行，必先解鎖：任務存儲需持有金鑰才可換鑰。這裡直接讓
+    // 任務服務載入任務檔，而不走 `Job::Unlock`——後者會以真實 HTTP 客戶端重建
+    // 會話，令本測試注入的假後端失效（接下來的換帳號需要假後端才能穩定離線）。
+    harness.dispatch_task(Job::InitTasks {
+        passphrase: "secret123".into(),
+    });
 
     // 1) 換帳號斷網 → 失敗。
     assert!(
@@ -6534,7 +6540,8 @@ fn failed_account_switch_does_not_revert_a_later_passphrase_change() {
                 passphrase: "secret123".into(),
                 credentials: Credentials::new("3120000002", "new-password"),
             })
-            .is_err()
+            .is_err(),
+        "断网时换账号应当失败"
     );
 
     // 2) 使用者修改加密口令。
@@ -7900,4 +7907,211 @@ fn sync_now_upload_only_keeps_the_session() {
         "纯上传不应锁定会话：{events:?}"
     );
     assert!(harness.worker.session.is_some(), "纯上传后会话应保留");
+}
+
+/// 評估（`HEAD`）之後、下載之前才發生的本機修改，不得被雲端覆寫。
+///
+/// 評估到暫停生效之間任務服務仍可寫入；這裡在任務檔的 `HEAD` 回應中模擬使用者
+/// 剛保存修改，智慧同步應在暫停後重新核對指紋並改報衝突，而不是下載覆寫它。
+#[test]
+fn sync_now_conflicts_when_the_local_file_changes_after_evaluation() {
+    let remote = crate::credentials::envelope::seal("secret123", "ohmyXJTU-vault", b"remote-vault")
+        .expect("建立远端容器")
+        .0;
+
+    let mut harness = Harness::new(|_| Ok(html("")));
+    harness.seed_vault("secret123", &Credentials::new("3120000001", "pw-12345"));
+    harness
+        .dispatch(Job::Unlock {
+            passphrase: "secret123".into(),
+        })
+        .expect("解锁应成功");
+
+    // 任務檔的 `HEAD` 期間模擬使用者保存了一筆修改；先注入後端（`SetSyncConfig`
+    // 會先測試連線）。
+    let cred_path = harness.worker.vault.path().to_path_buf();
+    let tasks_path = harness.tasks_path();
+    let edit_path = tasks_path.clone();
+    harness.set_webdav(move |request| {
+        let url = request.url.clone();
+        match request.method {
+            Method::Put => Ok(HttpResponse {
+                status: 201,
+                final_url: url,
+                headers: Vec::new(),
+                body: Vec::new(),
+            }),
+            Method::Delete => Ok(HttpResponse::new(204, url, b"".as_slice())),
+            Method::Head if request.url.contains("ohmyXJTU-tasks") => {
+                std::fs::write(&edit_path, b"user-edited").expect("模拟本机修改");
+                Ok(HttpResponse {
+                    status: 200,
+                    final_url: url,
+                    headers: vec![("ETag".to_owned(), "t1".to_owned())],
+                    body: Vec::new(),
+                })
+            }
+            Method::Head => Ok(HttpResponse {
+                status: 200,
+                final_url: url,
+                headers: vec![("ETag".to_owned(), "c0".to_owned())],
+                body: Vec::new(),
+            }),
+            Method::Get => Ok(HttpResponse {
+                status: 200,
+                final_url: url,
+                headers: vec![("ETag".to_owned(), "t1".to_owned())],
+                body: remote.clone(),
+            }),
+            _ => Ok(HttpResponse::new(404, url, b"".as_slice())),
+        }
+    });
+
+    harness
+        .dispatch(Job::SetSyncConfig {
+            config: crate::sync::config::SyncConfig::new(
+                "https://dav.example/dav/",
+                "u@example.com",
+                "app-pass",
+            ),
+        })
+        .expect("保存同步设置应成功");
+
+    // 本機憑證檔與上次同步一致（Noop）；任務檔不存在（hash 空）而遠端版本已變
+    // → 任務檔的計畫為 Pull。
+    let cred_hash = crate::sync::engine::fingerprint(&std::fs::read(&cred_path).unwrap());
+    let credentials_file = crate::sync::config::SyncFile::Credentials;
+    let tasks_file = crate::sync::config::SyncFile::Tasks;
+    harness
+        .worker
+        .sync
+        .set_record(
+            credentials_file,
+            crate::sync::config::FileRecord {
+                version: Some("c0".to_owned()),
+                etag: Some("\"c0\"".to_owned()),
+                hash: Some(cred_hash),
+            },
+        )
+        .expect("写入凭据记录");
+    harness
+        .worker
+        .sync
+        .set_record(
+            tasks_file,
+            crate::sync::config::FileRecord {
+                version: Some("t0".to_owned()),
+                etag: Some("\"t0\"".to_owned()),
+                hash: None,
+            },
+        )
+        .expect("写入任务记录");
+
+    harness.dispatch(Job::SyncNow).expect("冲突应以事件回报");
+    let events = harness.drain_events();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::SyncConflict { .. })),
+        "评估后本机变更应改报冲突：{events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::SyncRelocked)),
+        "冲突时不应下载、不应锁定会话：{events:?}"
+    );
+    assert_eq!(
+        std::fs::read(&tasks_path).unwrap(),
+        b"user-edited",
+        "评估后的本机修改不得被云端覆盖"
+    );
+    assert!(harness.worker.session.is_some(), "未下载应保留会话");
+}
+
+/// 下載後重新鎖定，排隊的修改口令操作仍想換鑰：必須被拒絕。
+///
+/// 修前 `TaskStore::rekey` 只擋「原檔讀不到」，不擋「金鑰已丟棄／同步暫停」，
+/// 於是下載期間排隊的修改口令會在下載後以舊清單重新加密落盤，覆寫剛下載的
+/// 任務檔。
+#[test]
+fn a_queued_change_passphrase_cannot_overwrite_a_downloaded_task_file() {
+    // 遠端憑證用本機真正加密的憑證容器（原口令可解開，讓流程能走到換任務鑰）；
+    // 遠端任務用任一結構完整的容器。
+    let mut harness = Harness::new(|_| Ok(html("")));
+    harness.seed_vault("secret123", &Credentials::new("3120000001", "pw-12345"));
+    harness
+        .dispatch(Job::Unlock {
+            passphrase: "secret123".into(),
+        })
+        .expect("解锁应成功");
+    let cred_container = std::fs::read(harness.worker.vault.path()).expect("读取本机凭证容器");
+    let tasks_container =
+        crate::credentials::envelope::seal("pw", "ohmyXJTU-tasks", b"remote-tasks")
+            .expect("建立远端任务容器")
+            .0;
+    let downloaded_tasks = tasks_container.clone();
+
+    harness.set_webdav(move |request| match request.method {
+        Method::Put => Ok(HttpResponse {
+            status: 201,
+            final_url: request.url.clone(),
+            headers: vec![("ETag".to_owned(), "v1".to_owned())],
+            body: Vec::new(),
+        }),
+        Method::Get => Ok(HttpResponse {
+            status: 200,
+            final_url: request.url.clone(),
+            headers: vec![("ETag".to_owned(), "v2".to_owned())],
+            body: if request.url.contains("tasks") {
+                tasks_container.clone()
+            } else {
+                cred_container.clone()
+            },
+        }),
+        _ => Ok(HttpResponse::new(404, request.url.clone(), b"".as_slice())),
+    });
+
+    harness
+        .dispatch(Job::SetSyncConfig {
+            config: crate::sync::config::SyncConfig::new(
+                "https://dav.example/dav/",
+                "u@example.com",
+                "app-pass",
+            ),
+        })
+        .expect("保存同步设置应成功");
+
+    // 以遠端覆寫本機：下載後重新鎖定（丟棄會話與任務金鑰）。
+    harness.dispatch(Job::SyncPull).expect("下载应成功");
+    assert!(harness.worker.session.is_none(), "下载后应丢弃会话");
+    let tasks_path = harness.tasks_path();
+    assert_eq!(
+        std::fs::read(&tasks_path).unwrap(),
+        downloaded_tasks,
+        "任务档应为下载内容"
+    );
+
+    // 排隊的修改口令（模擬下載期間使用者提交）在下載後才執行：必須被拒絕，
+    // 且不得改動下載的任務檔。
+    assert!(
+        harness
+            .dispatch(Job::ChangePassphrase {
+                old: "secret123".into(),
+                new: "new-secret456".into(),
+            })
+            .is_err(),
+        "锁定后修改口令应被拒绝"
+    );
+    assert_eq!(
+        std::fs::read(&tasks_path).unwrap(),
+        downloaded_tasks,
+        "被拒绝的修改口令不得覆写下载的任务档"
+    );
+    // 憑證檔不得被換鑰：仍能以原口令解開。
+    harness
+        .worker
+        .vault
+        .load("secret123")
+        .expect("凭证应仍以原口令可解");
 }

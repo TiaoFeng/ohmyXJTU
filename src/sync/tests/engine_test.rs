@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use tempfile::tempdir;
 
-use super::{Plan, evaluate, fingerprint, import, plan, pull, push};
+use super::{Plan, evaluate, fingerprint, import, local_changed, plan, pull, push};
 use crate::error::AppError;
 use crate::http::fake::FakeClient;
 use crate::http::{HttpResponse, Method};
@@ -53,6 +53,48 @@ fn plan_covers_all_four_combinations() {
 fn fingerprint_changes_with_content() {
     assert_eq!(fingerprint(b"abc"), fingerprint(b"abc"));
     assert_ne!(fingerprint(b"abc"), fingerprint(b"abd"));
+}
+
+/// `local_changed`：比對指紋、記錄缺指紋或有檔視為已變更、檔案不存在則否。
+#[test]
+fn local_changed_compares_against_the_recorded_hash() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("tasks.vault");
+
+    // 檔案不存在：不算變更（與「檔案缺失」一致）。
+    let record = FileRecord {
+        hash: Some(fingerprint(b"whatever")),
+        ..FileRecord::default()
+    };
+    assert!(!local_changed(&path, &record).unwrap());
+
+    std::fs::write(&path, b"content").unwrap();
+    assert!(
+        !local_changed(
+            &path,
+            &FileRecord {
+                hash: Some(fingerprint(b"content")),
+                ..FileRecord::default()
+            }
+        )
+        .unwrap(),
+        "指紋相同應視為未變更"
+    );
+    assert!(
+        local_changed(
+            &path,
+            &FileRecord {
+                hash: Some(fingerprint(b"older")),
+                ..FileRecord::default()
+            }
+        )
+        .unwrap(),
+        "指紋不同應視為已變更"
+    );
+    assert!(
+        local_changed(&path, &FileRecord::default()).unwrap(),
+        "記錄缺指紋但有本機檔應視為已變更"
+    );
 }
 
 #[test]

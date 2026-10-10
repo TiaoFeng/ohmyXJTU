@@ -210,11 +210,21 @@ impl TaskStore {
     /// 任務覆寫磁碟上的原檔，否則「原檔無法讀取時不覆寫」的保護會被換口令
     /// 這條路徑繞過。
     ///
-    /// 不檢查 `sealed`：換口令不需要舊金鑰，而 `lock()` 之後記憶體中的任務仍
-    /// 在（重新加密的是同一份內容）。真正要擋的是「原檔沒讀進來」的情形。
+    /// **金鑰已丟棄（`lock()`，例如同步下載後重新鎖定）或同步暫停期間也拒絕**：
+    /// 這兩種狀態下記憶體中的清單可能已與磁碟（例如剛下載的內容）不一致，重新
+    /// 加密落盤會把它覆寫。修前只擋「原檔沒讀進來」，於是下載期間排隊的修改口令
+    /// 操作會在下載後以舊清單覆寫下載結果。
     pub(crate) fn rekey(&mut self, passphrase: &str) -> AppResult<()> {
         if let Some(message) = &self.unavailable {
             return Err(AppError::Crypto(message.clone()));
+        }
+        if self.sealed.is_none() {
+            return Err(AppError::Crypto(
+                "任务存储已锁定，请重新解锁后再修改口令".to_owned(),
+            ));
+        }
+        if self.paused {
+            return Err(AppError::Crypto("正在与坚果云同步，请稍后再试".to_owned()));
         }
         let plaintext = self.serialize()?;
         let (bytes, sealed) = envelope::seal(passphrase, AAD_PREFIX, &plaintext)?;

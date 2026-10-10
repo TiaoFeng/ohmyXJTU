@@ -595,14 +595,31 @@ fn run_sync_action(app: &mut App, jobs: &Sender<Job>, action: SyncMenuAction) {
 
 // ── 主畫面 ───────────────────────────────────────────
 
-/// 「從堅果雲導入」：輸入設定、測試連線、導入。
+/// 「從堅果雲導入」：輸入設定、測試連線、確認後導入。
 fn handle_sync_import(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
     let control = key.modifiers.contains(KeyModifiers::CONTROL);
-    let (busy, from_setup) = match &app.screen {
-        Screen::SyncImport(state) => (state.busy, state.from_setup),
+    let (busy, from_setup, confirming) = match &app.screen {
+        Screen::SyncImport(state) => (state.busy, state.from_setup, state.confirming),
         _ => return,
     };
     if busy {
+        return;
+    }
+
+    // 確認步驟：導入會覆寫本機檔案且不保留備份，因此第一次 `enter` 只跳到這裡，
+    // 再按一次才真的下載。確認期間不做輸入編輯（設定已驗證過，內容不會改變）。
+    if confirming {
+        if (control && key.code == KeyCode::Char('s'))
+            || matches!(key.code, KeyCode::Enter | KeyCode::Char('\n'))
+        {
+            submit_sync_import(app, jobs, false);
+        } else if key.code == KeyCode::Esc {
+            // 回到表單繼續編輯（不離開畫面，已填的設定保留）。
+            if let Screen::SyncImport(state) = &mut app.screen {
+                state.confirming = false;
+                state.message = None;
+            }
+        }
         return;
     }
 
@@ -613,7 +630,7 @@ fn handle_sync_import(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
     if (control && key.code == KeyCode::Char('s'))
         || matches!(key.code, KeyCode::Enter | KeyCode::Char('\n'))
     {
-        submit_sync_import(app, jobs, false);
+        confirm_sync_import(app, from_setup);
         return;
     }
     if key.code == KeyCode::Esc {
@@ -637,6 +654,35 @@ fn handle_sync_import(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
             }
         }
     }
+}
+
+/// 進入導入確認步驟：先驗證設定，通過才顯示覆寫警告（失敗就地顯示錯誤）。
+///
+/// 送出任務延後到使用者再按一次 `enter`——雲端內容會覆寫本機檔案且不保留備份，
+/// 而誤導入會讓本機仍可用的憑證（甚至唯一一份密碼）消失。
+fn confirm_sync_import(app: &mut App, from_setup: bool) {
+    let Screen::SyncImport(state) = &mut app.screen else {
+        return;
+    };
+    if let Err(message) = controller::sync_config_from_form(&state.form) {
+        state.message = Some((message, Tone::Danger));
+        return;
+    }
+    state.confirming = true;
+    state.message = Some((import_confirm_text(from_setup), Tone::Warning));
+}
+
+/// 導入的確認文字。
+///
+/// 首次設定時本機還沒有憑證檔（這個畫面只有在該檔案不存在時才從 `Setup` 進入），
+/// 因此不該說「覆寫」；其餘情況本機的憑證與任務檔都會被雲端內容取代。
+fn import_confirm_text(from_setup: bool) -> String {
+    let action = if from_setup {
+        "将从坚果云写入本机凭证与任务文件"
+    } else {
+        "将用云端内容覆写本机的凭证与任务文件"
+    };
+    format!("{action}（不保留备份），完成后需重新输入加密口令解锁。按 enter 确认 · esc 返回")
 }
 
 /// 由導入表單組出設定並送出測試或導入任務；驗證失敗就地顯示。

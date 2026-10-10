@@ -3741,4 +3741,28 @@ fn sync_import_screen_shows_the_form_and_colours_the_message() {
     });
     let colors = row_colors(terminal.backend(), "连接失败");
     assert!(colors.contains(&THEME.red), "失败讯息应为红色：{colors:?}");
+
+    // 確認步驟：提示列只列出當下可用的按鍵（不能編輯欄位或測試連線）。
+    let Screen::SyncImport(state) = &mut app.screen else {
+        panic!("应停在导入画面");
+    };
+    state.confirming = true;
+    state.message = Some((
+        "将用云端内容覆写本机的凭证与任务文件".to_owned(),
+        Tone::Warning,
+    ));
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(text.contains("enter 确认导入"), "{text}");
+    assert!(
+        !text.contains("^t 测试连接"),
+        "确认时不该提示测试连线：{text}"
+    );
+    let colors = row_colors(terminal.backend(), "覆写本机");
+    assert!(
+        colors.contains(&THEME.yellow),
+        "确认提示应为警告色：{colors:?}"
+    );
 }

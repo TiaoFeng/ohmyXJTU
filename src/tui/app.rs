@@ -951,11 +951,15 @@ impl SettingsState {
 pub struct SyncImportState {
     /// 連線設定表單（伺服器位址／帳號／應用密碼）。
     pub form: FormState,
-    /// 表單是從首次設定（尚未有憑證檔）開啟的；`esc` 據此返回對應畫面。
+    /// 表單是從首次設定（尚未有憑證檔）開啟的；`esc` 據此返回對應畫面，
+    /// 確認文字也據此調整。
     pub from_setup: bool,
     /// 是否正在測試連線或導入。
     pub busy: bool,
-    /// 測試連線的結果或錯誤訊息，附帶語意色（成功用綠、失敗用紅）。
+    /// 是否已進入「確認寫入」步驟：導入會覆寫本機檔案且不保留備份，因此
+    /// 第一次 `enter` 只跳到確認，再按一次才真的下載。
+    pub confirming: bool,
+    /// 測試連線的結果、確認提示或錯誤訊息，附帶語意色。
     pub message: Option<(String, Tone)>,
 }
 
@@ -966,6 +970,7 @@ impl SyncImportState {
             form: FormState::sync_config(&SyncStateView::default()),
             from_setup,
             busy: false,
+            confirming: false,
             message: None,
         }
     }

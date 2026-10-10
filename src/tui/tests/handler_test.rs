@@ -739,8 +739,45 @@ fn sync_import_tests_and_imports_with_the_entered_settings() {
     assert!(rx.try_recv().is_err(), "处理中不应重复送出");
 }
 
+/// 導入會覆寫本機檔案且不留備份：第一次 `enter` 只跳到確認，不送出任務。
 #[test]
-fn sync_import_enter_submits_the_import() {
+fn sync_import_asks_for_confirmation_before_overwriting() {
+    let (jobs, rx) = channel();
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::SyncImport(SyncImportState::new(false)));
+    press(&mut app, &jobs, KeyCode::Tab);
+    type_text(&mut app, &jobs, "u@example.com");
+    press(&mut app, &jobs, KeyCode::Tab);
+    type_text(&mut app, &jobs, "app-pass");
+
+    // 第一次 enter：只顯示確認，不送出。
+    press(&mut app, &jobs, KeyCode::Enter);
+    assert!(rx.try_recv().is_err(), "确认前不得送出导入任务");
+    let Screen::SyncImport(state) = &app.screen else {
+        panic!("应停留在导入画面：{:?}", app.screen);
+    };
+    assert!(state.confirming, "应进入确认步骤");
+    let (message, tone) = state.message.clone().expect("应显示确认提示");
+    assert!(message.contains("覆写"), "应说明会覆写本机文件：{message}");
+    assert!(message.contains("不保留备份"), "{message}");
+    assert_eq!(tone, Tone::Warning, "确认提示应为警告色");
+
+    // 確認期間不得編輯欄位（設定已驗證過，內容不該再變）。
+    let before = state.form.value("坚果云账号").to_owned();
+    type_text(&mut app, &jobs, "x");
+    let Screen::SyncImport(state) = &app.screen else {
+        panic!("应停留在导入画面");
+    };
+    assert_eq!(state.form.value("坚果云账号"), before, "确认时不应接受输入");
+
+    // 第二次 enter：真的送出導入。
+    press(&mut app, &jobs, KeyCode::Enter);
+    assert!(matches!(rx.try_recv(), Ok(Job::SyncImport { .. })));
+}
+
+/// 確認步驟的 `esc` 回到表單繼續編輯（不離開畫面，已填的設定保留）。
+#[test]
+fn sync_import_confirmation_can_be_cancelled() {
     let (jobs, rx) = channel();
     let mut app = App::new(AccessPolicy::Auto);
     app.set_screen(Screen::SyncImport(SyncImportState::new(false)));
@@ -749,7 +786,42 @@ fn sync_import_enter_submits_the_import() {
     press(&mut app, &jobs, KeyCode::Tab);
     type_text(&mut app, &jobs, "app-pass");
     press(&mut app, &jobs, KeyCode::Enter);
-    assert!(matches!(rx.try_recv(), Ok(Job::SyncImport { .. })));
+    press(&mut app, &jobs, KeyCode::Esc);
+
+    let Screen::SyncImport(state) = &app.screen else {
+        panic!("esc 应回到表单而非离开画面：{:?}", app.screen);
+    };
+    assert!(!state.confirming, "应取消确认");
+    assert!(state.message.is_none(), "确认提示应清除");
+    assert_eq!(
+        state.form.value("坚果云账号"),
+        "u@example.com",
+        "设定应保留"
+    );
+    assert!(rx.try_recv().is_err(), "取消确认不得送出任务");
+}
+
+/// 首次設定（本機尚無憑證檔）的確認文字不得說「覆寫」。
+#[test]
+fn sync_import_confirmation_wording_matches_the_source_screen() {
+    let (jobs, _rx) = channel();
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::SyncImport(SyncImportState::new(true)));
+    press(&mut app, &jobs, KeyCode::Tab);
+    type_text(&mut app, &jobs, "u@example.com");
+    press(&mut app, &jobs, KeyCode::Tab);
+    type_text(&mut app, &jobs, "app-pass");
+    press(&mut app, &jobs, KeyCode::Enter);
+
+    let Screen::SyncImport(state) = &app.screen else {
+        panic!("应停留在导入画面");
+    };
+    let (message, _) = state.message.clone().expect("应显示确认提示");
+    assert!(message.contains("写入本机"), "{message}");
+    assert!(
+        !message.contains("覆写"),
+        "首次设定没有东西会被覆写：{message}"
+    );
 }
 
 #[test]

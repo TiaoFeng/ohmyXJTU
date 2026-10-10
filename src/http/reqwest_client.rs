@@ -1,5 +1,6 @@
 //! 以 `reqwest` 實作的 HTTP 客戶端。
 
+use std::io::Read;
 use std::time::{Duration, Instant};
 
 use reqwest::blocking::Client;
@@ -102,6 +103,10 @@ impl ReqwestClient {
         let mut builder = match request.method {
             Method::Get => self.client.get(&request.url),
             Method::Post => self.client.post(&request.url),
+            Method::Put => self.client.put(&request.url),
+            Method::Delete => self.client.delete(&request.url),
+            Method::Head => self.client.head(&request.url),
+            Method::Mkcol => self.client.request(mkcol_method(), &request.url),
         };
 
         for (name, value) in &request.headers {
@@ -113,6 +118,7 @@ impl ReqwestClient {
         builder = match &request.body {
             Some(Body::Form(fields)) => builder.form(fields),
             Some(Body::Json(value)) => builder.json(value),
+            Some(Body::Bytes(bytes)) => builder.body(bytes.clone()),
             None => builder,
         };
 
@@ -132,7 +138,10 @@ impl ReqwestClient {
                 )
             })
             .collect();
-        let body = response.bytes().map_err(map_error)?.to_vec();
+        let body = match request.max_body {
+            Some(limit) => read_body_limited(response, limit)?,
+            None => response.bytes().map_err(map_error)?.to_vec(),
+        };
 
         Ok(HttpResponse {
             status,
@@ -152,6 +161,7 @@ impl ReqwestClient {
         let mut body = request.body.clone();
         let mut headers = request.headers.clone();
         let mut url = request.url.clone();
+        let max_body = request.max_body;
         let mut hops = 0_usize;
         // 逾時是**整條請求**的預算，不是每一跳各算一次：逐跳各自吃滿逾時的話，
         // 一條十跳的慢速重導鏈最壞會拖上「逾時 × 10」，而工作執行緒在這段期間
@@ -180,6 +190,7 @@ impl ReqwestClient {
                 body: body.clone(),
                 timeout: Some(remaining_timeout(deadline)),
                 follow_redirects: false,
+                max_body,
             })?;
 
             let Some(location) = redirect_location(&response) else {
@@ -326,10 +337,29 @@ fn plan_redirect(
 
     Ok(RedirectPlan {
         url: next.to_string(),
-        method: if keeps_method { method } else { Method::Get },
+        method: redirect_method(status, method),
         keep_body: resend_body,
         keep_headers: same_origin,
     })
+}
+
+/// 依狀態碼決定下一跳的方法。
+///
+/// 307/308 保留原方法（與主體，見上）；301/302/303 對 HEAD 保留 HEAD，否則
+/// HEAD 會變成下載主體；其餘（含 POST／PUT／DELETE 的一般重導）一律改用 GET。
+fn redirect_method(status: u16, method: Method) -> Method {
+    if matches!(status, 307 | 308) {
+        return method;
+    }
+    match method {
+        Method::Get | Method::Head => method,
+        Method::Post | Method::Put | Method::Delete | Method::Mkcol => Method::Get,
+    }
+}
+
+/// WebDAV 的 `MKCOL` 方法（`reqwest` 沒有提供對應常數）。
+fn mkcol_method() -> reqwest::Method {
+    reqwest::Method::from_bytes(b"MKCOL").expect("MKCOL 是合法的方法名")
 }
 
 /// 網址的可比較來源（協定 ＋ 主機 ＋ 有效埠）。
@@ -413,6 +443,35 @@ fn build_client(user_agent: &str, timeout: Duration) -> AppResult<Client> {
 /// URL 與查詢參數，避免把敏感資訊帶進使用者可見訊息。
 fn map_error(err: reqwest::Error) -> AppError {
     AppError::network_kind(classify(&err), describe(&err))
+}
+
+/// 讀取回應本文，超過 `limit` 即中止。
+///
+/// 有 `Content-Length` 時先據以拒絕，避免把超大本文讀進記憶體；否則邊讀邊計，
+/// 一旦超過即停（`take(limit + 1)` 保證讀不到更多）。
+fn read_body_limited(response: reqwest::blocking::Response, limit: u64) -> AppResult<Vec<u8>> {
+    if let Some(length) = response.content_length()
+        && length > limit
+    {
+        return Err(body_too_large(length, limit));
+    }
+    let mut body = Vec::new();
+    response
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut body)
+        .map_err(|err| AppError::network(format!("读取响应正文失败：{err}")))?;
+    if body.len() as u64 > limit {
+        return Err(body_too_large(body.len() as u64, limit));
+    }
+    Ok(body)
+}
+
+/// 回應本文超過上限的錯誤。
+///
+/// 用專屬變體而非 `Network`：伺服器正常回應，只是內容太大，訊息不該被誤讀
+/// 成連線失敗（也因此在工作者眼中不可重試）。
+fn body_too_large(size: u64, limit: u64) -> AppError {
+    AppError::ResponseTooLarge { size, limit }
 }
 
 /// 依錯誤鏈判斷網路錯誤類別。

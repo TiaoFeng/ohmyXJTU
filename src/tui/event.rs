@@ -14,12 +14,13 @@ use crate::domain::todo::Task;
 use crate::model::{ActivityDetailView, FlowData, ScheduleData};
 use crate::session::{AccessMode, SiteKind};
 use crate::sites::lms::LmsActivity;
-use crate::task::{CoursesData, Event, FailedTarget, HomeworkUpdate, Job};
+use crate::task::{CoursesData, Event, FailedTarget, HomeworkUpdate, Job, SyncStateView};
 use crate::text::{MAX_INLINE_CHARS, sanitize_inline};
+use crate::tone::Tone;
 
 use super::app::{
     App, FormKind, FormState, HomeworkData, LmsLevel, LoginScreen, Page, Screen, SettingsState,
-    TermPickerState,
+    SyncMenuState, TermPickerState,
 };
 use super::controller;
 use super::text::InputLine;
@@ -56,7 +57,7 @@ pub(crate) fn apply_event(app: &mut App, event: Event, jobs: &Sender<Job>) {
             app.cancel_loading(target);
         }
         Event::Schedule(data) => apply_schedule(app, *data),
-        Event::Tasks(tasks) => apply_tasks(app, tasks),
+        Event::Tasks(tasks) => apply_tasks(app, tasks, jobs),
         Event::Homework(update) => apply_homework(app, update),
         Event::HomeworkNeedsTerm {
             options,
@@ -85,12 +86,20 @@ pub(crate) fn apply_event(app: &mut App, event: Event, jobs: &Sender<Job>) {
                 app.set_screen(Screen::Main);
             }
             app.set_message("账号已更新");
+            // 憑證檔剛被改寫：自動同步開啟時一併上傳（見 `request_auto_sync`）。
+            request_auto_sync(app, jobs);
         }
         Event::CredentialSaveFailed(message) => apply_credential_save_failed(app, message),
-        Event::PassphraseUpdated => apply_passphrase_updated(app),
+        Event::PassphraseUpdated => apply_passphrase_updated(app, jobs),
         Event::AccessPolicyUpdated(policy) => apply_access_policy_updated(app, policy),
         Event::Notice(message) => app.set_message(message),
         Event::Warning(message) => app.set_warning_message(message),
+        Event::SyncState(view) => apply_sync_state(app, *view),
+        Event::SyncTestResult { ok, message } => apply_sync_test_result(app, ok, message),
+        Event::SyncImported { message } => apply_sync_imported(app, message),
+        Event::SyncDone { summary } => app.set_message(summary),
+        Event::SyncConflict { message } => app.set_warning_message(message),
+        Event::SyncRelocked => apply_sync_relocked(app),
         Event::Failed {
             what,
             message,
@@ -123,6 +132,60 @@ fn apply_vault_ready(app: &mut App, jobs: &Sender<Job>) {
         controller::ensure_page(app, jobs);
     }
     app.set_message("凭证已就绪");
+}
+
+/// 同步設定狀態變更：更新顯示用狀態；若同步設定表單剛保存成功則關閉它。
+fn apply_sync_state(app: &mut App, view: SyncStateView) {
+    let configured = view.configured;
+    let form_open = matches!(
+        &app.screen,
+        Screen::SettingsForm(form) if form.kind == FormKind::SyncConfig
+    );
+    app.sync = view;
+    if configured && form_open {
+        app.set_screen(Screen::SyncMenu(SyncMenuState::default()));
+        app.set_message("坚果云同步已启用");
+    }
+}
+
+/// 堅果雲連線測試結果：導入畫面就地顯示，其餘情況顯示於底欄。
+fn apply_sync_test_result(app: &mut App, ok: bool, message: String) {
+    let text = if ok {
+        format!("连接成功：{message}（按 enter 或 ^s 导入）")
+    } else {
+        format!("连接失败：{message}")
+    };
+    let tone = if ok { Tone::Success } else { Tone::Danger };
+    if let Screen::SyncImport(state) = &mut app.screen {
+        state.busy = false;
+        state.message = Some((text, tone));
+        return;
+    }
+    if ok {
+        app.set_message(text);
+    } else {
+        app.set_warning_message(text);
+    }
+}
+
+/// 已從堅果雲導入：本機憑證檔已就緒，回到解鎖畫面請使用者輸入加密口令。
+fn apply_sync_imported(app: &mut App, message: String) {
+    app.set_screen(Screen::Unlock(FormState::unlock()));
+    app.set_message(message);
+}
+
+/// 下載已覆寫本機檔案：工作者已鎖定金鑰，回到解鎖畫面重新輸入口令。
+///
+/// 記憶體中的憑證與任務清單仍是下載前的內容（見 `Worker::relock_after_pull`），
+/// 因此不能留在主畫面繼續操作——那會用舊內容覆寫剛下載的檔案。重新解鎖也會
+/// 當場驗證下載的憑證檔能否以目前口令解開。
+fn apply_sync_relocked(app: &mut App) {
+    app.login = None;
+    app.login_cancel_pending = false;
+    app.clear_site_modes();
+    app.invalidate_data(true);
+    app.set_screen(Screen::Unlock(FormState::unlock()));
+    app.set_message("已下载云端内容，请重新输入加密口令解锁以应用");
 }
 
 /// 需要圖片驗證碼：保留上一次的錯誤訊息，輸入框清空。
@@ -352,7 +415,7 @@ fn apply_homework(app: &mut App, update: HomeworkUpdate) {
 /// 這裡刻意不切換根畫面：解鎖時任務服務會先回報一次快照（`InitTasks` 排在
 /// `VaultReady` 之前送出），那時介面還停在解鎖表單，不該被任務快照拉進主畫面
 /// ——進入主畫面由 `VaultReady` 負責。
-fn apply_tasks(app: &mut App, tasks: Vec<Task>) {
+fn apply_tasks(app: &mut App, tasks: Vec<Task>, jobs: &Sender<Job>) {
     let previous = app.task_page_selected_id();
     app.task_page.tasks = tasks;
     if let Screen::TaskForm(form) = &app.screen
@@ -366,6 +429,8 @@ fn apply_tasks(app: &mut App, tasks: Vec<Task>) {
         selection.retain(|id| alive.contains(id));
     }
     app.anchor_task_selection(previous);
+    // 任務清單剛被改寫：自動同步已開啟時一併上傳（見 `request_auto_sync`）。
+    request_auto_sync(app, jobs);
 }
 
 /// 課程清單更新：以穩定的課程識別碼重新定位目前課程。
@@ -457,7 +522,7 @@ fn apply_credential_save_failed(app: &mut App, message: String) {
 }
 
 /// 修改口令成功：離開處理中狀態並回到設定選單。
-fn apply_passphrase_updated(app: &mut App) {
+fn apply_passphrase_updated(app: &mut App, jobs: &Sender<Job>) {
     if matches!(
         &app.screen,
         Screen::SettingsForm(form) if form.kind == FormKind::ChangePassphrase
@@ -465,6 +530,20 @@ fn apply_passphrase_updated(app: &mut App) {
         app.set_screen(Screen::Settings(SettingsState::open(app.access_policy)));
     }
     app.set_message("加密口令已更新");
+    // 憑證檔（連同任務檔）已用新口令重新加密：自動同步開啟時一併上傳。
+    request_auto_sync(app, jobs);
+}
+
+/// 本機受同步的檔案剛被改寫：自動同步已開啟時請工作者上傳。
+///
+/// 涵蓋三條寫入路徑——任務變更（`Event::Tasks`）、修改帳號（`Event::AccountUpdated`）
+/// 與修改加密口令（`Event::PassphraseUpdated`）。少了後兩者的話，改完帳號或口令
+/// 之後雲端會一直留著舊憑證，直到下一次動到任務或手動同步。工作者在沒有變更時
+/// 不動作（只做一次 `HEAD`），因此這裡不必自行比對。
+fn request_auto_sync(app: &App, jobs: &Sender<Job>) {
+    if app.sync.auto_sync {
+        let _ = jobs.send(Job::SyncAuto);
+    }
 }
 
 /// 訪問模式已保存：設定彈窗若開著，更新草稿並解除「保存中」，彈窗不關閉。
@@ -500,14 +579,18 @@ fn apply_failure(
         let text = format!("{what}失败：{message}");
         match target {
             FailedTarget::Login => set_login_error(app, login_site, text.clone()),
-            FailedTarget::Settings => {
+            FailedTarget::Settings | FailedTarget::Sync => {
                 // 設定保存失敗：保留彈窗與草稿，僅解除「保存中」；
-                // 設定表單失敗則就地顯示錯誤並恢復輸入。
+                // 設定表單失敗則就地顯示錯誤並恢復輸入；導入畫面就地顯示。
                 match &mut app.screen {
                     Screen::Settings(state) => state.saving = false,
                     Screen::SettingsForm(form) => {
                         form.busy = false;
                         form.error = Some(text.clone());
+                    }
+                    Screen::SyncImport(state) => {
+                        state.busy = false;
+                        state.message = Some((text.clone(), Tone::Danger));
                     }
                     _ => {}
                 }

@@ -177,6 +177,9 @@ impl Harness {
         )
         .expect("启动任务服务");
         let tasks = crate::task::tasks::TaskHandle::new(task_tx.clone());
+        let webdav: Arc<dyn HttpClient> = fake_client(Arc::new(|_: &HttpRequest| {
+            Err(AppError::config("测试未注入 WebDAV 后端"))
+        }));
 
         Self {
             worker: Worker {
@@ -207,6 +210,20 @@ impl Harness {
                 chosen_term: None,
                 timing: LoadTiming::default(),
                 login_started: None,
+                sync: crate::sync::config::SyncStore::at(dir.path().join("sync.vault")),
+                webdav,
+                pending_sync: None,
+                sync_local: vec![
+                    (
+                        crate::sync::config::SyncFile::Credentials,
+                        vault.path().to_path_buf(),
+                    ),
+                    (
+                        crate::sync::config::SyncFile::Tasks,
+                        dir.path().join("tasks.vault"),
+                    ),
+                ],
+                sync_pulled: false,
                 shutdown: false,
                 tasks,
             },
@@ -233,6 +250,19 @@ impl Harness {
     /// 測試用任務檔路徑。
     fn tasks_path(&self) -> std::path::PathBuf {
         self._dir.path().join("tasks.vault")
+    }
+
+    /// 測試用同步設定檔路徑。
+    fn sync_path(&self) -> std::path::PathBuf {
+        self._dir.path().join("sync.vault")
+    }
+
+    /// 以指定的回應取代 WebDAV 後端（同步測試用）。
+    fn set_webdav(
+        &mut self,
+        responder: impl Fn(&HttpRequest) -> AppResult<HttpResponse> + Send + Sync + 'static,
+    ) {
+        self.worker.webdav = fake_client(Arc::new(responder));
     }
 
     /// 直接標記考勤與思源學堂都已登入（跳過登入流程）。
@@ -4824,10 +4854,15 @@ fn only_open_activity_is_interactive() {
     }
 }
 
-/// 只有發送簡訊驗證碼不適合自動重送：重送可能讓使用者收到兩條簡訊。
+/// 兩類任務不適合自動重送：發簡訊有可見副作用，下載型同步失敗時狀態可能已改變。
 #[test]
-fn only_the_sms_send_is_not_replayable() {
+fn the_sms_send_and_the_pulling_sync_jobs_are_not_replayable() {
+    // 重送可能讓使用者收到兩條簡訊。
     assert!(!Job::SendMfaCode.is_replayable(), "发送短信有可见副作用");
+    // 下載可能已覆寫本機並重新鎖定金鑰：重試會在已鎖定的存儲上再跑一次。
+    for job in [Job::SyncNow, Job::SyncPull] {
+        assert!(!job.is_replayable(), "{job:?} 不应自动重送");
+    }
 
     for job in [
         Job::RefreshCaptcha,
@@ -4842,9 +4877,68 @@ fn only_the_sms_send_is_not_replayable() {
             course_id: None,
             kind: lms::ActivityKind::Homework,
         },
+        // 純上傳、連線測試與導入都是冪等的，也不會重新鎖定金鑰。
+        Job::SyncPush,
+        Job::SyncTestConnection {
+            config: crate::sync::config::SyncConfig::new("https://dav.example/dav/", "u", "p"),
+        },
+        Job::SyncImport {
+            config: crate::sync::config::SyncConfig::new("https://dav.example/dav/", "u", "p"),
+        },
     ] {
         assert!(job.is_replayable(), "{job:?} 可以原样重送");
     }
+}
+
+/// 下載型同步失敗不自動重送（重送只會再下載一次，並在已鎖定的存儲上失敗）。
+#[test]
+fn connection_errors_do_not_replay_the_sync_download() {
+    let mut harness = Harness::new(|_| Ok(html("")));
+    harness.seed_vault("secret123", &Credentials::new("3120000001", "pw-12345"));
+    harness
+        .dispatch(Job::Unlock {
+            passphrase: "secret123".into(),
+        })
+        .expect("解锁应成功");
+
+    // 下載一律以連線層失敗回應：那正是預設會自動重試的類別。
+    let gets = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&gets);
+    harness.set_webdav(move |request| match request.method {
+        Method::Get => {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Err(AppError::network_kind(
+                NetworkKind::Timeout,
+                "测试注入：下载超时",
+            ))
+        }
+        Method::Put => Ok(HttpResponse {
+            status: 201,
+            final_url: request.url.clone(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        }),
+        _ => Ok(html("")),
+    });
+    harness
+        .dispatch(Job::SetSyncConfig {
+            config: crate::sync::config::SyncConfig::new(
+                "https://dav.example/dav/",
+                "u@example.com",
+                "app-pass",
+            ),
+        })
+        .expect("保存同步设置应成功");
+
+    assert!(
+        harness.dispatch(Job::SyncPull).is_err(),
+        "下载失败应向上报错"
+    );
+    assert_eq!(
+        gets.load(Ordering::SeqCst),
+        1,
+        "同步失败不得自动重送（每次重送都会再下载一次）"
+    );
 }
 
 /// 送碼端點連線失敗時直接回報，不自動重送（免得發出兩條簡訊）。
@@ -6496,6 +6590,12 @@ fn failed_account_switch_does_not_revert_a_later_passphrase_change() {
         }
         flow(request)
     });
+    // 修改口令在設定頁進行，必先解鎖：任務存儲需持有金鑰才可換鑰。這裡直接讓
+    // 任務服務載入任務檔，而不走 `Job::Unlock`——後者會以真實 HTTP 客戶端重建
+    // 會話，令本測試注入的假後端失效（接下來的換帳號需要假後端才能穩定離線）。
+    harness.dispatch_task(Job::InitTasks {
+        passphrase: "secret123".into(),
+    });
 
     // 1) 換帳號斷網 → 失敗。
     assert!(
@@ -6504,7 +6604,8 @@ fn failed_account_switch_does_not_revert_a_later_passphrase_change() {
                 passphrase: "secret123".into(),
                 credentials: Credentials::new("3120000002", "new-password"),
             })
-            .is_err()
+            .is_err(),
+        "断网时换账号应当失败"
     );
 
     // 2) 使用者修改加密口令。
@@ -7487,9 +7588,15 @@ fn interface_sender_reaches_the_task_service() {
         ..Config::default()
     };
 
-    let (jobs, events) =
-        crate::task::worker::spawn_with_tasks(config, vault, dir.path().join("tasks.vault"))
-            .expect("启动工作者与任务服务");
+    let webdav: Arc<dyn HttpClient> = Arc::new(FakeClient::new(Vec::new()));
+    let (jobs, events) = crate::task::worker::spawn_with_tasks(
+        config,
+        vault,
+        dir.path().join("tasks.vault"),
+        dir.path().join("sync.vault"),
+        webdav,
+    )
+    .expect("启动工作者与任务服务");
 
     jobs.send(Job::Unlock {
         passphrase: "secret123".into(),
@@ -7530,4 +7637,826 @@ fn interface_sender_reaches_the_task_service() {
     let mut store = TaskStore::at(dir.path().join("tasks.vault"));
     store.init("secret123").expect("以同一口令载入");
     assert_eq!(store.tasks().len(), 1);
+}
+
+#[test]
+fn sync_now_uploads_local_files_when_the_remote_is_empty() {
+    let mut harness = Harness::new(|_| Ok(html("")));
+    harness.seed_vault("secret123", &Credentials::new("3120000001", "pw-12345"));
+    harness
+        .dispatch(Job::Unlock {
+            passphrase: "secret123".into(),
+        })
+        .expect("解锁应成功");
+    // 遠端沒有任何檔案：本機憑證檔會被上傳，任務檔不存在則略過。
+    // `set_sync_config` 會先測試連線與寫入權限（`WebDav::check`：PUT 探測檔後
+    // 立即 DELETE），因此須先注入後端。
+    harness.set_webdav(|request| match request.method {
+        Method::Head => Ok(HttpResponse::new(404, request.url.clone(), b"".as_slice())),
+        Method::Put => Ok(HttpResponse {
+            status: 201,
+            final_url: request.url.clone(),
+            headers: vec![("ETag".to_owned(), "v1".to_owned())],
+            body: Vec::new(),
+        }),
+        _ => Ok(html("")),
+    });
+
+    harness
+        .dispatch(Job::SetSyncConfig {
+            config: crate::sync::config::SyncConfig::new(
+                "https://dav.example/dav/",
+                "u@example.com",
+                "app-pass",
+            ),
+        })
+        .expect("保存同步设置应成功");
+
+    harness.dispatch(Job::SyncNow).expect("同步应成功");
+    let events = harness.drain_events();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::SyncDone { .. })),
+        "应回报同步完成：{events:?}"
+    );
+    assert!(harness.sync_path().is_file(), "同步设置应已写入磁盘");
+    // 只有上傳時不該動到工作階段：使用者可以繼續操作。
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::SyncRelocked)),
+        "纯上传不应锁定会话：{events:?}"
+    );
+    assert!(harness.worker.session.is_some(), "纯上传后会话应保留");
+}
+
+#[test]
+fn sync_auto_only_uploads_when_enabled() {
+    let mut harness = Harness::new(|_| Ok(html("")));
+    harness.seed_vault("secret123", &Credentials::new("3120000001", "pw-12345"));
+    harness
+        .dispatch(Job::Unlock {
+            passphrase: "secret123".into(),
+        })
+        .expect("解锁应成功");
+
+    // 尚未設定：自動同步靜默跳過（不連網、不發完成事件）。
+    harness.dispatch(Job::SyncAuto).expect("未配置时应静默跳过");
+    assert!(!harness.saw(|event| matches!(event, Event::SyncDone { .. })));
+
+    harness.set_webdav(|request| match request.method {
+        Method::Head => Ok(HttpResponse::new(404, request.url.clone(), b"".as_slice())),
+        Method::Put => Ok(HttpResponse {
+            status: 201,
+            final_url: request.url.clone(),
+            headers: vec![("ETag".to_owned(), "v1".to_owned())],
+            body: Vec::new(),
+        }),
+        _ => Ok(html("")),
+    });
+    harness
+        .dispatch(Job::SetSyncConfig {
+            config: crate::sync::config::SyncConfig::new(
+                "https://dav.example/dav/",
+                "u@example.com",
+                "app-pass",
+            ),
+        })
+        .expect("保存同步设置应成功");
+    harness
+        .dispatch(Job::SetSyncAuto { enabled: true })
+        .expect("开启自动同步");
+
+    // 開啟後：本機憑證檔（遠端不存在）會被自動上傳。
+    harness.dispatch(Job::SyncAuto).expect("自动同步应成功");
+    assert!(harness.saw(|event| matches!(event, Event::SyncDone { .. })));
+}
+
+#[test]
+fn sync_now_reports_a_conflict_when_the_upload_is_rejected() {
+    let mut harness = Harness::new(|_| Ok(html("")));
+    harness.seed_vault("secret123", &Credentials::new("3120000001", "pw-12345"));
+    harness
+        .dispatch(Job::Unlock {
+            passphrase: "secret123".into(),
+        })
+        .expect("解锁应成功");
+
+    harness.set_webdav(|request| {
+        // 連線測試的探測檔一律可寫。
+        if request.url.contains("ohmyXJTU-probe.tmp") {
+            return Ok(HttpResponse {
+                status: 201,
+                final_url: request.url.clone(),
+                headers: Vec::new(),
+                body: Vec::new(),
+            });
+        }
+        match request.method {
+            // 遠端不存在 → 本機變更即計畫為 Push。
+            Method::Head => Ok(HttpResponse::new(404, request.url.clone(), b"".as_slice())),
+            // 上傳被拒（模擬遠端已在他處改動，If-Match 未通過）。
+            Method::Put => Ok(HttpResponse::new(412, request.url.clone(), b"".as_slice())),
+            _ => Ok(html("")),
+        }
+    });
+
+    harness
+        .dispatch(Job::SetSyncConfig {
+            config: crate::sync::config::SyncConfig::new(
+                "https://dav.example/dav/",
+                "u@example.com",
+                "app-pass",
+            ),
+        })
+        .expect("保存同步设置应成功");
+
+    harness
+        .dispatch(Job::SyncNow)
+        .expect("同步应成功（冲突以事件回报）");
+    let events = harness.drain_events();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::SyncConflict { .. })),
+        "上传被拒时应回报冲突：{events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::SyncDone { .. })),
+        "冲突时不该回报同步完成：{events:?}"
+    );
+}
+
+/// 下載會覆寫本機檔案：工作者必須丟棄金鑰與會話，並要求使用者重新解鎖。
+///
+/// 記憶體中的任務清單仍是下載**前**的版本，任務服務的 `save()` 會用它覆寫
+/// 剛下載的 `tasks.vault`（下一次自動同步再把舊清單上傳回雲端）；憑證也會
+/// 沿用舊帳號。這裡以「重新解鎖前不得再寫入同步記錄」驗證金鑰真的被丟棄。
+#[test]
+fn sync_pull_locks_the_session_and_demands_a_new_unlock() {
+    let remote = crate::credentials::envelope::seal("secret123", "ohmyXJTU-vault", b"remote-vault")
+        .expect("建立远端容器")
+        .0;
+
+    let mut harness = Harness::new(|_| Ok(html("")));
+    harness.seed_vault("secret123", &Credentials::new("3120000001", "pw-12345"));
+    harness
+        .dispatch(Job::Unlock {
+            passphrase: "secret123".into(),
+        })
+        .expect("解锁应成功");
+    assert!(harness.worker.session.is_some(), "解锁后应有会话");
+
+    // 連線測試的探測檔可寫；下載一律回同一個容器。
+    harness.set_webdav(move |request| match request.method {
+        Method::Put => Ok(HttpResponse {
+            status: 201,
+            final_url: request.url.clone(),
+            headers: vec![("ETag".to_owned(), "v1".to_owned())],
+            body: Vec::new(),
+        }),
+        Method::Get => Ok(HttpResponse {
+            status: 200,
+            final_url: request.url.clone(),
+            headers: vec![("ETag".to_owned(), "v2".to_owned())],
+            body: remote.clone(),
+        }),
+        _ => Ok(HttpResponse::new(404, request.url.clone(), b"".as_slice())),
+    });
+
+    harness
+        .dispatch(Job::SetSyncConfig {
+            config: crate::sync::config::SyncConfig::new(
+                "https://dav.example/dav/",
+                "u@example.com",
+                "app-pass",
+            ),
+        })
+        .expect("保存同步设置应成功");
+
+    harness.dispatch(Job::SyncPull).expect("下载应成功");
+    let events = harness.drain_events();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::SyncRelocked)),
+        "下载后应要求重新解锁：{events:?}"
+    );
+    assert!(harness.worker.session.is_none(), "下载后应丢弃会话");
+    assert!(
+        harness.worker.credentials.is_none(),
+        "下载后应丢弃内存中的凭证"
+    );
+
+    // 金鑰已丟棄：重新解鎖前不得再寫入同步記錄（否則會以舊記錄覆寫下載結果）。
+    assert!(
+        harness.dispatch(Job::SyncPush).is_err(),
+        "锁定后不应再写入同步记录"
+    );
+}
+
+/// 下載已覆寫本機後，後續檔案失敗也必須重新鎖定。
+///
+/// 這是修復的核心：`pull` 先寫入憑證檔，接著任務檔下載失敗經 `?` 提前返回。
+/// 若錯誤路徑略過重新鎖定，記憶體中的舊憑證／舊任務清單會反過來覆寫剛下載的
+/// 內容，且自動同步會把舊清單上傳回雲端。
+#[test]
+fn sync_pull_relocks_even_when_a_later_download_fails() {
+    let remote = crate::credentials::envelope::seal("secret123", "ohmyXJTU-vault", b"remote-vault")
+        .expect("建立远端容器")
+        .0;
+
+    let mut harness = Harness::new(|_| Ok(html("")));
+    harness.seed_vault("secret123", &Credentials::new("3120000001", "pw-12345"));
+    harness
+        .dispatch(Job::Unlock {
+            passphrase: "secret123".into(),
+        })
+        .expect("解锁应成功");
+    assert!(harness.worker.session.is_some(), "解锁后应有会话");
+
+    // 探測檔可寫；憑證下載成功（先覆寫本機）；任務下載失敗（伺服器 500）。
+    harness.set_webdav(move |request| match request.method {
+        Method::Put => Ok(HttpResponse {
+            status: 201,
+            final_url: request.url.clone(),
+            headers: vec![("ETag".to_owned(), "v1".to_owned())],
+            body: Vec::new(),
+        }),
+        Method::Get if request.url.contains("tasks") => {
+            Ok(HttpResponse::new(500, request.url.clone(), b"".as_slice()))
+        }
+        Method::Get => Ok(HttpResponse {
+            status: 200,
+            final_url: request.url.clone(),
+            headers: vec![("ETag".to_owned(), "v2".to_owned())],
+            body: remote.clone(),
+        }),
+        _ => Ok(HttpResponse::new(404, request.url.clone(), b"".as_slice())),
+    });
+
+    harness
+        .dispatch(Job::SetSyncConfig {
+            config: crate::sync::config::SyncConfig::new(
+                "https://dav.example/dav/",
+                "u@example.com",
+                "app-pass",
+            ),
+        })
+        .expect("保存同步设置应成功");
+
+    assert!(
+        harness.dispatch(Job::SyncPull).is_err(),
+        "任务下载失败应向上报错"
+    );
+    let events = harness.drain_events();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::SyncRelocked)),
+        "已覆写本机时即使后续下载失败也必须重新锁定：{events:?}"
+    );
+    assert!(harness.worker.session.is_none(), "下载后应丢弃会话");
+    assert!(
+        harness.worker.credentials.is_none(),
+        "下载后应丢弃内存中的凭证"
+    );
+    // 金鑰已丟棄：重新解鎖前不得再寫入同步記錄。
+    assert!(
+        harness.dispatch(Job::SyncPush).is_err(),
+        "锁定后不应再写入同步记录"
+    );
+}
+
+/// 純上傳（無下載）不應鎖定會話，也不應在錯誤路徑誤鎖。
+#[test]
+fn sync_now_upload_only_keeps_the_session() {
+    let mut harness = Harness::new(|_| Ok(html("")));
+    harness.seed_vault("secret123", &Credentials::new("3120000001", "pw-12345"));
+    harness
+        .dispatch(Job::Unlock {
+            passphrase: "secret123".into(),
+        })
+        .expect("解锁应成功");
+
+    harness.set_webdav(|request| match request.method {
+        Method::Head => Ok(HttpResponse::new(404, request.url.clone(), b"".as_slice())),
+        Method::Put => Ok(HttpResponse {
+            status: 201,
+            final_url: request.url.clone(),
+            headers: vec![("ETag".to_owned(), "v1".to_owned())],
+            body: Vec::new(),
+        }),
+        _ => Ok(html("")),
+    });
+
+    harness
+        .dispatch(Job::SetSyncConfig {
+            config: crate::sync::config::SyncConfig::new(
+                "https://dav.example/dav/",
+                "u@example.com",
+                "app-pass",
+            ),
+        })
+        .expect("保存同步设置应成功");
+
+    harness.dispatch(Job::SyncNow).expect("同步应成功");
+    let events = harness.drain_events();
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::SyncRelocked)),
+        "纯上传不应锁定会话：{events:?}"
+    );
+    assert!(harness.worker.session.is_some(), "纯上传后会话应保留");
+}
+
+/// 評估（`HEAD`）之後、下載之前才發生的本機修改，不得被雲端覆寫。
+///
+/// 評估到暫停生效之間任務服務仍可寫入；這裡在任務檔的 `HEAD` 回應中模擬使用者
+/// 剛保存修改，智慧同步應在暫停後重新核對指紋並改報衝突，而不是下載覆寫它。
+#[test]
+fn sync_now_conflicts_when_the_local_file_changes_after_evaluation() {
+    let remote = crate::credentials::envelope::seal("secret123", "ohmyXJTU-vault", b"remote-vault")
+        .expect("建立远端容器")
+        .0;
+
+    let mut harness = Harness::new(|_| Ok(html("")));
+    harness.seed_vault("secret123", &Credentials::new("3120000001", "pw-12345"));
+    harness
+        .dispatch(Job::Unlock {
+            passphrase: "secret123".into(),
+        })
+        .expect("解锁应成功");
+
+    // 任務檔的 `HEAD` 期間模擬使用者保存了一筆修改；先注入後端（`SetSyncConfig`
+    // 會先測試連線）。
+    let cred_path = harness.worker.vault.path().to_path_buf();
+    let tasks_path = harness.tasks_path();
+    let edit_path = tasks_path.clone();
+    harness.set_webdav(move |request| {
+        let url = request.url.clone();
+        match request.method {
+            Method::Put => Ok(HttpResponse {
+                status: 201,
+                final_url: url,
+                headers: Vec::new(),
+                body: Vec::new(),
+            }),
+            Method::Delete => Ok(HttpResponse::new(204, url, b"".as_slice())),
+            Method::Head if request.url.contains("ohmyXJTU-tasks") => {
+                std::fs::write(&edit_path, b"user-edited").expect("模拟本机修改");
+                Ok(HttpResponse {
+                    status: 200,
+                    final_url: url,
+                    headers: vec![("ETag".to_owned(), "t1".to_owned())],
+                    body: Vec::new(),
+                })
+            }
+            Method::Head => Ok(HttpResponse {
+                status: 200,
+                final_url: url,
+                headers: vec![("ETag".to_owned(), "c0".to_owned())],
+                body: Vec::new(),
+            }),
+            Method::Get => Ok(HttpResponse {
+                status: 200,
+                final_url: url,
+                headers: vec![("ETag".to_owned(), "t1".to_owned())],
+                body: remote.clone(),
+            }),
+            _ => Ok(HttpResponse::new(404, url, b"".as_slice())),
+        }
+    });
+
+    harness
+        .dispatch(Job::SetSyncConfig {
+            config: crate::sync::config::SyncConfig::new(
+                "https://dav.example/dav/",
+                "u@example.com",
+                "app-pass",
+            ),
+        })
+        .expect("保存同步设置应成功");
+
+    // 本機憑證檔與上次同步一致（Noop）；任務檔不存在（hash 空）而遠端版本已變
+    // → 任務檔的計畫為 Pull。
+    let cred_hash = crate::sync::engine::fingerprint(&std::fs::read(&cred_path).unwrap());
+    let credentials_file = crate::sync::config::SyncFile::Credentials;
+    let tasks_file = crate::sync::config::SyncFile::Tasks;
+    harness
+        .worker
+        .sync
+        .set_record(
+            credentials_file,
+            crate::sync::config::FileRecord {
+                version: Some("c0".to_owned()),
+                etag: Some("\"c0\"".to_owned()),
+                hash: Some(cred_hash),
+            },
+        )
+        .expect("写入凭据记录");
+    harness
+        .worker
+        .sync
+        .set_record(
+            tasks_file,
+            crate::sync::config::FileRecord {
+                version: Some("t0".to_owned()),
+                etag: Some("\"t0\"".to_owned()),
+                hash: None,
+            },
+        )
+        .expect("写入任务记录");
+
+    harness.dispatch(Job::SyncNow).expect("冲突应以事件回报");
+    let events = harness.drain_events();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::SyncConflict { .. })),
+        "评估后本机变更应改报冲突：{events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::SyncRelocked)),
+        "冲突时不应下载、不应锁定会话：{events:?}"
+    );
+    assert_eq!(
+        std::fs::read(&tasks_path).unwrap(),
+        b"user-edited",
+        "评估后的本机修改不得被云端覆盖"
+    );
+    assert!(harness.worker.session.is_some(), "未下载应保留会话");
+}
+
+/// 下載後重新鎖定，排隊的修改口令操作仍想換鑰：必須被拒絕。
+///
+/// 修前 `TaskStore::rekey` 只擋「原檔讀不到」，不擋「金鑰已丟棄／同步暫停」，
+/// 於是下載期間排隊的修改口令會在下載後以舊清單重新加密落盤，覆寫剛下載的
+/// 任務檔。
+#[test]
+fn a_queued_change_passphrase_cannot_overwrite_a_downloaded_task_file() {
+    // 遠端憑證用本機真正加密的憑證容器（原口令可解開，讓流程能走到換任務鑰）；
+    // 遠端任務用任一結構完整的容器。
+    let mut harness = Harness::new(|_| Ok(html("")));
+    harness.seed_vault("secret123", &Credentials::new("3120000001", "pw-12345"));
+    harness
+        .dispatch(Job::Unlock {
+            passphrase: "secret123".into(),
+        })
+        .expect("解锁应成功");
+    let cred_container = std::fs::read(harness.worker.vault.path()).expect("读取本机凭证容器");
+    let tasks_container =
+        crate::credentials::envelope::seal("pw", "ohmyXJTU-tasks", b"remote-tasks")
+            .expect("建立远端任务容器")
+            .0;
+    let downloaded_tasks = tasks_container.clone();
+
+    harness.set_webdav(move |request| match request.method {
+        Method::Put => Ok(HttpResponse {
+            status: 201,
+            final_url: request.url.clone(),
+            headers: vec![("ETag".to_owned(), "v1".to_owned())],
+            body: Vec::new(),
+        }),
+        Method::Get => Ok(HttpResponse {
+            status: 200,
+            final_url: request.url.clone(),
+            headers: vec![("ETag".to_owned(), "v2".to_owned())],
+            body: if request.url.contains("tasks") {
+                tasks_container.clone()
+            } else {
+                cred_container.clone()
+            },
+        }),
+        _ => Ok(HttpResponse::new(404, request.url.clone(), b"".as_slice())),
+    });
+
+    harness
+        .dispatch(Job::SetSyncConfig {
+            config: crate::sync::config::SyncConfig::new(
+                "https://dav.example/dav/",
+                "u@example.com",
+                "app-pass",
+            ),
+        })
+        .expect("保存同步设置应成功");
+
+    // 以遠端覆寫本機：下載後重新鎖定（丟棄會話與任務金鑰）。
+    harness.dispatch(Job::SyncPull).expect("下载应成功");
+    assert!(harness.worker.session.is_none(), "下载后应丢弃会话");
+    let tasks_path = harness.tasks_path();
+    assert_eq!(
+        std::fs::read(&tasks_path).unwrap(),
+        downloaded_tasks,
+        "任务档应为下载内容"
+    );
+
+    // 排隊的修改口令（模擬下載期間使用者提交）在下載後才執行：必須被拒絕，
+    // 且不得改動下載的任務檔。
+    assert!(
+        harness
+            .dispatch(Job::ChangePassphrase {
+                old: "secret123".into(),
+                new: "new-secret456".into(),
+            })
+            .is_err(),
+        "锁定后修改口令应被拒绝"
+    );
+    assert_eq!(
+        std::fs::read(&tasks_path).unwrap(),
+        downloaded_tasks,
+        "被拒绝的修改口令不得覆写下载的任务档"
+    );
+    // 憑證檔不得被換鑰：仍能以原口令解開。
+    harness
+        .worker
+        .vault
+        .load("secret123")
+        .expect("凭证应仍以原口令可解");
+}
+
+/// 遠端沒有這個檔案時一律由本機補上（雲端檔案被刪除、或換到新的空伺服器）。
+///
+/// 舊碼把「遠端 404」當成「遠端沒變」：本機指紋與上次記錄相符時整個同步成了
+/// `Noop`——「立即同步」回報「上传 0，下载 0」，雲端卻始終是空的。
+#[test]
+fn a_missing_remote_file_is_pushed_instead_of_becoming_a_noop() {
+    let mut harness = Harness::new(|_| Ok(html("")));
+    harness.seed_vault("secret123", &Credentials::new("3120000001", "pw-12345"));
+    harness
+        .dispatch(Job::Unlock {
+            passphrase: "secret123".into(),
+        })
+        .expect("解锁应成功");
+
+    // 伺服器永遠回報「檔案不存在」，但接受上傳。
+    harness.set_webdav(|request| match request.method {
+        Method::Head => Ok(HttpResponse::new(404, request.url.clone(), b"".as_slice())),
+        Method::Put => Ok(HttpResponse {
+            status: 201,
+            final_url: request.url.clone(),
+            headers: vec![("ETag".to_owned(), "v1".to_owned())],
+            body: Vec::new(),
+        }),
+        _ => Ok(html("")),
+    });
+    let config = |url: &str| crate::sync::config::SyncConfig::new(url, "u@example.com", "app-pass");
+    harness
+        .dispatch(Job::SetSyncConfig {
+            config: config("https://dav.one/dav/"),
+        })
+        .expect("保存同步设置应成功");
+
+    // 第一次同步：本機有檔、遠端沒有 → 上傳。
+    harness.dispatch(Job::SyncNow).expect("同步应成功");
+    let events = harness.drain_events();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::SyncDone { summary } if summary.contains("上传 1，下载 0")
+        )),
+        "云端没有档案时应上传本机：{events:?}"
+    );
+
+    // 再同步一次：遠端仍然沒有這個檔案（例如雲端被刪除），記錄不得讓它變成 Noop。
+    harness.dispatch(Job::SyncNow).expect("同步应成功");
+    let events = harness.drain_events();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::SyncDone { summary } if summary.contains("上传 1，下载 0")
+        )),
+        "远端档案不存在时不得变成 Noop：{events:?}"
+    );
+
+    // 換到另一台（空的）伺服器：舊記錄屬於舊雲端，必須作廢並重新上傳。
+    harness
+        .dispatch(Job::SetSyncConfig {
+            config: config("https://dav.two/dav/"),
+        })
+        .expect("保存第二台伺服器的设置");
+    harness.dispatch(Job::SyncNow).expect("同步应成功");
+    let events = harness.drain_events();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::SyncDone { summary } if summary.contains("上传 1，下载 0")
+        )),
+        "换服务器后应重新上传本机档案：{events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::SyncConflict { .. })),
+        "新的空目标不该报冲突：{events:?}"
+    );
+}
+
+/// 從另一台伺服器導入時，導入當下算出的同步記錄必須留著。
+///
+/// 換目標時 `SyncStore::set_config` 會作廢舊記錄（那些指向另一個雲端）；若「先寫
+/// 記錄、再寫設定」，剛算好、指向**新**目標的記錄會被那一步清掉，之後的「立即
+/// 同步」就會把「兩邊一致」誤報成衝突。
+#[test]
+fn importing_from_another_server_keeps_the_fresh_records() {
+    let mut harness = Harness::new(|_| Ok(html("")));
+    harness.seed_vault("secret123", &Credentials::new("3120000001", "pw-12345"));
+    harness
+        .dispatch(Job::Unlock {
+            passphrase: "secret123".into(),
+        })
+        .expect("解锁应成功");
+
+    // 遠端憑證檔＝本機容器（同一口令可解開），ETag 固定不動；任務檔不存在。
+    let cred_container = std::fs::read(harness.worker.vault.path()).expect("读取本机凭证容器");
+    harness.set_webdav(move |request| {
+        let url = request.url.clone();
+        let etag = || vec![("ETag".to_owned(), "\"v1\"".to_owned())];
+        match request.method {
+            Method::Put => Ok(HttpResponse {
+                status: 201,
+                final_url: url,
+                headers: etag(),
+                body: Vec::new(),
+            }),
+            Method::Delete => Ok(HttpResponse::new(204, url, b"".as_slice())),
+            Method::Get | Method::Head if url.contains("credentials") => Ok(HttpResponse {
+                status: 200,
+                final_url: url,
+                headers: etag(),
+                body: if request.method == Method::Get {
+                    cred_container.clone()
+                } else {
+                    Vec::new()
+                },
+            }),
+            _ => Ok(HttpResponse::new(404, url, b"".as_slice())),
+        }
+    });
+
+    // 既有設定指向伺服器 A（寫進 sync.vault）。
+    harness
+        .dispatch(Job::SetSyncConfig {
+            config: crate::sync::config::SyncConfig::new(
+                "https://dav.one/dav/",
+                "u@example.com",
+                "app-pass",
+            ),
+        })
+        .expect("保存同步设置应成功");
+
+    // 從伺服器 B 導入，再以同一口令解鎖：暫存的設定與記錄在此寫回 sync.vault。
+    harness
+        .dispatch(Job::SyncImport {
+            config: crate::sync::config::SyncConfig::new(
+                "https://dav.two/dav/",
+                "u@example.com",
+                "app-pass",
+            ),
+        })
+        .expect("导入应成功");
+    harness
+        .dispatch(Job::Unlock {
+            passphrase: "secret123".into(),
+        })
+        .expect("重新解锁应成功");
+    let _ = harness.drain_events();
+
+    // 本機與遠端一致：不得報衝突，也不該重新上傳。
+    harness.dispatch(Job::SyncNow).expect("同步应成功");
+    let events = harness.drain_events();
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::SyncConflict { .. })),
+        "导入算出的记录被清掉了：{events:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::SyncDone { summary } if summary.contains("上传 0，下载 0")
+        )),
+        "两边一致时应为 Noop：{events:?}"
+    );
+}
+
+/// 伺服器不接受 `HEAD`（回 `405`）時整條同步仍可用（改以 `GET` 判斷存在）。
+///
+/// 修前 `head` 只認 2xx／404／401／403，405 直接報「服务器返回异常状态码」，
+/// 於是「立即同步」與自動同步在這種伺服器上完全無法使用。
+#[test]
+fn sync_works_against_a_server_that_rejects_head() {
+    let mut harness = Harness::new(|_| Ok(html("")));
+    harness.seed_vault("secret123", &Credentials::new("3120000001", "pw-12345"));
+    harness
+        .dispatch(Job::Unlock {
+            passphrase: "secret123".into(),
+        })
+        .expect("解锁应成功");
+
+    harness.set_webdav(|request| {
+        let url = request.url.clone();
+        match request.method {
+            // 伺服器不允許 HEAD；存在與否只能靠 GET 判斷（此處檔案不存在）。
+            Method::Head => Ok(HttpResponse::new(405, url, b"".as_slice())),
+            Method::Get => Ok(HttpResponse::new(404, url, b"".as_slice())),
+            Method::Put => Ok(HttpResponse {
+                status: 201,
+                final_url: url,
+                headers: vec![("ETag".to_owned(), "v1".to_owned())],
+                body: Vec::new(),
+            }),
+            Method::Delete => Ok(HttpResponse::new(204, url, b"".as_slice())),
+            _ => Ok(html("")),
+        }
+    });
+
+    harness
+        .dispatch(Job::SetSyncConfig {
+            config: crate::sync::config::SyncConfig::new(
+                "https://dav.example/dav/",
+                "u@example.com",
+                "app-pass",
+            ),
+        })
+        .expect("保存同步设置应成功");
+
+    harness.dispatch(Job::SyncNow).expect("同步应成功");
+    let events = harness.drain_events();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::SyncDone { summary } if summary.contains("上传 1，下载 0")
+        )),
+        "不接受 HEAD 的服务器上仍应上传本机档案：{events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::Failed { .. })),
+        "不应报错：{events:?}"
+    );
+}
+
+/// 取出事件中的最後一則同步狀態。
+fn sync_state(events: &[Event]) -> Option<crate::task::protocol::SyncStateView> {
+    events.iter().rev().find_map(|event| match event {
+        Event::SyncState(view) => Some(view.as_ref().clone()),
+        _ => None,
+    })
+}
+
+/// 同步設定檔讀不開（口令不符／檔案損毀）時必須回報，且仍能清除設定。
+///
+/// 這個狀態下同步與「重新設定」都會被存儲拒絕；介面若不知道（`configured`
+/// 為 false 又沒有 `unavailable`），就只能顯示一個必定失敗的「配置并启用
+/// 同步」，使用者得自己找到檔案刪掉再重啟。
+#[test]
+fn an_unreadable_sync_file_is_reported_and_can_still_be_cleared() {
+    let mut harness = Harness::new(|_| Ok(html("")));
+    harness.seed_vault("secret123", &Credentials::new("3120000001", "pw-12345"));
+    // 以另一個口令加密的 sync.vault：以本次口令必定解不開。
+    let sealed = crate::credentials::envelope::seal("another-passphrase", "ohmyXJTU-sync", b"{}")
+        .expect("建立同步档")
+        .0;
+    let sync_path = harness.sync_path();
+    std::fs::write(&sync_path, &sealed).expect("写入同步档");
+
+    harness
+        .dispatch(Job::Unlock {
+            passphrase: "secret123".into(),
+        })
+        .expect("解锁应成功");
+
+    let events = harness.drain_events();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Warning(message) if message.contains("同步配置文件无法读取")
+        )),
+        "应提示同步设置不可用：{events:?}"
+    );
+    let view = sync_state(&events).expect("应回报同步状态");
+    assert!(view.unavailable, "应回报不可用：{view:?}");
+    assert!(!view.configured, "读不开时不算已设定：{view:?}");
+    assert_eq!(
+        std::fs::read(&sync_path).unwrap(),
+        sealed,
+        "读不开时不得改动原档"
+    );
+
+    // 清除：档案删除，状态回到「未设定但可用」。
+    harness
+        .dispatch(Job::ClearSyncConfig)
+        .expect("清除同步设置应成功");
+    let events = harness.drain_events();
+    let view = sync_state(&events).expect("应回报同步状态");
+    assert!(!view.unavailable && !view.configured, "{view:?}");
+    assert!(!sync_path.exists(), "清除后文件应删除");
 }

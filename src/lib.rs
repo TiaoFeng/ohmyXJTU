@@ -13,6 +13,7 @@ pub mod privacy;
 pub mod random;
 pub mod session;
 pub mod sites;
+pub mod sync;
 pub mod system;
 pub mod task;
 pub mod text;

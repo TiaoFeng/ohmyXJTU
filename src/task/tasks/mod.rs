@@ -81,6 +81,29 @@ impl TaskHandle {
         self.send(Job::LockTasks);
     }
 
+    /// 暫停任務寫入並等待服務確認（同步下載前）。
+    ///
+    /// 必須等到確認才開始下載：服務是獨立執行緒，未確認前仍可能處理排隊中的
+    /// 任務操作並以舊清單落盤，覆寫剛下載的檔案。
+    pub(crate) fn pause(&self) -> AppResult<()> {
+        let reply = TaskReply::new();
+        if self
+            .jobs
+            .send(Job::PauseTasks {
+                reply: reply.clone(),
+            })
+            .is_err()
+        {
+            return Err(AppError::config("任务服务已停止"));
+        }
+        reply.wait().map_err(AppError::Crypto)
+    }
+
+    /// 恢復任務寫入（同步未實際下載本機檔案時）。
+    pub(crate) fn resume(&self) {
+        self.send(Job::ResumeTasks);
+    }
+
     /// 任務服務已停止時靜默忽略：呼叫端無法在這個階段補救。
     fn send(&self, job: Job) {
         let _ = self.jobs.send(job);
@@ -128,6 +151,11 @@ fn run(mut store: TaskStore, events: Sender<Event>, worker: Sender<Job>, jobs: R
                 reply.resolve(result);
             }
             Job::LockTasks => store.lock(),
+            Job::PauseTasks { reply } => {
+                store.pause();
+                reply.resolve(Ok(()));
+            }
+            Job::ResumeTasks => store.resume(),
             job if job.is_task_op() => {
                 if let Err(err) = operate(&mut store, job, &events) {
                     let what = "任务";

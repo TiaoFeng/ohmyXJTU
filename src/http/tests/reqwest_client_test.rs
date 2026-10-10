@@ -733,6 +733,34 @@ fn plan_redirect_validates_the_webvpn_proxy_target() {
     assert!(err.to_string().contains("代理目标无法解析"), "{err}");
 }
 
+/// 重導的方法判定：HEAD 不得被改成下載主體；一般重導把 POST/PUT/DELETE 改成 GET。
+#[test]
+fn redirect_method_keeps_head_and_downgrades_writes() {
+    use super::redirect_method;
+    use crate::http::Method;
+
+    for status in [301, 302, 303] {
+        assert_eq!(redirect_method(status, Method::Head), Method::Head);
+        assert_eq!(redirect_method(status, Method::Get), Method::Get);
+        assert_eq!(redirect_method(status, Method::Post), Method::Get);
+        assert_eq!(redirect_method(status, Method::Put), Method::Get);
+        assert_eq!(redirect_method(status, Method::Delete), Method::Get);
+        assert_eq!(redirect_method(status, Method::Mkcol), Method::Get);
+    }
+    for status in [307, 308] {
+        for method in [
+            Method::Get,
+            Method::Post,
+            Method::Put,
+            Method::Delete,
+            Method::Head,
+            Method::Mkcol,
+        ] {
+            assert_eq!(redirect_method(status, method), method);
+        }
+    }
+}
+
 /// 重定向目的主機的信任判斷。
 #[test]
 fn trusted_redirect_hosts() {
@@ -770,6 +798,26 @@ fn webvpn_proxy_targets_define_the_origin() {
     // 代理目標解不開：保守視為跨源。
     let broken = Url::parse("https://webvpn.xjtu.edu.cn/https/zzzz/broken").expect("解析");
     assert!(!same_origin(&broken, &broken), "无法判定时应视为跨源");
+}
+
+/// `limit_body`：回應本文超過上限時即中止，避免超大本文耗盡資源。
+#[test]
+fn body_over_the_limit_is_rejected() {
+    let (base, _hits) = serve(1, |_index, _base| ok_response(&"x".repeat(64)));
+    let err = client()
+        .send(HttpRequest::get(base).limit_body(16))
+        .expect_err("超大正文应报错");
+    assert!(err.to_string().contains("过大"), "{err}");
+}
+
+/// `limit_body`：本文在上限之內時正常回傳。
+#[test]
+fn body_within_the_limit_is_returned() {
+    let (base, _hits) = serve(1, |_index, _base| ok_response("hello"));
+    let response = client()
+        .send(HttpRequest::get(base).limit_body(64))
+        .expect("正文在上限内应成功");
+    assert_eq!(response.body, b"hello");
 }
 
 /// 逾時是對外承諾的數值：縮短它是為了讓失敗更快暴露，讓使用者不必

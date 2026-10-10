@@ -36,6 +36,56 @@ fn app() -> App {
 }
 
 #[test]
+fn tasks_event_auto_uploads_only_when_enabled() {
+    let mut app = app();
+    let (jobs, rx) = channel();
+
+    // 未開啟自動同步：任務事件不觸發同步。
+    apply_event_with_jobs(&mut app, Event::Tasks(Vec::new()), &jobs);
+    assert!(rx.try_iter().next().is_none(), "未开启时不应触发自动同步");
+
+    // 開啟自動同步後：任務事件送出自動同步任務。
+    app.sync = crate::task::SyncStateView {
+        configured: true,
+        auto_sync: true,
+        ..Default::default()
+    };
+    apply_event_with_jobs(&mut app, Event::Tasks(Vec::new()), &jobs);
+    assert!(matches!(rx.try_iter().next(), Some(Job::SyncAuto)));
+}
+
+/// 憑證檔被改寫（改帳號、改口令）同樣要觸發自動上傳。
+///
+/// 改帳號與改口令都會重寫 `credentials.vault`（改口令還會重寫 `tasks.vault`）；
+/// 只在任務事件上掛自動同步的話，雲端會一直留著舊憑證，直到下一次動到任務或
+/// 使用者手動同步。
+#[test]
+fn credential_updates_auto_upload_only_when_enabled() {
+    let mut app = app();
+    app.sync = crate::task::SyncStateView {
+        configured: true,
+        auto_sync: true,
+        ..Default::default()
+    };
+
+    for event in [Event::AccountUpdated, Event::PassphraseUpdated] {
+        let (jobs, rx) = channel();
+        apply_event_with_jobs(&mut app, event, &jobs);
+        assert!(
+            matches!(rx.try_iter().next(), Some(Job::SyncAuto)),
+            "凭据变更应触发自动同步"
+        );
+    }
+
+    // 未開啟自動同步：兩者都不送任務。
+    app.sync.auto_sync = false;
+    let (jobs, rx) = channel();
+    apply_event_with_jobs(&mut app, Event::AccountUpdated, &jobs);
+    apply_event_with_jobs(&mut app, Event::PassphraseUpdated, &jobs);
+    assert!(rx.try_iter().next().is_none(), "未开启时不应触发自动同步");
+}
+
+#[test]
 fn vault_ready_moves_to_main_and_starts_loading() {
     let mut app = app();
     let (jobs, rx) = channel();
@@ -1308,6 +1358,38 @@ fn disabled_session_returns_to_the_unlock_screen() {
         app.message_tone(),
         Some(crate::tone::Tone::Danger),
         "停用会话属于异常状态，应以错误色呈现"
+    );
+}
+
+#[test]
+fn sync_relocked_returns_to_the_unlock_screen() {
+    // 下載已覆寫本機檔案：工作者鎖定金鑰，介面必須離開主畫面——繼續操作會用
+    // 記憶體中的舊任務清單覆寫剛下載的檔案。
+    let mut app = app();
+    app.set_screen(Screen::Main);
+    app.set_site_mode(SiteKind::Attendance, AccessMode::Direct);
+    app.homework.start_loading("正在汇总作业…");
+    app.sync = crate::task::SyncStateView {
+        configured: true,
+        auto_sync: true,
+        ..Default::default()
+    };
+
+    apply_event(&mut app, Event::SyncRelocked);
+
+    assert_eq!(app.session_label(), "未登录", "站点登录状态应清除");
+    assert!(app.homework.is_idle(), "卡住的加载状态应解除");
+    assert!(matches!(app.screen, Screen::Unlock(_)), "{:?}", app.screen);
+    assert!(
+        app.message_text()
+            .is_some_and(|text| text.contains("重新输入加密口令")),
+        "应提示重新解锁：{:?}",
+        app.message
+    );
+    assert!(
+        app.sync.configured && app.sync.auto_sync,
+        "同步设定本身不受影响：{:?}",
+        app.sync
     );
 }
 

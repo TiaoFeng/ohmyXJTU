@@ -2,7 +2,7 @@
 
 use std::fs;
 use std::io::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use tempfile::NamedTempFile;
 
@@ -34,6 +34,12 @@ pub fn create_private_dir(dir: &Path) -> AppResult<()> {
     Ok(())
 }
 
+/// 已寫好但尚未覆蓋目標的暫存檔（見 [`stage_private`]）。
+pub struct StagedWrite {
+    tmp: NamedTempFile,
+    target: PathBuf,
+}
+
 /// 原子地覆寫檔案，並將權限限制為僅擁有者可讀寫。
 ///
 /// 內容先寫入同目錄的暫存檔，`fsync` 後再 rename 覆蓋目標，
@@ -42,6 +48,15 @@ pub fn create_private_dir(dir: &Path) -> AppResult<()> {
 /// 目標目錄不存在時一併建立為 0700（見 [`create_private_dir`]）：任何呼叫端
 /// 都不會因為忘了先建目錄而留下權限過寬的目錄。
 pub fn write_private_atomic(path: &Path, bytes: &[u8]) -> AppResult<()> {
+    stage_private(path, bytes)?.commit()
+}
+
+/// 階段一：把內容寫入目標同目錄的暫存檔並 `fsync`，但**不**覆蓋目標。
+///
+/// 供「多個檔案要一起更新」的呼叫端使用：先把所有目標 stage 成功，再逐一
+/// [`StagedWrite::commit`]。磁碟已滿、權限等寫入失敗都集中在此階段，此時所有
+/// 目標檔案都還維持原狀；落盤只剩同目錄 `rename` 這一段。
+pub fn stage_private(path: &Path, bytes: &[u8]) -> AppResult<StagedWrite> {
     let dir = parent_dir(path)?;
     create_private_dir(dir)?;
 
@@ -49,14 +64,29 @@ pub fn write_private_atomic(path: &Path, bytes: &[u8]) -> AppResult<()> {
     restrict_permissions(tmp.path())?;
     tmp.write_all(bytes)?;
     tmp.as_file().sync_all()?;
-    tmp.persist(path).map_err(|err| AppError::Io(err.error))?;
-    restrict_permissions(path)?;
-    // 盡力同步目錄項：`rename` 的結果要在中繼資料落盤後才保證可見。
-    // 部分平台不支援對目錄開啟檔案（例如 Windows），失敗一律忽略。
-    if let Ok(dir) = fs::File::open(dir) {
-        let _ = dir.sync_all();
+    Ok(StagedWrite {
+        tmp,
+        target: path.to_owned(),
+    })
+}
+
+impl StagedWrite {
+    /// 階段二：`rename` 覆蓋目標、收緊權限，並盡力同步目錄項。
+    ///
+    /// `rename` 的結果要在中繼資料落盤後才保證可見；部分平台不支援對目錄開啟
+    /// 檔案（例如 Windows），同步目錄失敗一律忽略。
+    pub fn commit(self) -> AppResult<()> {
+        let dir = parent_dir(&self.target)?.to_owned();
+        let target = self.target;
+        self.tmp
+            .persist(&target)
+            .map_err(|err| AppError::Io(err.error))?;
+        restrict_permissions(&target)?;
+        if let Ok(dir) = fs::File::open(dir) {
+            let _ = dir.sync_all();
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 /// 確保檔案權限僅擁有者可讀寫。

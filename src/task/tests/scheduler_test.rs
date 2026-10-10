@@ -74,6 +74,11 @@ impl ThreadWorker {
         let (job_tx, job_rx) = std_channel();
         let (event_tx, event_rx) = std_channel();
         let tasks = crate::task::tasks::detached();
+        let vault_path = vault.path().to_path_buf();
+        let webdav: Arc<dyn HttpClient> =
+            Arc::new(FakeClient::with_responder(|_: &HttpRequest| {
+                Err(crate::error::AppError::config("测试未注入 WebDAV 后端"))
+            }));
         let mut worker = Worker {
             jobs: job_rx,
             events: event_tx,
@@ -103,6 +108,17 @@ impl ThreadWorker {
             chosen_term: None,
             timing: LoadTiming::default(),
             login_started: None,
+            sync: crate::sync::config::SyncStore::at(dir.path().join("sync.vault")),
+            webdav,
+            pending_sync: None,
+            sync_local: vec![
+                (crate::sync::config::SyncFile::Credentials, vault_path),
+                (
+                    crate::sync::config::SyncFile::Tasks,
+                    dir.path().join("tasks.vault"),
+                ),
+            ],
+            sync_pulled: false,
             shutdown: false,
             tasks,
         };

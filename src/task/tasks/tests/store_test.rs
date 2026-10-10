@@ -325,6 +325,86 @@ fn mark_unavailable_blocks_saves_even_with_a_loaded_key() {
 }
 
 #[test]
+fn pause_blocks_saves_until_resumed() {
+    let dir = tempdir().unwrap();
+    let mut store = new_store(&dir);
+    store.init(PASSPHRASE).unwrap();
+    store.add(task("甲")).unwrap();
+
+    // 暫停（模擬同步下載期間）：任務操作被拒絕，磁碟維持原樣。
+    store.pause();
+    let err = store.add(task("乙")).unwrap_err();
+    assert!(
+        matches!(err, AppError::Crypto(_)),
+        "暂停时的保存应被拒绝：{err:?}"
+    );
+    let mut reloaded = new_store(&dir);
+    reloaded.init(PASSPHRASE).unwrap();
+    assert_eq!(reloaded.tasks().len(), 1, "暂停期间不得写入");
+
+    // 恢復後可再寫入。
+    store.resume();
+    store.add(task("丙")).unwrap();
+    let mut reloaded = new_store(&dir);
+    reloaded.init(PASSPHRASE).unwrap();
+    assert_eq!(reloaded.tasks().len(), 2, "恢复后应能写入");
+}
+
+#[test]
+fn reinit_clears_a_leftover_pause() {
+    let dir = tempdir().unwrap();
+    let mut store = new_store(&dir);
+    store.init(PASSPHRASE).unwrap();
+    store.pause();
+
+    // 重新解鎖（新工作階段）代表上一個暫停已結束：寫入恢復。
+    store.init(PASSPHRASE).unwrap();
+    store.add(task("甲")).expect("重新解锁后应能写入");
+}
+
+#[test]
+fn rekey_is_refused_while_paused() {
+    let dir = tempdir().unwrap();
+    let mut store = new_store(&dir);
+    store.init(PASSPHRASE).unwrap();
+    store.add(task("甲")).unwrap();
+
+    // 同步下載期間暫停：不得以記憶體中的清單換鑰落盤。
+    store.pause();
+    let err = store.rekey("new passphrase").unwrap_err();
+    assert!(
+        matches!(err, AppError::Crypto(_)),
+        "暂停时换口令应被拒绝：{err:?}"
+    );
+
+    // 原檔仍以舊口令可解、內容不變。
+    let mut reloaded = new_store(&dir);
+    reloaded.init(PASSPHRASE).unwrap();
+    assert_eq!(reloaded.tasks().len(), 1, "被拒绝的换口令不得改动原文件");
+}
+
+#[test]
+fn rekey_is_refused_when_the_key_was_dropped() {
+    let dir = tempdir().unwrap();
+    let mut store = new_store(&dir);
+    store.init(PASSPHRASE).unwrap();
+    store.add(task("甲")).unwrap();
+
+    // 會話被停用／下載後重新鎖定：金鑰已丟棄，記憶體中的清單可能與磁碟不一致，
+    // 不得再換鑰落盤。
+    store.lock();
+    let err = store.rekey("new passphrase").unwrap_err();
+    assert!(
+        matches!(err, AppError::Crypto(_)),
+        "锁定后换口令应被拒绝：{err:?}"
+    );
+
+    let mut reloaded = new_store(&dir);
+    reloaded.init(PASSPHRASE).unwrap();
+    assert_eq!(reloaded.tasks().len(), 1, "原檔應保持以舊口令加密");
+}
+
+#[test]
 fn tags_survive_an_encrypted_round_trip() {
     let dir = tempdir().unwrap();
     let mut store = new_store(&dir);

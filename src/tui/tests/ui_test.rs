@@ -23,10 +23,12 @@ use crate::sites::lms::{
     LmsUpload, TOP_LEVEL_BODY_NOTE,
 };
 use crate::task::HomeworkIssue;
+use crate::task::SyncStateView;
+use crate::tone::Tone;
 use crate::tui::app::{
     AgreementState, App, FormState, HomeworkData, LmsLevel, LoginScreen, NavItem, Page, Screen,
-    SettingsState, TaskBatchMenuState, TaskConfirmState, TaskFormState, TaskMenuState,
-    TermPickerState,
+    SettingsState, SyncImportState, SyncMenuState, TaskBatchMenuState, TaskConfirmState,
+    TaskFormState, TaskMenuState, TermPickerState,
 };
 use crate::tui::text::{InputLine, MASK_CHAR};
 use crate::tui::theme::THEME;
@@ -3599,5 +3601,168 @@ fn footer_shows_tag_suggestion_hint_only_when_tags_exist() {
     assert!(
         footer.contains("↑/↓ 选标签"),
         "有标签时应提示上下键：{footer:?}"
+    );
+}
+
+// ── 堅果雲同步：子選單與導入畫面 ─────────────────────
+
+/// 含有 `needle` 的那一列上，非空白格使用到的前景色。
+fn row_colors(backend: &TestBackend, needle: &str) -> Vec<Color> {
+    let area = backend.buffer().area;
+    for y in area.y..area.y + area.height {
+        if !row_text(backend, y).contains(needle) {
+            continue;
+        }
+        let mut colors = Vec::new();
+        for x in area.x..area.x + area.width {
+            let cell = &backend.buffer()[(x, y)];
+            if cell.symbol().trim().is_empty() {
+                continue;
+            }
+            colors.push(cell.fg);
+        }
+        return colors;
+    }
+    panic!("画面上找不到 {needle:?}");
+}
+
+/// 設定同步子選單畫面。
+fn sync_menu_app(state: SyncStateView) -> App {
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Main);
+    app.sync = state;
+    app.set_screen(Screen::SyncMenu(SyncMenuState::default()));
+    app
+}
+
+/// 「坚果云同步」子選單依設定狀態列出動作。
+#[test]
+fn sync_menu_lists_actions_for_each_state() {
+    let mut app = sync_menu_app(SyncStateView::default());
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(text.contains("坚果云同步"), "{text}");
+    assert!(text.contains("配置并启用同步"), "{text}");
+    assert!(text.contains("↑/↓ 选择 · enter 确定 · esc 返回"), "{text}");
+    assert!(
+        !text.contains("立即同步"),
+        "未设定时不应列出同步动作：{text}"
+    );
+
+    // 已設定且開啟自動同步：六個動作，並顯示目前的自動同步狀態。
+    let mut app = sync_menu_app(SyncStateView {
+        configured: true,
+        auto_sync: true,
+        url: "https://dav.example/dav/".to_owned(),
+        account: "u@example.com".to_owned(),
+        unavailable: false,
+    });
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    for label in [
+        "立即同步",
+        "上传本机（覆盖远端）",
+        "下载云端（覆盖本机）",
+        "自动同步：开",
+        "修改服务器设置",
+        "清除同步配置",
+    ] {
+        assert!(text.contains(label), "缺少 {label}：\n{text}");
+    }
+    assert!(!text.contains("自动同步：关"), "{text}");
+
+    // 設定檔讀不開：只剩「清除同步配置」這條出路。
+    let mut app = sync_menu_app(SyncStateView {
+        unavailable: true,
+        ..SyncStateView::default()
+    });
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(text.contains("清除同步配置"), "{text}");
+    assert!(!text.contains("立即同步"), "{text}");
+}
+
+/// 「从坚果云导入」畫面：欄位、預填位址與提示，訊息依語意上色。
+#[test]
+fn sync_import_screen_shows_the_form_and_colours_the_message() {
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::SyncImport(SyncImportState::new(true)));
+
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(text.contains("从坚果云导入"), "{text}");
+    assert!(text.contains("^t 测试连接"), "{text}");
+    for label in ["服务器地址", "坚果云账号", "应用密码"] {
+        assert!(text.contains(label), "缺少字段 {label}：\n{text}");
+    }
+    assert!(
+        text.contains("https://dav.jianguoyun.com/dav/"),
+        "服务器地址应预填默认值：\n{text}"
+    );
+
+    let set_message = |app: &mut App, message: &str, tone: Tone| {
+        let Screen::SyncImport(state) = &mut app.screen else {
+            panic!("应停在导入画面");
+        };
+        state.busy = false;
+        state.message = Some((message.to_owned(), tone));
+    };
+
+    // 連線成功是成功色，不是錯誤色（訊息與登入失敗共用同一列）。
+    set_message(
+        &mut app,
+        "连接成功：连接成功（按 enter 或 ^s 导入）",
+        Tone::Success,
+    );
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let colors = row_colors(terminal.backend(), "连接成功");
+    assert!(
+        colors.contains(&THEME.green),
+        "成功讯息应为绿色：{colors:?}"
+    );
+    assert!(
+        !colors.contains(&THEME.red),
+        "成功讯息不该是红色：{colors:?}"
+    );
+
+    set_message(&mut app, "连接失败：坚果云认证失败", Tone::Danger);
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let colors = row_colors(terminal.backend(), "连接失败");
+    assert!(colors.contains(&THEME.red), "失败讯息应为红色：{colors:?}");
+
+    // 確認步驟：提示列只列出當下可用的按鍵（不能編輯欄位或測試連線）。
+    let Screen::SyncImport(state) = &mut app.screen else {
+        panic!("应停在导入画面");
+    };
+    state.confirming = true;
+    state.message = Some((
+        "将用云端内容覆写本机的凭证与任务文件".to_owned(),
+        Tone::Warning,
+    ));
+    let terminal = draw(WIDTH, HEIGHT, |frame| {
+        crate::tui::views::draw(frame, &mut app)
+    });
+    let text = screen_text(terminal.backend());
+    assert!(text.contains("enter 确认导入"), "{text}");
+    assert!(
+        !text.contains("^t 测试连接"),
+        "确认时不该提示测试连线：{text}"
+    );
+    let colors = row_colors(terminal.backend(), "覆写本机");
+    assert!(
+        colors.contains(&THEME.yellow),
+        "确认提示应为警告色：{colors:?}"
     );
 }

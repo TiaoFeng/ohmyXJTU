@@ -32,6 +32,10 @@ impl Worker {
         self.emit(Event::VaultReady);
         // 設定檔重建的提示要等介面進到主畫面（底欄）才看得見。
         self.report_config_rebuild();
+        // 同步設定在 VaultReady 之後才載入：它的信封要重跑一次 Argon2id
+        // （數百毫秒），不能拖到主畫面出現；此後工作者才處理後續任務，
+        // 因此自動同步等請求屆時已就緒。
+        self.init_sync(passphrase);
         Ok(())
     }
 
@@ -48,6 +52,8 @@ impl Worker {
         // 設定檔重建的提示要等介面進到主畫面（底欄）才看得見。
         self.report_config_rebuild();
         self.report_vault_permissions();
+        // 同步設定在 VaultReady 之後才載入（見 `create_vault` 的說明）。
+        self.init_sync(passphrase);
         Ok(())
     }
 
@@ -130,23 +136,40 @@ impl Worker {
         }
     }
 
-    /// 修改加密口令：憑證保險庫與任務檔必須使用同一組口令。
+    /// 修改加密口令：憑證保險庫、任務檔與同步設定檔必須使用同一組口令。
     ///
-    /// 兩者是獨立的檔案，無法一起原子寫入；順序固定為「先驗舊口令 → 先寫
-    /// 任務檔 → 再寫保險庫」，保險庫寫入失敗時把任務檔換回舊口令，避免留下
-    /// 「保險庫是新口令、任務檔是舊口令」的不一致狀態。
+    /// 三者是獨立的檔案，無法一起原子寫入；順序固定為「先驗舊口令 → 寫任務檔
+    /// → 寫同步設定檔（若已設定）→ 再寫保險庫」，任一後續步驟失敗時把已換鑰的
+    /// 檔案換回舊口令，避免留下口令不一致的狀態。
     pub(super) fn change_passphrase(&mut self, old: &str, new: &str) -> AppResult<()> {
         // 先以舊口令解密，驗證口令正確（失敗會回報 [`AppError::WrongPassphrase`]）。
         let credentials = self.vault.load(old)?;
         self.tasks.rekey(&new.into())?;
-        if let Err(err) = self.vault.store(new, &credentials) {
-            // 保險庫仍是舊口令：把任務檔換回舊口令。回復失敗時把細節附在錯誤
-            // 訊息裡（見 [`AppError::PassphraseRollback`]）——另外發一則通知會
-            // 被緊接著的失敗訊息蓋掉，使用者永遠看不到。
+        // 同步設定檔若已設定，也要改用同一口令；換鑰失敗時把任務檔換回舊口令。
+        if let Err(err) = self.sync.rekey(new) {
             if let Err(rollback) = self.tasks.rekey(&old.into()) {
                 return Err(AppError::PassphraseRollback {
                     reason: err.to_string(),
-                    rollback: rollback.to_string(),
+                    rollback: format!("任务文件（{rollback}）"),
+                });
+            }
+            return Err(err);
+        }
+        if let Err(err) = self.vault.store(new, &credentials) {
+            // 保險庫仍是舊口令：把任務檔與同步設定檔換回舊口令。回復失敗時把
+            // 細節附在錯誤訊息裡（見 [`AppError::PassphraseRollback`]）——另外
+            // 發一則通知會被緊接著的失敗訊息蓋掉，使用者永遠看不到。
+            let mut rollbacks = Vec::new();
+            if let Err(rollback) = self.tasks.rekey(&old.into()) {
+                rollbacks.push(format!("任务文件（{rollback}）"));
+            }
+            if let Err(rollback) = self.sync.rekey(old) {
+                rollbacks.push(format!("同步设置（{rollback}）"));
+            }
+            if !rollbacks.is_empty() {
+                return Err(AppError::PassphraseRollback {
+                    reason: err.to_string(),
+                    rollback: rollbacks.join("；"),
                 });
             }
             return Err(err);
@@ -230,6 +253,37 @@ impl Worker {
         Ok(())
     }
 
+    /// 丟棄整個工作階段的狀態（回到解鎖畫面前用）。
+    ///
+    /// 兩條路徑共用：同步下載已覆寫本機檔案後重新鎖定
+    ///（[`super::sync::Worker::relock_after_pull`]）與會話停用
+    ///（[`Self::discard_pending_vault`] 重建後端失敗時）。兩者都要回到解鎖畫面，
+    /// 而站點會話與金鑰此時都不可再用。
+    ///
+    /// 少清一個欄位就會讓舊帳號的狀態活到下一次登入；多清是安全的——下次解鎖時
+    /// [`Self::start_session`] 會以磁碟上的內容重建全部狀態，這份清單是它的子集。
+    /// **不動 `credentials`**：它由呼叫端決定——會話停用時要保留還原後的舊憑證
+    ///（否則使用者得重新解鎖才拿得回來），同步下載後則必須丟棄（憑證檔已被雲端
+    /// 內容取代）。事件也由呼叫端各自發出（`SyncRelocked`／`SessionDisabled`）。
+    pub(super) fn reset_session_for_unlock(&mut self) {
+        self.session = None;
+        self.flow = None;
+        self.retry = None;
+        self.pending_vault = None;
+        self.pending_data.clear();
+        // 金鑰丟棄後存儲一律拒絕寫入，直到重新解鎖。
+        self.tasks.lock();
+        self.sync.lock();
+        // 進行中的資料任務不再回報，站點快取與「當前學期」都屬於已作廢的會話。
+        self.generation += 1;
+        self.cache.clear();
+        self.schedule_cache = None;
+        self.schedule_week = None;
+        self.known_term = None;
+        // 舊帳號的登入失敗計數不再適用（同一帳號重試則保留 `login_failures`）。
+        self.login_failure_key = None;
+    }
+
     /// 丟棄待存憑證，還原舊憑證，並作廢切換期間建立的新會話。
     ///
     /// 新憑證只有在登入成功後才寫入保險庫；取消、憑證被拒或流程失敗時，
@@ -256,12 +310,13 @@ impl Worker {
         // 畫面顯示成新帳號的資料。此時直接停用會話，並請使用者重新解鎖。
         let reset = self.session.as_mut().map(|session| session.reset_session());
         if let Some(Err(err)) = reset {
-            self.session = None;
-            // 會話停用後介面會回到解鎖畫面：任務金鑰一併丟棄，重新解鎖時重建。
-            self.tasks.lock();
+            // 會話停用後介面會回到解鎖畫面：憑證、任務金鑰與站點狀態一併作廢，
+            // 重新解鎖時以磁碟上的內容重建（含下面這段共同清理）。
+            self.reset_session_for_unlock();
             self.emit(Event::SessionDisabled(format!(
                 "无法建立新的会话，已停用当前会话：{err}"
             )));
+            return;
         }
         // 切換期間取得的資料與進行中的任務都屬於新帳號：一併作廢。
         // （排隊中的資料任務不在此列：它們會以還原後的帳號重新執行。）

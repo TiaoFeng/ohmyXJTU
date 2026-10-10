@@ -13,9 +13,11 @@ use crate::domain::todo::{Priority, SortMode, Task};
 use crate::model::{ActivityDetailView, ScheduleData};
 use crate::sites::lms::{ActivityKind, LmsActivity, LmsCourse};
 use crate::task::Job;
+use crate::tone::Tone;
 use crate::tui::app::{
     AgreementState, App, FormKind, FormState, HomeworkData, LmsLevel, LoginScreen, NavItem, Page,
-    Screen, SettingsState, TaskConfirmState, TaskEntry, TaskField, TaskFormMode, TermPickerState,
+    Screen, SettingsState, SyncImportState, TaskConfirmState, TaskEntry, TaskField, TaskFormMode,
+    TermPickerState,
 };
 use crate::tui::controller::FormValues;
 
@@ -566,6 +568,326 @@ fn settings_opens_account_forms() {
     // esc 回到設定選單，而不是主畫面。
     press(&mut app, &jobs, KeyCode::Esc);
     assert!(matches!(app.screen, Screen::Settings(_)));
+}
+
+#[test]
+fn settings_sync_item_opens_the_sync_menu() {
+    let (jobs, rx) = channel();
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Settings(SettingsState::open(AccessPolicy::Auto)));
+    for _ in 0..SettingsState::SYNC_INDEX {
+        press(&mut app, &jobs, KeyCode::Down);
+    }
+    press(&mut app, &jobs, KeyCode::Enter);
+    assert!(
+        matches!(app.screen, Screen::SyncMenu(_)),
+        "{:?}",
+        app.screen
+    );
+    assert!(rx.try_recv().is_err(), "開啟子選單不送任務");
+
+    press(&mut app, &jobs, KeyCode::Esc);
+    assert!(matches!(app.screen, Screen::Settings(_)));
+}
+
+#[test]
+fn sync_menu_opens_the_config_form_and_submits_settings() {
+    let (jobs, rx) = channel();
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::SyncMenu(crate::tui::app::SyncMenuState::default()));
+
+    // 尚未設定：唯一項目是「配置并启用同步」，開啟同步設定表單。
+    press(&mut app, &jobs, KeyCode::Enter);
+    let Screen::SettingsForm(form) = &app.screen else {
+        panic!("应开启同步设置表单：{:?}", app.screen);
+    };
+    assert_eq!(form.kind, FormKind::SyncConfig);
+    assert!(
+        form.value("服务器地址").starts_with("https://"),
+        "伺服器位址应预填预设值"
+    );
+
+    // 伺服器位址已預填，填帳號與應用密碼後送出。
+    press(&mut app, &jobs, KeyCode::Tab);
+    type_text(&mut app, &jobs, "u@example.com");
+    press(&mut app, &jobs, KeyCode::Tab);
+    type_text(&mut app, &jobs, "app-pass");
+    press(&mut app, &jobs, KeyCode::Enter);
+
+    match rx.try_recv() {
+        Ok(Job::SetSyncConfig { config }) => {
+            assert_eq!(config.url, "https://dav.jianguoyun.com/dav/");
+            assert_eq!(config.account, "u@example.com");
+            assert_eq!(config.app_password, "app-pass");
+        }
+        other => panic!("应送出同步设置：{other:?}"),
+    }
+}
+
+#[test]
+fn sync_menu_submits_each_action() {
+    let mut app = App::new(AccessPolicy::Auto);
+    app.sync = crate::task::SyncStateView {
+        configured: true,
+        unavailable: false,
+        url: "https://dav.example/dav/".to_owned(),
+        account: "u@example.com".to_owned(),
+        auto_sync: false,
+    };
+
+    // 已設定：項目依序為 [立即同步, 上傳, 下載, 自動同步, 修改設定, 清除]。
+    let (jobs, rx) = channel();
+    app.set_screen(Screen::SyncMenu(crate::tui::app::SyncMenuState::default()));
+    press(&mut app, &jobs, KeyCode::Enter);
+    assert!(matches!(rx.try_recv(), Ok(Job::SyncNow)));
+
+    let (jobs, rx) = channel();
+    press(&mut app, &jobs, KeyCode::Down);
+    press(&mut app, &jobs, KeyCode::Enter);
+    assert!(matches!(rx.try_recv(), Ok(Job::SyncPush)));
+
+    let (jobs, rx) = channel();
+    press(&mut app, &jobs, KeyCode::Down);
+    press(&mut app, &jobs, KeyCode::Enter);
+    assert!(matches!(rx.try_recv(), Ok(Job::SyncPull)));
+
+    // 自動同步：目前為關，切換後送出「開」。
+    let (jobs, rx) = channel();
+    press(&mut app, &jobs, KeyCode::Down);
+    press(&mut app, &jobs, KeyCode::Enter);
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(Job::SetSyncAuto { enabled: true })
+    ));
+
+    // 修改伺服器設定：開啟預填現有值的表單。
+    let (jobs, _rx) = channel();
+    press(&mut app, &jobs, KeyCode::Down);
+    press(&mut app, &jobs, KeyCode::Enter);
+    let Screen::SettingsForm(form) = &app.screen else {
+        panic!("应开启同步设置表单：{:?}", app.screen);
+    };
+    assert_eq!(form.value("坚果云账号"), "u@example.com");
+
+    // 清除同步配置。
+    let (jobs, rx) = channel();
+    app.set_screen(Screen::SyncMenu(crate::tui::app::SyncMenuState::default()));
+    for _ in 0..5 {
+        press(&mut app, &jobs, KeyCode::Down);
+    }
+    press(&mut app, &jobs, KeyCode::Enter);
+    assert!(matches!(rx.try_recv(), Ok(Job::ClearSyncConfig)));
+}
+
+/// 同步設定檔讀不開時，子選單只留「清除同步配置」。
+///
+/// 那個狀態下同步與重新設定都會被存儲拒絕（見 `SyncStore::save`）；若畫面仍
+/// 只提供「配置并启用同步」，使用者永遠回不到可用狀態。
+#[test]
+fn unavailable_sync_settings_only_offer_clear() {
+    let mut app = App::new(AccessPolicy::Auto);
+    app.sync = crate::task::SyncStateView {
+        unavailable: true,
+        ..crate::task::SyncStateView::default()
+    };
+
+    // 唯一項目就是清除：上下鍵不會跑出別的動作，enter 送出清除。
+    let (jobs, rx) = channel();
+    app.set_screen(Screen::SyncMenu(crate::tui::app::SyncMenuState::default()));
+    press(&mut app, &jobs, KeyCode::Down);
+    press(&mut app, &jobs, KeyCode::Enter);
+    assert!(matches!(rx.try_recv(), Ok(Job::ClearSyncConfig)));
+}
+
+#[test]
+fn unlock_ctrl_y_opens_the_import_screen() {
+    let (jobs, rx) = channel();
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::Unlock(FormState::unlock()));
+    press_ctrl(&mut app, &jobs, 'y');
+    assert!(
+        matches!(app.screen, Screen::SyncImport(_)),
+        "{:?}",
+        app.screen
+    );
+    assert!(rx.try_recv().is_err(), "開啟導入畫面不送任務");
+
+    // esc 回到解鎖畫面。
+    press(&mut app, &jobs, KeyCode::Esc);
+    assert!(matches!(app.screen, Screen::Unlock(_)));
+}
+
+#[test]
+fn sync_import_tests_and_imports_with_the_entered_settings() {
+    let (jobs, rx) = channel();
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::SyncImport(SyncImportState::new(false)));
+    // 伺服器位址已預填，填入帳號與應用密碼。
+    press(&mut app, &jobs, KeyCode::Tab);
+    type_text(&mut app, &jobs, "u@example.com");
+    press(&mut app, &jobs, KeyCode::Tab);
+    type_text(&mut app, &jobs, "app-pass");
+
+    press_ctrl(&mut app, &jobs, 't');
+    match rx.try_recv() {
+        Ok(Job::SyncTestConnection { .. }) => {}
+        other => panic!("^t 应送出连线测试：{other:?}"),
+    }
+
+    // 處理中：忽略其餘輸入，不重送。
+    press_ctrl(&mut app, &jobs, 's');
+    assert!(rx.try_recv().is_err(), "处理中不应重复送出");
+}
+
+/// 導入會覆寫本機檔案且不留備份：第一次 `enter` 只跳到確認，不送出任務。
+#[test]
+fn sync_import_asks_for_confirmation_before_overwriting() {
+    let (jobs, rx) = channel();
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::SyncImport(SyncImportState::new(false)));
+    press(&mut app, &jobs, KeyCode::Tab);
+    type_text(&mut app, &jobs, "u@example.com");
+    press(&mut app, &jobs, KeyCode::Tab);
+    type_text(&mut app, &jobs, "app-pass");
+
+    // 第一次 enter：只顯示確認，不送出。
+    press(&mut app, &jobs, KeyCode::Enter);
+    assert!(rx.try_recv().is_err(), "确认前不得送出导入任务");
+    let Screen::SyncImport(state) = &app.screen else {
+        panic!("应停留在导入画面：{:?}", app.screen);
+    };
+    assert!(state.confirming, "应进入确认步骤");
+    let (message, tone) = state.message.clone().expect("应显示确认提示");
+    assert!(message.contains("覆写"), "应说明会覆写本机文件：{message}");
+    assert!(message.contains("不保留备份"), "{message}");
+    assert_eq!(tone, Tone::Warning, "确认提示应为警告色");
+
+    // 確認期間不得編輯欄位（設定已驗證過，內容不該再變）。
+    let before = state.form.value("坚果云账号").to_owned();
+    type_text(&mut app, &jobs, "x");
+    let Screen::SyncImport(state) = &app.screen else {
+        panic!("应停留在导入画面");
+    };
+    assert_eq!(state.form.value("坚果云账号"), before, "确认时不应接受输入");
+
+    // 第二次 enter：真的送出導入。
+    press(&mut app, &jobs, KeyCode::Enter);
+    assert!(matches!(rx.try_recv(), Ok(Job::SyncImport { .. })));
+}
+
+/// 確認步驟的 `esc` 回到表單繼續編輯（不離開畫面，已填的設定保留）。
+#[test]
+fn sync_import_confirmation_can_be_cancelled() {
+    let (jobs, rx) = channel();
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::SyncImport(SyncImportState::new(false)));
+    press(&mut app, &jobs, KeyCode::Tab);
+    type_text(&mut app, &jobs, "u@example.com");
+    press(&mut app, &jobs, KeyCode::Tab);
+    type_text(&mut app, &jobs, "app-pass");
+    press(&mut app, &jobs, KeyCode::Enter);
+    press(&mut app, &jobs, KeyCode::Esc);
+
+    let Screen::SyncImport(state) = &app.screen else {
+        panic!("esc 应回到表单而非离开画面：{:?}", app.screen);
+    };
+    assert!(!state.confirming, "应取消确认");
+    assert!(state.message.is_none(), "确认提示应清除");
+    assert_eq!(
+        state.form.value("坚果云账号"),
+        "u@example.com",
+        "设定应保留"
+    );
+    assert!(rx.try_recv().is_err(), "取消确认不得送出任务");
+}
+
+/// 首次設定（本機尚無憑證檔）的確認文字不得說「覆寫」。
+#[test]
+fn sync_import_confirmation_wording_matches_the_source_screen() {
+    let (jobs, _rx) = channel();
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::SyncImport(SyncImportState::new(true)));
+    press(&mut app, &jobs, KeyCode::Tab);
+    type_text(&mut app, &jobs, "u@example.com");
+    press(&mut app, &jobs, KeyCode::Tab);
+    type_text(&mut app, &jobs, "app-pass");
+    press(&mut app, &jobs, KeyCode::Enter);
+
+    let Screen::SyncImport(state) = &app.screen else {
+        panic!("应停留在导入画面");
+    };
+    let (message, _) = state.message.clone().expect("应显示确认提示");
+    assert!(message.contains("写入本机"), "{message}");
+    assert!(
+        !message.contains("覆写"),
+        "首次设定没有东西会被覆写：{message}"
+    );
+}
+
+#[test]
+fn sync_import_reports_validation_errors_in_place() {
+    let (jobs, rx) = channel();
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::SyncImport(SyncImportState::new(false)));
+    // 帳號與應用密碼留空：enter 就地報錯、不送任務。
+    press(&mut app, &jobs, KeyCode::Enter);
+    assert!(rx.try_recv().is_err(), "验证失败不应送出任务");
+    let Screen::SyncImport(state) = &app.screen else {
+        panic!("应停留在导入画面");
+    };
+    assert!(state.message.is_some(), "应就地显示验证错误");
+}
+
+/// 明文 HTTP 會讓 HTTP Basic 的帳號與應用密碼在網路上裸奔：表單就要擋下。
+#[test]
+fn sync_import_rejects_a_plain_http_server_url() {
+    let (jobs, rx) = channel();
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::SyncImport(SyncImportState::new(false)));
+    // 清掉預填的 https 位址，換成明文 http。
+    press_ctrl(&mut app, &jobs, 'u');
+    type_text(&mut app, &jobs, "http://dav.example/dav/");
+    press(&mut app, &jobs, KeyCode::Tab);
+    type_text(&mut app, &jobs, "u@example.com");
+    press(&mut app, &jobs, KeyCode::Tab);
+    type_text(&mut app, &jobs, "app-pass");
+
+    press(&mut app, &jobs, KeyCode::Enter);
+    assert!(rx.try_recv().is_err(), "明文 HTTP 不应送出任务");
+    let Screen::SyncImport(state) = &app.screen else {
+        panic!("应停留在导入画面：{:?}", app.screen);
+    };
+    let (message, tone) = state.message.clone().expect("应就地显示验证错误");
+    assert!(
+        message.contains("https://"),
+        "应指出必须使用 https：{message}"
+    );
+    assert_eq!(tone, Tone::Danger, "验证错误应以错误色显示");
+}
+
+/// 位址帶查詢參數會讓固定檔名被拼進查詢字串、請求打到錯的目標：表單就要擋下。
+#[test]
+fn sync_import_rejects_a_server_url_with_a_query() {
+    let (jobs, rx) = channel();
+    let mut app = App::new(AccessPolicy::Auto);
+    app.set_screen(Screen::SyncImport(SyncImportState::new(false)));
+    press_ctrl(&mut app, &jobs, 'u');
+    type_text(&mut app, &jobs, "https://dav.example/dav/?x=1");
+    press(&mut app, &jobs, KeyCode::Tab);
+    type_text(&mut app, &jobs, "u@example.com");
+    press(&mut app, &jobs, KeyCode::Tab);
+    type_text(&mut app, &jobs, "app-pass");
+
+    press(&mut app, &jobs, KeyCode::Enter);
+    assert!(rx.try_recv().is_err(), "带查询参数的地址不应送出任务");
+    let Screen::SyncImport(state) = &app.screen else {
+        panic!("应停留在导入画面：{:?}", app.screen);
+    };
+    let (message, _) = state.message.clone().expect("应就地显示验证错误");
+    assert!(
+        message.contains("查询参数"),
+        "应指出不得带查询参数：{message}"
+    );
 }
 
 #[test]

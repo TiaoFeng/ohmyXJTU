@@ -25,6 +25,14 @@ pub enum Method {
     Get,
     /// `POST`
     Post,
+    /// `PUT`
+    Put,
+    /// `DELETE`
+    Delete,
+    /// `HEAD`
+    Head,
+    /// `MKCOL`（WebDAV：建立集合）
+    Mkcol,
 }
 
 /// 請求主體。
@@ -37,6 +45,8 @@ pub enum Body {
     Form(Vec<(String, String)>),
     /// `application/json`。
     Json(serde_json::Value),
+    /// 原始位元組（例如 WebDAV 同步的加密文檔）。
+    Bytes(Vec<u8>),
 }
 
 impl fmt::Debug for Body {
@@ -48,6 +58,8 @@ impl fmt::Debug for Body {
                 .finish(),
             // JSON 主體含業務資料與識別碼，只描述型別。
             Self::Json(_) => formatter.write_str("Json(<redacted>)"),
+            // 原始位元組（例如同步的加密文檔）不得印出內容，只輸出長度。
+            Self::Bytes(bytes) => formatter.debug_tuple("Bytes").field(&bytes.len()).finish(),
         }
     }
 }
@@ -100,6 +112,8 @@ pub struct HttpRequest {
     pub timeout: Option<Duration>,
     /// 是否跟隨重定向。
     pub follow_redirects: bool,
+    /// 回應本文大小上限（位元組）；`None` 表示不限制。
+    pub max_body: Option<u64>,
 }
 
 impl HttpRequest {
@@ -112,6 +126,7 @@ impl HttpRequest {
             body: None,
             timeout: None,
             follow_redirects: true,
+            max_body: None,
         }
     }
 
@@ -124,6 +139,7 @@ impl HttpRequest {
             body: None,
             timeout: None,
             follow_redirects: true,
+            max_body: None,
         }
     }
 
@@ -144,6 +160,7 @@ impl HttpRequest {
             body: Some(Body::Form(fields)),
             timeout: None,
             follow_redirects: true,
+            max_body: None,
         }
     }
 
@@ -156,6 +173,59 @@ impl HttpRequest {
             body: Some(Body::Json(value)),
             timeout: None,
             follow_redirects: true,
+            max_body: None,
+        }
+    }
+
+    /// 建立 PUT 請求（原始位元組主體）。
+    pub fn put(url: impl Into<String>, body: impl Into<Vec<u8>>) -> Self {
+        Self {
+            method: Method::Put,
+            url: url.into(),
+            headers: Vec::new(),
+            body: Some(Body::Bytes(body.into())),
+            timeout: None,
+            follow_redirects: true,
+            max_body: None,
+        }
+    }
+
+    /// 建立 DELETE 請求。
+    pub fn delete(url: impl Into<String>) -> Self {
+        Self {
+            method: Method::Delete,
+            url: url.into(),
+            headers: Vec::new(),
+            body: None,
+            timeout: None,
+            follow_redirects: true,
+            max_body: None,
+        }
+    }
+
+    /// 建立 HEAD 請求。
+    pub fn head(url: impl Into<String>) -> Self {
+        Self {
+            method: Method::Head,
+            url: url.into(),
+            headers: Vec::new(),
+            body: None,
+            timeout: None,
+            follow_redirects: true,
+            max_body: None,
+        }
+    }
+
+    /// 建立 `MKCOL` 請求（WebDAV：建立集合；無主體）。
+    pub fn mkcol(url: impl Into<String>) -> Self {
+        Self {
+            method: Method::Mkcol,
+            url: url.into(),
+            headers: Vec::new(),
+            body: None,
+            timeout: None,
+            follow_redirects: true,
+            max_body: None,
         }
     }
 
@@ -168,6 +238,12 @@ impl HttpRequest {
     /// 不跟隨重定向（用於需要觀察狀態碼的探測請求）。
     pub fn no_redirect(mut self) -> Self {
         self.follow_redirects = false;
+        self
+    }
+
+    /// 限制回應本文大小；超過即中止，避免超大回應耗盡記憶體或磁碟。
+    pub fn limit_body(mut self, max_body: u64) -> Self {
+        self.max_body = Some(max_body);
         self
     }
 
@@ -210,6 +286,7 @@ impl fmt::Debug for HttpRequest {
             .field("body", &self.body)
             .field("timeout", &self.timeout)
             .field("follow_redirects", &self.follow_redirects)
+            .field("max_body", &self.max_body)
             .finish()
     }
 }

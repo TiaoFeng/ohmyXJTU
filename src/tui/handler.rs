@@ -11,9 +11,10 @@ use crate::credentials::Secret;
 use crate::domain::todo::{self, SortMode};
 use crate::session::SiteKind;
 use crate::task::Job;
+use crate::tone::Tone;
 use crate::tui::app::{
-    App, FormKind, FormState, LoginScreen, NavItem, Screen, SettingsState, TaskBatchOp,
-    TaskConfirmState, TaskField, TaskMenuKind,
+    App, FormKind, FormState, LoginScreen, NavItem, Screen, SettingsState, SyncImportState,
+    SyncMenuAction, SyncMenuState, TaskBatchOp, TaskConfirmState, TaskField, TaskMenuKind,
 };
 use crate::tui::text::InputLine;
 
@@ -90,6 +91,8 @@ pub fn handle_key(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
             handle_form(app, key, jobs);
         }
         Screen::Settings(_) => handle_settings(app, key, jobs),
+        Screen::SyncMenu(_) => handle_sync_menu(app, key, jobs),
+        Screen::SyncImport(_) => handle_sync_import(app, key, jobs),
         Screen::TermPicker(_) => handle_term_picker(app, key, jobs),
         Screen::TaskMenu(_) => handle_task_menu(app, key),
         Screen::TaskBatchMenu(_) => handle_task_batch_menu(app, key, jobs),
@@ -209,8 +212,8 @@ fn toggle_settings(app: &mut App) {
         return;
     }
     match app.screen {
-        // 設定彈窗已開啟：`^P` 關閉它（相當於 esc）。
-        Screen::Settings(_) => app.set_screen(Screen::Main),
+        // 設定彈窗（含同步子選單）已開啟：`^P` 關閉它（相當於 esc）。
+        Screen::Settings(_) | Screen::SyncMenu(_) => app.set_screen(Screen::Main),
         // 學期選擇器上的 `^P` 是「開啟帳戶設定」，與其他畫面一致；選擇器是
         // 彈窗，被設定畫面取代後可用 `s` 重新開啟（選項記在 `term_options`）。
         // 設定表單與其他彈窗不動：不丟掉進行中的輸入。
@@ -284,6 +287,16 @@ fn handle_form(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
     }
     let kind = app.form_mut().map(|form| form.kind);
 
+    // 「從堅果雲導入」只在首次設定與解鎖畫面提供（`^y`）。
+    if key.modifiers.contains(KeyModifiers::CONTROL)
+        && key.code == KeyCode::Char('y')
+        && matches!(kind, Some(FormKind::Setup | FormKind::Unlock))
+    {
+        let from_setup = matches!(kind, Some(FormKind::Setup));
+        app.set_screen(Screen::SyncImport(SyncImportState::new(from_setup)));
+        return;
+    }
+
     match key.code {
         KeyCode::Esc => {
             if matches!(
@@ -291,6 +304,8 @@ fn handle_form(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
                 Some(FormKind::ChangeAccount | FormKind::ChangePassphrase)
             ) {
                 app.set_screen(Screen::Settings(SettingsState::open(app.access_policy)));
+            } else if matches!(kind, Some(FormKind::SyncConfig)) {
+                app.set_screen(Screen::SyncMenu(SyncMenuState::default()));
             }
         }
         KeyCode::Enter | KeyCode::Char('\n') => controller::submit_form(app, jobs),
@@ -491,6 +506,9 @@ fn handle_settings(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
             SettingsState::PASSPHRASE_INDEX => {
                 app.set_screen(Screen::SettingsForm(FormState::change_passphrase()));
             }
+            SettingsState::SYNC_INDEX => {
+                app.set_screen(Screen::SyncMenu(SyncMenuState::default()));
+            }
             // 訪問模式：enter 提交草稿；未變更或保存中則不送任務。
             _ => {
                 if !state.saving && state.policy_dirty(app.access_policy) {
@@ -507,7 +525,187 @@ fn handle_settings(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
     }
 }
 
+// ── 同步子選單 ───────────────────────────────────────
+
+/// 「坚果云同步」子選單：上下選擇、enter 執行、esc 返回設定。
+fn handle_sync_menu(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
+    // 同上：`Ctrl+K`／`Ctrl+J` 不該移動選取。
+    if has_command_modifier(&key) {
+        return;
+    }
+    let Screen::SyncMenu(mut state) = app.screen else {
+        return;
+    };
+    let actions = SyncMenuAction::items(app.sync.configured, app.sync.unavailable);
+    state.index = state.index.min(actions.len().saturating_sub(1));
+
+    match key.code {
+        KeyCode::Esc => app.set_screen(Screen::Settings(SettingsState::open(app.access_policy))),
+        KeyCode::Up | KeyCode::Char('k') => {
+            state.index = if state.index == 0 {
+                actions.len() - 1
+            } else {
+                state.index - 1
+            };
+            app.set_screen(Screen::SyncMenu(state));
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            state.index = (state.index + 1) % actions.len();
+            app.set_screen(Screen::SyncMenu(state));
+        }
+        KeyCode::Enter => {
+            let action = actions[state.index];
+            app.set_screen(Screen::SyncMenu(state));
+            run_sync_action(app, jobs, action);
+        }
+        _ => {}
+    }
+}
+
+/// 執行同步子選單的項目。
+fn run_sync_action(app: &mut App, jobs: &Sender<Job>, action: SyncMenuAction) {
+    match action {
+        // 尚未設定與修改設定都開啟同一個表單（後者預填現有值）。
+        SyncMenuAction::Configure | SyncMenuAction::EditConfig => {
+            app.set_screen(Screen::SettingsForm(FormState::sync_config(&app.sync)));
+        }
+        SyncMenuAction::SyncNow => {
+            let _ = jobs.send(Job::SyncNow);
+        }
+        SyncMenuAction::Push => {
+            let _ = jobs.send(Job::SyncPush);
+        }
+        SyncMenuAction::Pull => {
+            let _ = jobs.send(Job::SyncPull);
+        }
+        SyncMenuAction::ToggleAuto => {
+            let enabled = !app.sync.auto_sync;
+            let _ = jobs.send(Job::SetSyncAuto { enabled });
+            if enabled {
+                // 剛開啟時先對齊一次：否則要等到下一次任務變更才會上傳，期間本機
+                // 既有的變更（例如剛才改過的口令）不會進到雲端。
+                let _ = jobs.send(Job::SyncAuto);
+            }
+        }
+        SyncMenuAction::Clear => {
+            let _ = jobs.send(Job::ClearSyncConfig);
+        }
+    }
+}
+
 // ── 主畫面 ───────────────────────────────────────────
+
+/// 「從堅果雲導入」：輸入設定、測試連線、確認後導入。
+fn handle_sync_import(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {
+    let control = key.modifiers.contains(KeyModifiers::CONTROL);
+    let (busy, from_setup, confirming) = match &app.screen {
+        Screen::SyncImport(state) => (state.busy, state.from_setup, state.confirming),
+        _ => return,
+    };
+    if busy {
+        return;
+    }
+
+    // 確認步驟：導入會覆寫本機檔案且不保留備份，因此第一次 `enter` 只跳到這裡，
+    // 再按一次才真的下載。確認期間不做輸入編輯（設定已驗證過，內容不會改變）。
+    if confirming {
+        if (control && key.code == KeyCode::Char('s'))
+            || matches!(key.code, KeyCode::Enter | KeyCode::Char('\n'))
+        {
+            submit_sync_import(app, jobs, false);
+        } else if key.code == KeyCode::Esc {
+            // 回到表單繼續編輯（不離開畫面，已填的設定保留）。
+            if let Screen::SyncImport(state) = &mut app.screen {
+                state.confirming = false;
+                state.message = None;
+            }
+        }
+        return;
+    }
+
+    if control && key.code == KeyCode::Char('t') {
+        submit_sync_import(app, jobs, true);
+        return;
+    }
+    if (control && key.code == KeyCode::Char('s'))
+        || matches!(key.code, KeyCode::Enter | KeyCode::Char('\n'))
+    {
+        confirm_sync_import(app, from_setup);
+        return;
+    }
+    if key.code == KeyCode::Esc {
+        app.set_screen(if from_setup {
+            Screen::Setup(FormState::setup())
+        } else {
+            Screen::Unlock(FormState::unlock())
+        });
+        return;
+    }
+
+    let Screen::SyncImport(state) = &mut app.screen else {
+        return;
+    };
+    match key.code {
+        KeyCode::Tab | KeyCode::Down => state.form.focus_next(),
+        KeyCode::BackTab | KeyCode::Up => state.form.focus_previous(),
+        _ => {
+            if !control && let Some(field) = state.form.focused_mut() {
+                edit_line(&mut field.value, key);
+            }
+        }
+    }
+}
+
+/// 進入導入確認步驟：先驗證設定，通過才顯示覆寫警告（失敗就地顯示錯誤）。
+///
+/// 送出任務延後到使用者再按一次 `enter`——雲端內容會覆寫本機檔案且不保留備份，
+/// 而誤導入會讓本機仍可用的憑證（甚至唯一一份密碼）消失。
+fn confirm_sync_import(app: &mut App, from_setup: bool) {
+    let Screen::SyncImport(state) = &mut app.screen else {
+        return;
+    };
+    if let Err(message) = controller::sync_config_from_form(&state.form) {
+        state.message = Some((message, Tone::Danger));
+        return;
+    }
+    state.confirming = true;
+    state.message = Some((import_confirm_text(from_setup), Tone::Warning));
+}
+
+/// 導入的確認文字。
+///
+/// 首次設定時本機還沒有憑證檔（這個畫面只有在該檔案不存在時才從 `Setup` 進入），
+/// 因此不該說「覆寫」；其餘情況本機的憑證與任務檔都會被雲端內容取代。
+fn import_confirm_text(from_setup: bool) -> String {
+    let action = if from_setup {
+        "将从坚果云写入本机凭证与任务文件"
+    } else {
+        "将用云端内容覆写本机的凭证与任务文件"
+    };
+    format!("{action}（不保留备份），完成后需重新输入加密口令解锁。按 enter 确认 · esc 返回")
+}
+
+/// 由導入表單組出設定並送出測試或導入任務；驗證失敗就地顯示。
+fn submit_sync_import(app: &mut App, jobs: &Sender<Job>, test: bool) {
+    let Screen::SyncImport(state) = &mut app.screen else {
+        return;
+    };
+    let config = match controller::sync_config_from_form(&state.form) {
+        Ok(config) => config,
+        Err(message) => {
+            state.message = Some((message, Tone::Danger));
+            return;
+        }
+    };
+    state.busy = true;
+    state.message = None;
+    let job = if test {
+        Job::SyncTestConnection { config }
+    } else {
+        Job::SyncImport { config }
+    };
+    let _ = jobs.send(job);
+}
 
 /// 學期選擇器（作業頁）：上下選擇、enter 確認、esc 取消。
 fn handle_term_picker(app: &mut App, key: KeyEvent, jobs: &Sender<Job>) {

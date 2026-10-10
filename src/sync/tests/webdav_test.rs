@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 
-use super::{Precondition, RemoteMeta, WebDav, normalize_etag};
+use super::{MAX_RESPONSE_BYTES, Precondition, RemoteMeta, WebDav, normalize_etag};
 use crate::error::AppError;
 use crate::http::fake::FakeClient;
 use crate::http::{HttpResponse, Method};
@@ -265,4 +265,71 @@ fn debug_does_not_leak_credentials() {
     assert!(!text.contains("app-pass"), "{text}");
     let encoded = base64::engine::general_purpose::STANDARD.encode(b"user@example.com:app-pass");
     assert!(!text.contains(&encoded), "{text}");
+}
+
+/// 每個請求都套上回應大小上限。
+///
+/// `PUT`／`DELETE`／`HEAD`／`MKCOL` 的回應本文用不到，卻一樣會被讀進記憶體；
+/// 沒有上限就等於讓伺服器決定本程序要配置多少記憶體。
+#[test]
+fn every_request_caps_the_response_body() {
+    let (client, dav) = endpoint(vec![
+        response(200, &[], b""),
+        response(201, &[], b""),
+        response(204, &[], b""),
+        response(201, &[], b""),
+    ]);
+    dav.head("f.vault").expect("HEAD 应成功");
+    dav.put("f.vault", b"x", Precondition::Any)
+        .expect("PUT 应成功");
+    dav.delete("f.vault").expect("DELETE 应成功");
+    dav.ensure_folder().expect("MKCOL 应成功");
+
+    assert_eq!(client.requests().len(), 4);
+    for request in client.requests() {
+        assert_eq!(
+            request.max_body,
+            Some(MAX_RESPONSE_BYTES),
+            "{:?} 应限制回应大小",
+            request.method
+        );
+    }
+}
+
+/// 錯誤訊息裡的網址去 userinfo 與查詢串。
+///
+/// 使用者可能直接貼上帶憑證的 WebDAV 連線網址（`https://帳號:密碼@主機/`），
+/// 而這些訊息會顯示在畫面上並留在事件與底欄。
+#[test]
+fn error_messages_redact_the_server_url() {
+    let client = Arc::new(FakeClient::new(vec![response(500, &[], b"")]));
+    let dav = WebDav::new(
+        client,
+        "https://acct:secret-pass@dav.example/dav?token=abc",
+        "acct",
+        "app-pass",
+    );
+    let text = dav.head("f.vault").expect_err("500 应报错").to_string();
+    assert!(text.contains("500"), "{text}");
+    assert!(text.contains("dav.example"), "{text}");
+    assert!(!text.contains("secret-pass"), "{text}");
+    assert!(!text.contains("token=abc"), "{text}");
+
+    // PUT／MKCOL 路徑（PUT 404 → MKCOL 404）同樣去識別化。
+    let client = Arc::new(FakeClient::new(vec![
+        response(404, &[], b""),
+        response(404, &[], b""),
+    ]));
+    let dav = WebDav::new(
+        client,
+        "https://acct:secret-pass@dav.example/dav",
+        "acct",
+        "app-pass",
+    );
+    let text = dav
+        .put("f.vault", b"x", Precondition::Any)
+        .expect_err("无法建立目录应报错")
+        .to_string();
+    assert!(text.contains("MKCOL"), "{text}");
+    assert!(!text.contains("secret-pass"), "{text}");
 }

@@ -14,7 +14,7 @@ use base64::Engine as _;
 use zeroize::Zeroizing;
 
 use crate::error::{AppError, AppResult};
-use crate::http::{HttpClient, HttpRequest, HttpResponse};
+use crate::http::{HttpClient, HttpRequest, HttpResponse, redacted_url};
 
 /// 堅果雲 WebDAV 的預設伺服器位址。
 pub const DEFAULT_BASE: &str = "https://dav.jianguoyun.com/dav/";
@@ -22,11 +22,13 @@ pub const DEFAULT_BASE: &str = "https://dav.jianguoyun.com/dav/";
 /// 連線測試用的探測檔名（與同步檔案不衝突）。
 const PROBE_FILE: &str = "ohmyXJTU-probe.tmp";
 
-/// 單一遠端檔案下載的大小上限（8 MiB）。
+/// 單一 WebDAV 回應的大小上限（8 MiB）。
 ///
 /// 同步的容器（加密後的憑證／任務檔）只有數 KB；設上限是為了避免來歷不明或被
-/// 入侵的 WebDAV 伺服器回傳超大內容，耗盡記憶體或塞爆磁碟。
-const MAX_DOWNLOAD_BYTES: u64 = 8 * 1024 * 1024;
+/// 入侵的 WebDAV 伺服器回傳超大內容，耗盡記憶體或塞爆磁碟。**每個**請求都套用
+/// 這個上限（見 [`WebDav::send`]）：`PUT`／`DELETE`／`HEAD`／`MKCOL` 的回應本文
+/// 雖然用不到，仍然會被客戶端讀進記憶體。
+const MAX_RESPONSE_BYTES: u64 = 8 * 1024 * 1024;
 
 /// 遠端子目錄名：所有同步檔案都放在 `<伺服器位址>/ohmyXJTU/` 之下。
 ///
@@ -126,7 +128,8 @@ impl WebDav {
             200..=299 | 405 => Ok(()),
             401 | 403 => Err(AppError::WebDavAuth),
             other => Err(AppError::webdav(format!(
-                "无法建立远端目录（MKCOL {url} → {other}）：请确认服务器地址与账户权限（坚果云默认为 https://dav.jianguoyun.com/dav/）"
+                "无法建立远端目录（MKCOL {} → {other}）：请确认服务器地址与账户权限（坚果云默认为 https://dav.jianguoyun.com/dav/）",
+                redacted_url(&url)
             ))),
         }
     }
@@ -146,7 +149,7 @@ impl WebDav {
     /// 下載遠端檔案；不存在時回 `None`。
     pub fn get(&self, file: &str) -> AppResult<Option<(Vec<u8>, RemoteMeta)>> {
         let url = self.url_for(file);
-        let response = self.send(HttpRequest::get(url.clone()).limit_body(MAX_DOWNLOAD_BYTES))?;
+        let response = self.send(HttpRequest::get(url.clone()))?;
         match response.status {
             200..=299 => Ok(Some((response.body.clone(), meta_from(&response, true)))),
             404 | 409 | 410 => Ok(None),
@@ -205,7 +208,8 @@ impl WebDav {
             401 | 403 => Err(AppError::WebDavAuth),
             412 => Err(AppError::WebDavConflict),
             404 | 409 => Err(AppError::webdav(format!(
-                "服务器拒绝写入（PUT {url} → {status}）：请确认服务器地址正确、目录可写，且应用密码未限制目录（坚果云默认为 https://dav.jianguoyun.com/dav/）"
+                "服务器拒绝写入（PUT {} → {status}）：请确认服务器地址正确、目录可写，且应用密码未限制目录（坚果云默认为 https://dav.jianguoyun.com/dav/）",
+                redacted_url(url)
             ))),
             other => Err(unexpected_status("PUT", url, other)),
         }
@@ -222,8 +226,16 @@ impl WebDav {
         }
     }
 
-    /// 送出請求：一律附上 `Authorization`，且不跟隨重定向（避免被帶到其他主機）。
-    fn send(&self, request: HttpRequest) -> AppResult<HttpResponse> {
+    /// 送出請求：一律附上 `Authorization`、限制回應大小，且不跟隨重定向
+    /// （避免被帶到其他主機）。
+    ///
+    /// 回應本文只有 `GET` 用得到，其餘方法只讀狀態碼與標頭；但**所有**請求都必須
+    /// 有大小上限，否則惡意／被入侵的伺服器只要在 `PUT`／`DELETE`／`HEAD` 的回應
+    /// 塞入超大本文，就能耗盡本程序記憶體。呼叫端已指定上限時不覆寫。
+    fn send(&self, mut request: HttpRequest) -> AppResult<HttpResponse> {
+        if request.max_body.is_none() {
+            request = request.limit_body(MAX_RESPONSE_BYTES);
+        }
         self.client.send(
             request
                 .header("Authorization", self.auth.as_str())
@@ -242,9 +254,15 @@ impl std::fmt::Debug for WebDav {
     }
 }
 
-/// 非預期的 HTTP 狀態碼（附方法與網址，方便診斷）。
+/// 非預期的 HTTP 狀態碼（附方法與網址，方便診斷；網址去 userinfo 與查詢串）。
+///
+/// 網址由使用者填寫，可能夾帶 userinfo 或查詢參數憑證，因此一律經
+/// [`redacted_url`] 去識別化，與其他網路錯誤訊息一致。
 fn unexpected_status(method: &str, url: &str, status: u16) -> AppError {
-    AppError::webdav(format!("服务器返回异常状态码 {status}（{method} {url}）"))
+    AppError::webdav(format!(
+        "服务器返回异常状态码 {status}（{method} {}）",
+        redacted_url(url)
+    ))
 }
 
 /// 確保伺服器位址以 `/` 結尾。

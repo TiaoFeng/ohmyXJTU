@@ -266,3 +266,57 @@ fn changing_the_target_drops_the_records() {
     assert_eq!(reloaded.config().unwrap().account, "other@example.com");
     assert_eq!(reloaded.record(SyncFile::Tasks).version, None);
 }
+
+/// 鎖定（下載後重新鎖定／會話停用）要一併丟棄記憶體中的設定與記錄。
+///
+/// `SyncConfig` 帶著堅果雲應用密碼，金鑰都丟了就沒有留著它的理由；設定檔仍在
+/// 磁碟上，重新解鎖時會再讀回來。
+#[test]
+fn lock_drops_the_config_and_the_key() {
+    let dir = tempdir().unwrap();
+    let mut store = new_store(&dir);
+    store.init(PASSPHRASE).unwrap();
+    store.set_config(config()).unwrap();
+    let path = dir.path().join("sync.vault");
+    let before = std::fs::read(&path).unwrap();
+
+    store.lock();
+    assert!(store.config().is_none(), "锁定时应丢弃内存中的设定");
+    assert!(
+        matches!(store.set_config(config()), Err(AppError::Crypto(_))),
+        "锁定后不得再写入"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before, "锁定时不得改动原档");
+
+    // 重新解鎖（新工作階段）後讀回設定，寫入恢復。
+    store.init(PASSPHRASE).unwrap();
+    assert!(store.config().is_some(), "重新解锁后应读回设定");
+    store.set_auto_sync(true).unwrap();
+}
+
+/// 金鑰已丟棄時拒絕換鑰：記憶體中的內容已被清空，重新加密落盤會清掉原檔。
+#[test]
+fn rekey_is_refused_after_the_key_was_dropped() {
+    let dir = tempdir().unwrap();
+    let mut store = new_store(&dir);
+    store.init(PASSPHRASE).unwrap();
+    store.set_config(config()).unwrap();
+    let path = dir.path().join("sync.vault");
+    let before = std::fs::read(&path).unwrap();
+
+    store.lock();
+    assert!(
+        matches!(store.rekey("new passphrase"), Err(AppError::Crypto(_))),
+        "锁定后不得换钥"
+    );
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        before,
+        "被拒绝的换钥不得改动原档"
+    );
+
+    // 原檔仍以舊口令可讀。
+    let mut reloaded = new_store(&dir);
+    reloaded.init(PASSPHRASE).unwrap();
+    assert!(reloaded.config().is_some(), "原档应仍可读取");
+}

@@ -299,12 +299,20 @@ impl SyncStore {
     /// 尚未設定同步、也沒有檔案時直接略過：沒有東西要換鑰，也不該憑空建立
     /// 一個 `sync.vault`。存儲不可用（原檔讀不到）時同樣略過：不碰這個檔案，
     /// 也不該讓「修改加密口令」被一個已不可用的同步檔連帶拖垮。
+    ///
+    /// 金鑰已丟棄（工作階段停用或下載後重新鎖定）時**拒絕**：記憶體中的內容
+    /// 同時已被清空，重新加密落盤會把磁碟上的原檔（設定與同步記錄）清掉。
     pub(crate) fn rekey(&mut self, passphrase: &str) -> AppResult<()> {
         if self.unavailable.is_some() {
             return Ok(());
         }
         if self.content.config.is_none() && !self.path.is_file() {
             return Ok(());
+        }
+        if self.sealed.is_none() {
+            return Err(AppError::Crypto(
+                "同步存储已锁定，请重新解锁后再修改口令".to_owned(),
+            ));
         }
         let plaintext = self.serialize()?;
         let (bytes, sealed) = envelope::seal(passphrase, AAD_PREFIX, &plaintext)?;
@@ -320,8 +328,17 @@ impl SyncStore {
         self.unavailable = Some(message);
     }
 
-    /// 丟棄金鑰（工作階段停用時）。
+    /// 丟棄金鑰與記憶體中的設定（工作階段停用、或下載後重新鎖定時）。
+    ///
+    /// 一併清掉記憶體中的設定與記錄：`SyncConfig` 帶著堅果雲應用密碼，金鑰都
+    /// 丟了就沒有留著它的理由；檔案本身還在磁碟上，重新解鎖時 [`Self::init`]
+    /// 會再讀回來。清空之後「鎖定期間不得再寫入」也就成了自然結果——沒有金鑰，
+    /// 也沒有內容可寫（對比只丟金鑰的 [`TaskStore::lock`]，任務內容刻意保留在
+    /// 記憶體，因為它是使用者的資料）。
+    ///
+    /// [`TaskStore::lock`]: crate::task::tasks::store::TaskStore::lock
     pub(crate) fn lock(&mut self) {
+        self.content = SyncFileContent::default();
         self.sealed = None;
     }
 
